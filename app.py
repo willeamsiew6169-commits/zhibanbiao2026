@@ -1725,11 +1725,13 @@ if __name__ == "__main__":
     start_background_saver_once()
     atexit.register(lambda: flush_attendance_to_excel(force=True))
 
+    import os
+
+if __name__ == "__main__":
     print("====================================")
     print("义工签到系统已启动")
-    print("电脑打开：http://127.0.0.1:5000")
-    print("手机/iPad打开：http://电脑IP:5000")
     print(f"管理员 PIN：{ADMIN_PIN}")
     print("====================================")
 
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
