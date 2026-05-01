@@ -5,3 +5,4 @@ qrcode[pil]
 pypinyin
 gunicorn
 Pillow
+lunardate
