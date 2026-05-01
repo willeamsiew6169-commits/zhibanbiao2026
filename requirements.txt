@@ -1,5 +1,7 @@
 Flask
 pandas
 openpyxl
-qrcode
+qrcode[pil]
+pypinyin
 gunicorn
+Pillow
