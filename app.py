@@ -632,6 +632,8 @@ def reading():
 
     return render_template_string(
     html,
+    t=get_text(),
+    attendees=attendees,
     today_records=today_records,
     today_summary=today_summary_records,
     topic_options=topic_options
