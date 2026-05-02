@@ -1441,11 +1441,7 @@ PAGE = """
       <input name="admin_pin" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="{{ t.admin_pin }}" required>
       <button class="btn-admin" type="submit">📊 {{ t.generate_report }}</button>
     </form>
-
-    <!-- 👇 放在这里（form 外） -->
-    <a href="/download_data" style="display:block;margin-top:10px;">
-      📥 下载签到数据
-    </a>
+    
   </div>
 
 <script>
