@@ -1373,7 +1373,7 @@ def build_yearly_summary(vol_df, att_df, year):
     for col in numeric_cols:
         if col in summary.columns:
             summary[col] = pd.to_numeric(summary[col], errors="coerce").fillna(0)
-            
+
     summary = summary.copy()
     # 👉 再做格式
     summary["全年总时数"] = summary["全年总时数"].round(2)
@@ -1384,17 +1384,15 @@ def build_yearly_summary(vol_df, att_df, year):
     summary["全年总时数"] = summary["全年总时数"].fillna(0).round(2)
     summary["总服务时数"] = summary["总服务时数"].fillna(0).round(2)
 
-    # 其余岗位列 / 月份列补0
     protected_cols = ["编号", "姓名", "全年总时数", "总服务时数", "出席率"]
+
     for col in summary.columns:
         if col not in protected_cols:
-            if summary[col].dtype != object:
-                summary[col] = summary[col].fillna(0).astype(int)
-
-    # 出席率
-    summary["出席率"] = summary["全年出席天数"].apply(
-        lambda x: f"{(x / all_activity_days) * 100:.2f}%"
-    )
+            summary[col] = pd.to_numeric(summary[col], errors="coerce").fillna(0).astype(int)
+        # 出席率
+        summary["出席率"] = summary["全年出席天数"].apply(
+            lambda x: f"{(x / all_activity_days) * 100:.2f}%"
+        )
 
     summary = summary.sort_values(by=["编号"]).reset_index(drop=True)
 
@@ -1474,7 +1472,8 @@ def build_year_summary_table(vol_df, att_df, year):
     for col in month_cols + ["Total"]:
         if col not in summary.columns:
             summary[col] = 0
-        summary[col] = summary[col].fillna(0).astype(int)
+
+        summary[col] = pd.to_numeric(summary[col], errors="coerce").fillna(0).astype(int)
 
     summary["开始值班日期"] = summary["开始值班日期"].fillna("")
 
