@@ -21,6 +21,11 @@ from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 cc = OpenCC('t2s')
 
 
+
+REPORT_MONTH = os.getenv("REPORT_MONTH")  # 例如 2026-04
+REPORT_YEAR = os.getenv("REPORT_YEAR")    # 例如 2026
+
+
 DEBUG = False
 REBUILD_ALL_MONTHS = False   # True=重建全年所有有资料月份；False=只生成目标月份
 
@@ -1368,13 +1373,14 @@ def build_yearly_summary(vol_df, att_df, year):
     for col in numeric_cols:
         if col in summary.columns:
             summary[col] = pd.to_numeric(summary[col], errors="coerce").fillna(0)
-
+            
+    summary = summary.copy()
     # 👉 再做格式
     summary["全年总时数"] = summary["全年总时数"].round(2)
     summary["总服务时数"] = summary["总服务时数"].round(2)
 
-    summary["全年出席天数"] = summary["全年出席天数"].fillna(0).astype(int)
-    summary["岗位记录次数"] = summary["岗位记录次数"].fillna(0).astype(int)
+    summary["全年出席天数"] = pd.to_numeric(summary["全年出席天数"], errors="coerce").fillna(0).astype(int)
+    summary["岗位记录次数"] = pd.to_numeric(summary["岗位记录次数"], errors="coerce").fillna(0).astype(int)
     summary["全年总时数"] = summary["全年总时数"].fillna(0).round(2)
     summary["总服务时数"] = summary["总服务时数"].fillna(0).round(2)
 
@@ -3157,10 +3163,31 @@ def import_schedule_to_attendance(att_df, schedule_df):
 # 主程序
 # =========================
 def main():
-    target_year, target_month = detect_target_year_month()
+    # 🔥 优先用网页传进来的参数
+    if REPORT_MONTH:
+        year_str, month_str = REPORT_MONTH.split("-")
+        target_year = int(year_str)
+        target_month = int(month_str)
 
+    elif REPORT_YEAR:
+        target_year = int(REPORT_YEAR)
+        target_month = None  # 年报
+
+    else:
+        # 👉 没传参数，就用今天日期（备用）
+        from datetime import datetime
+        today = datetime.today()
+        target_year = today.year
+        target_month = today.month
+
+    # 👉 下面继续你原本逻辑
     log(f"\n📊 年度处理：{target_year}")
-    log(f"📅 目标月份：{target_month:02d}\n")
+    log(f"\n📊 年度处理：{target_year}")
+
+    if target_month is not None:
+        log(f"📅 目标月份：{target_month:02d}\n")
+    else:
+        log("📅 目标月份：全年\n")
 
     # =====================
     # 1) 主名单
@@ -3364,7 +3391,11 @@ def main():
                 ].dt.month.unique().tolist()
             )
         else:
-            log(f"📅 只生成目标月份月报：{target_year}-{target_month:02d}")
+            if target_month is not None:
+                log(f"📅 只生成目标月份月报：{target_year}-{target_month:02d}")
+            else:
+                log(f"📅 年报模式：不生成指定月报，只生成年报")
+
             has_target_data = (
                 att_export["日期"].notna()
                 & (att_export["日期"].dt.year == target_year)
