@@ -1672,18 +1672,25 @@ def delete_edit():
 
 @app.route("/download_data")
 def download_data():
+    from flask import send_file
     import pandas as pd
-    from flask import Response
+    import io
 
-    # 👉 读取你的签到数据（如果你现在还用 Excel）
-    df = pd.read_excel("attendance.xlsx")
+    # 👉 读取你的签到 Excel
+    df = pd.read_excel(ATTENDANCE_FILE, sheet_name=ATTENDANCE_SHEET)
 
-    csv_data = df.to_csv(index=False)
+    # 👉 写入内存（不用存硬盘）
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='records')
 
-    return Response(
-        csv_data,
-        mimetype="text/csv",
-        headers={"Content-Disposition": "attachment;filename=attendance.csv"}
+    output.seek(0)
+
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name="attendance_cloud.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
 
