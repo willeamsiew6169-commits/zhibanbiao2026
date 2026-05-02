@@ -1879,10 +1879,6 @@ def admin_report():
     <button style="font-size:20px;">📈 下载指定年报</button>
 </form>
 
-<a href="/download_month_report" style="display:block;margin-top:12px;font-size:20px;">
-  📊 下载本月月报
-</a>
-
 <a href="/download_year_report" style="display:block;margin-top:12px;font-size:20px;">
   📈 下载今年年报
 </a>
