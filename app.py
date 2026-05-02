@@ -807,7 +807,34 @@ def reload_attendance_cache() -> None:
     return
 
 def export_data_for_old_report():
-    import pandas as pd
+    
+    # volunteers
+    vol_rows = db_query("""
+        select
+            id as "编号",
+            name as "姓名",
+            status as "状态",
+            phone as "电话号码"
+        from volunteers
+        order by id
+    """, fetchall=True)
+
+    vol_df = pd.DataFrame(vol_rows)
+
+    if not vol_df.empty:
+        vol_df["是否义工"] = "是"
+
+        for col in ["编号", "姓名", "状态", "电话号码", "是否义工"]:
+            if col not in vol_df.columns:
+                vol_df[col] = ""
+
+        vol_df = vol_df[["编号", "姓名", "状态", "电话号码", "是否义工"]]
+
+        vol_df.to_excel(
+            VOLUNTEERS_FILE,
+            index=False,
+            sheet_name=VOLUNTEERS_SHEET
+        )
 
     # attendance
     rows = db_query("""
