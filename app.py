@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import io
 import sys
 import shutil
 import threading
@@ -24,6 +25,7 @@ import psycopg2
 from psycopg2.pool import SimpleConnectionPool
 from psycopg2.extras import RealDictCursor
 from io import BytesIO
+from flask import send_file
 from pypinyin import lazy_pinyin
 from datetime import datetime, date
 from pathlib import Path
@@ -534,6 +536,10 @@ def reading():
 
     <a href="/"><button>⬅ 返回签到首页</button></a>
 
+    <a href="/download_reading">
+        <button style="background:#2196F3;">📥 下载报表</button>
+    </a>
+
     <div class="card">
         <h2>{{ t.bhff_record_title }}</h2>
 
@@ -800,6 +806,64 @@ def safe_save_workbook(wb, path: Path) -> None:
 def reload_attendance_cache() -> None:
     return
 
+def export_data_for_old_report():
+    import pandas as pd
+
+    # attendance
+    rows = db_query("""
+        select *
+        from attendance
+        order by date, start_time
+    """, fetchall=True)
+
+    att_df = pd.DataFrame(rows)
+
+    if not att_df.empty:
+        att_df = att_df.rename(columns={
+            "date": "日期",
+            "volunteer_id": "编号",
+            "name": "姓名",
+            "signup": "报名",
+            "signin": "签到",
+            "role": "岗位",
+            "start_time": "开始时间",
+            "end_time": "结束时间",
+            "hours": "时数",
+            "remark": "备注",
+        })
+
+        for col in ["日期", "编号", "姓名", "报名", "签到", "岗位", "开始时间", "结束时间", "时数", "备注"]:
+            if col not in att_df.columns:
+                att_df[col] = ""
+
+        att_df = att_df[["日期", "编号", "姓名", "报名", "签到", "岗位", "开始时间", "结束时间", "时数", "备注"]]
+        att_df.to_excel(ATTENDANCE_FILE, index=False, sheet_name=ATTENDANCE_SHEET)
+
+    # reading
+    reading_rows = db_query("""
+        select *
+        from reading
+        order by date, time
+    """, fetchall=True)
+
+    reading_df = pd.DataFrame(reading_rows)
+
+    if not reading_df.empty:
+        reading_df = reading_df.rename(columns={
+            "date": "日期",
+            "name": "姓名",
+            "identity": "身份",
+            "topic": "主题",
+            "session": "场次",
+            "time": "时间",
+        })
+
+        for col in ["日期", "姓名", "身份", "主题", "场次", "时间"]:
+            if col not in reading_df.columns:
+                reading_df[col] = ""
+
+        reading_df = reading_df[["日期", "姓名", "身份", "主题", "场次", "时间"]]
+        reading_df.to_excel(READING_FILE, index=False)
 
 # =========================
 # 4) Excel 读取 / 建立
@@ -1123,12 +1187,12 @@ def delete_record(row_number: int) -> tuple[bool, str]:
 
 
 def run_report_script() -> tuple[bool, str]:
-    flush_attendance_to_excel(force=True)
-
     if not REPORT_SCRIPT.exists():
         return False, f"找不到报表脚本：{REPORT_SCRIPT.name}"
 
     try:
+        export_data_for_old_report()
+
         result = subprocess.run(
             [sys.executable, str(REPORT_SCRIPT)],
             cwd=str(BASE_DIR),
@@ -1136,14 +1200,31 @@ def run_report_script() -> tuple[bool, str]:
             text=True,
             timeout=300
         )
+
         if result.returncode != 0:
             err = result.stderr.strip() or result.stdout.strip() or "未知错误"
             return False, "生成报表失败：" + err[-500:]
+
         return True, "报表已生成。"
+
     except subprocess.TimeoutExpired:
         return False, "生成报表超时，请用 BAT 手动生成。"
     except Exception as e:
         return False, f"生成报表失败：{e}"
+    
+def get_latest_report_file():
+    reports_dir = BASE_DIR / "reports"
+
+    if not reports_dir.exists():
+        return None
+
+    files = list(reports_dir.glob("*.xlsx"))
+    if not files:
+        return None
+
+    # 按修改时间排序，拿最新
+    latest = max(files, key=lambda f: f.stat().st_mtime)
+    return latest
 
 
 # =========================
@@ -1706,6 +1787,47 @@ def download_data():
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+@app.route("/download_reading")
+def download_reading():
+    
+    rows = db_query("""
+        select *
+        from reading
+        order by date, time
+    """, fetchall=True)
+
+    if not rows:
+        return "没有数据"
+
+    df = pd.DataFrame(rows)
+
+    # 改中文列名
+    df = df.rename(columns={
+        "date": "日期",
+        "name": "姓名",
+        "identity": "身份",
+        "topic": "主题",
+        "session": "场次",
+        "time": "时间"
+    })
+
+    # 只保留需要的列
+    df = df[["日期", "姓名", "身份", "主题", "场次", "时间"]]
+
+    output = io.BytesIO()
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="白话佛法记录")
+
+    output.seek(0)
+
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name="reading_report.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
 
 @app.route("/admin_report", methods=["POST"])
 def admin_report():
@@ -1715,46 +1837,56 @@ def admin_report():
         flash("管理员 PIN 不正确。", "bad")
         return redirect(url_for("index"))
 
-    # 👉 今日签到码
     code = get_today_code()
-
-    # 👉 判断操作（报表）
     action = request.form.get("action")
 
-    # 👉 如果有按报表按钮
+    # 🔥 这里改
     if action == "monthly":
-        # 你原本生成月报的代码放这里
-        return "月报生成完成"
+        return redirect(url_for("download_month_report"))
 
     elif action == "yearly":
-        # 你原本生成年报的代码放这里
-        return "年报生成完成"
+        return redirect(url_for("download_year_report"))
 
-    # 👉 默认显示管理员页面
     return f"""
-    <h1>🔐 管理员工具</h1>
+<h1>🔐 管理员工具</h1>
 
-    <h2>今日签到码</h2>
-    <div style="font-size:60px;font-weight:bold;color:#dc3545;">
-        {code}
-    </div>
+<h2>今日签到码</h2>
+<div style="font-size:60px;font-weight:bold;color:#dc3545;">
+    {code}
+</div>
 
-    <p>⚠ 请只写在观音堂现场，不要发群</p>
+<p>⚠ 请只写在观音堂现场，不要发群</p>
 
-    <a href="/download_data" style="display:block;margin-top:12px;font-size:20px;">
-  📥 下载签到数据
-    </a>
+<a href="/download_data" style="display:block;margin-top:12px;font-size:20px;">
+    📥 下载签到数据
+</a>
 
-    <hr>
+<hr>
 
-    <h2>报表工具</h2>
+<h2>报表工具</h2>
 
-    <form method="post" action="/admin_report">
-        <input type="hidden" name="admin_pin" value="{pin}">
-        <button name="action" value="monthly">生成月报</button>
-        <button name="action" value="yearly">生成年报</button>
-    </form>
-    """
+<form method="get" action="/download_month_report">
+    <label>选择月份：</label>
+    <input type="month" name="month" required style="font-size:18px;">
+    <button style="font-size:20px;">📊 下载指定月报</button>
+</form>
+
+<br>
+
+<form method="get" action="/download_year_report">
+    <label>选择年份：</label>
+    <input type="number" name="year" placeholder="2026" required style="font-size:18px;">
+    <button style="font-size:20px;">📈 下载指定年报</button>
+</form>
+
+<a href="/download_month_report" style="display:block;margin-top:12px;font-size:20px;">
+  📊 下载本月月报
+</a>
+
+<a href="/download_year_report" style="display:block;margin-top:12px;font-size:20px;">
+  📈 下载今年年报
+</a>
+"""
 
 
 @app.route("/api/volunteer/<volunteer_id>")
@@ -1768,6 +1900,62 @@ def api_volunteer(volunteer_id):
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
+
+@app.route("/download_month_report")
+def download_month_report():
+    from flask import request, send_file
+
+    selected_month = request.args.get("month")
+
+    if not selected_month:
+        return "请选择月份"
+
+    # 👉 传给 zhibanbiao2026
+    os.environ["REPORT_MONTH"] = selected_month
+
+    ok, msg = run_report_script()
+
+    if not ok:
+        return msg
+
+    latest = get_latest_report_file()
+
+    if not latest:
+        return "找不到报表文件"
+
+    return send_file(
+        latest,
+        as_attachment=True,
+        download_name=latest.name
+    )
+
+@app.route("/download_year_report")
+def download_year_report():
+    from flask import request, send_file
+
+    selected_year = request.args.get("year")
+
+    if not selected_year:
+        return "请输入年份"
+
+    # 👉 传给报表脚本
+    os.environ["REPORT_YEAR"] = selected_year
+
+    ok, msg = run_report_script()
+
+    if not ok:
+        return msg
+
+    latest = get_latest_report_file()
+
+    if not latest:
+        return "找不到报表文件"
+
+    return send_file(
+        latest,
+        as_attachment=True,
+        download_name=latest.name
+    )
 
 # =========================
 # 8) 修改 PIN
