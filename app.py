@@ -1215,8 +1215,8 @@ PAGE = """
 
       {% if today_code_enabled %}
       <div>
-        <label>今日签到码</label>
-        <input type="text" name="today_code" placeholder="请输入现场今日码" required>
+        <label>{{ t.today_code }}</label>
+        <input type="text" name="today_code" placeholder="{{ t.today_code_placeholder }}" required>
       </div>
       {% endif %}
 
