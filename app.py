@@ -1665,6 +1665,29 @@ def delete_edit():
     flash(msg, "ok" if ok else "bad")
     return redirect(url_for("index"))
 
+@app.route("/admin/today-code", methods=["GET", "POST"])
+def admin_today_code():
+    if request.method == "POST":
+        pin = request.form.get("pin", "").strip()
+
+        if pin != ADMIN_PIN:
+            return "PIN错误", 403
+
+        code = get_today_code()
+
+        return f"""
+        <h1>今日签到码</h1>
+        <h2 style="font-size:60px;">{code}</h2>
+        <p>⚠ 请只写在观音堂现场，不要发群</p>
+        """
+
+    return """
+    <h1>管理员查看今日码</h1>
+    <form method="post">
+        <input type="password" name="pin" placeholder="输入管理员PIN">
+        <button type="submit">查看今日码</button>
+    </form>
+    """
 
 @app.route("/admin_report", methods=["POST"])
 def admin_report():
