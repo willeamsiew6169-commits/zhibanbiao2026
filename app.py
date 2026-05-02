@@ -896,10 +896,19 @@ def find_volunteer(volunteer_id: str):
     """, (volunteer_id,), fetchone=True)
 
 
-def verify_pin_for_volunteer(volunteer: dict, pin: str) -> bool:
-    saved = str(volunteer.get("PIN") or "").strip()
-    typed = str(pin or "").strip()
-    return bool(saved) and saved == typed
+def verify_pin_for_volunteer(volunteer, pin):
+    real_pin = str(volunteer.get("PIN") or "").strip()
+
+    # 如果数据库有 PIN → 用它
+    if real_pin:
+        return pin == real_pin
+
+    # 没有 PIN → 用电话后4位
+    phone = str(volunteer.get("电话号码") or "").strip()
+    if len(phone) >= 4:
+        return pin == phone[-4:]
+
+    return False
 
 
 def _load_attendance_rows_from_excel() -> list[dict]:
