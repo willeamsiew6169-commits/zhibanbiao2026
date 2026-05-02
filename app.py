@@ -1304,13 +1304,18 @@ PAGE = """
 
   <div class="card">
     <h2>🔐 {{ t.admin_tools }}</h2>
+
     <form method="post" action="{{ url_for('admin_report') }}">
       <label>{{ t.admin_pin }}</label>
       <input name="admin_pin" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="{{ t.admin_pin }}" required>
       <button class="btn-admin" type="submit">📊 {{ t.generate_report }}</button>
     </form>
+
+    <!-- 👇 放在这里（form 外） -->
+    <a href="/download_data" style="display:block;margin-top:10px;">
+      📥 下载签到数据
+    </a>
   </div>
-</div>
 
 <script>
 let currentVolunteerName = '';
@@ -1664,6 +1669,22 @@ def delete_edit():
     ok, msg = delete_record(row_number)
     flash(msg, "ok" if ok else "bad")
     return redirect(url_for("index"))
+
+@app.route("/download_data")
+def download_data():
+    import pandas as pd
+    from flask import Response
+
+    # 👉 读取你的签到数据（如果你现在还用 Excel）
+    df = pd.read_excel("attendance.xlsx")
+
+    csv_data = df.to_csv(index=False)
+
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment;filename=attendance.csv"}
+    )
 
 
 @app.route("/admin_report", methods=["POST"])
