@@ -59,7 +59,7 @@ pool = SimpleConnectionPool(
 def db_query(sql, params=None, fetchone=False, fetchall=False):
     conn = pool.getconn()
     try:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, params or ())
             result = None
 
@@ -72,6 +72,41 @@ def db_query(sql, params=None, fetchone=False, fetchall=False):
             return result
     finally:
         pool.putconn(conn)
+
+
+def get_today_reading_rows():
+    rows = db_query("""
+        select *
+        from reading
+        where date = %s
+        order by id desc
+    """, (now_date_str(),), fetchall=True)
+
+    return rows or []
+
+def add_reading_record(name, identity, topic, session, time_text):
+    db_query("""
+        insert into reading
+        (date, name, identity, topic, session, time)
+        values (%s, %s, %s, %s, %s, %s)
+    """, (
+        now_date_str(),
+        name,
+        identity,
+        topic,
+        session,
+        time_text
+    ))
+
+def get_reading_topics():
+    rows = db_query("""
+        select distinct topic
+        from reading
+        where topic is not null and topic <> ''
+        order by topic
+    """, fetchall=True)
+
+    return [r["topic"] for r in rows if r.get("topic")]
 
 # =========================
 # 1) 基本设定
@@ -357,16 +392,13 @@ def get_today_attendees():
 # =========================
 @app.route("/reading", methods=["GET", "POST"])
 def reading():
-    ensure_reading_file()
-
     attendees = get_today_attendees()
-    today = get_today()
+    today = now_date_str()
 
     if request.method == "POST":
         topic = request.form.get("topic", "").strip()
         names = request.form.getlist("names")
         session = request.form.get("session", "").strip()
-        extra_names = request.form.get("extra_names", "").strip()
         extra_text = request.form.get("extra_names", "").strip()
 
         extra_names = []
@@ -375,80 +407,63 @@ def reading():
                 extra_text = extra_text.replace(sep, " ")
             extra_names = [x.strip() for x in extra_text.split(" ") if x.strip()]
 
-        if extra_names:
-            extra_list = [x.strip() for x in extra_names.split(",") if x.strip()]
-            names.extend(extra_list)
-
-        if len(names) < 2:
-            return "❌ 至少需要2位义工共修<br><a href='/reading'>返回</a>"
+        if len(names) + len(extra_names) < 2:
+            return "❌ 至少需要2位共修人员<br><a href='/reading'>返回</a>"
 
         if not topic:
             return "❌ 请输入主题<br><a href='/reading'>返回</a>"
 
-        df = pd.read_excel(READING_FILE)
-
-        for col in ["日期", "姓名", "主题", "时间"]:
-            if col not in df.columns:
-                df[col] = ""
-
         now_time = datetime.now(MY_TZ).strftime("%I:%M %p").lstrip("0")
-        new_rows = []
-
-        today_attendees = set(get_today_attendees())
 
         for name in names:
-            new_rows.append({
-                "日期": today,
-                "姓名": name,
-                "身份": "义工",
-                "主题": topic,
-                "场次": session,
-                "时间": now_time,
-            })
+            add_reading_record(
+                name=name,
+                identity="义工",
+                topic=topic,
+                session=session,
+                time_text=now_time
+            )
 
         for name in extra_names:
-            new_rows.append({
-                "日期": today,
-                "姓名": name,
-                "身份": "佛友",
-                "主题": topic,
-                "场次": session,
-                "时间": now_time,
-            })
-
-        if new_rows:
-            df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
-
-            # ✅ reading.xlsx 自动按日期排序：最早 → 最近
-            df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
-            df = df.sort_values(by="日期", ascending=True)
-            df["日期"] = df["日期"].dt.strftime("%Y-%m-%d")
-
-            df.to_excel(READING_FILE, index=False)
-            beautify_reading_excel()
+            add_reading_record(
+                name=name,
+                identity="佛友",
+                topic=topic,
+                session=session,
+                time_text=now_time
+            )
 
         return redirect(url_for("reading"))
 
-    df = pd.read_excel(READING_FILE)
-    for col in ["日期", "姓名", "身份", "主题", "场次", "时间"]:
-        if col not in df.columns:
-            df[col] = ""
+    rows = get_today_reading_rows()
 
-    df["日期"] = df["日期"].astype(str)
-    today_df = df[df["日期"] == today].copy()
-    today_records = today_df.to_dict("records")
+    today_records = []
+    for r in rows:
+        today_records.append({
+            "id": r.get("id"),
+            "日期": r.get("date"),
+            "姓名": r.get("name"),
+            "身份": r.get("identity"),
+            "主题": r.get("topic"),
+            "场次": r.get("session"),
+            "时间": r.get("time"),
+        })
 
-    today_summary = (
-        today_df.groupby(["姓名", "身份"], as_index=False)
-                .size()
-                .rename(columns={"size": "共修次数"})
-    )
+    summary_map = {}
+    for r in today_records:
+        key = (r["姓名"], r["身份"])
+        summary_map[key] = summary_map.get(key, 0) + 1
 
-    today_summary_records = today_summary.to_dict("records")
+    today_summary_records = [
+        {
+            "姓名": name,
+            "身份": identity,
+            "共修次数": count
+        }
+        for (name, identity), count in summary_map.items()
+    ]
 
-    topic_options = sorted(
-        [x for x in df["主题"].dropna().astype(str).unique().tolist() if x.strip()]
-    )
+    topic_options = get_reading_topics()
 
     html = """
     <!doctype html>
@@ -535,12 +550,10 @@ def reading():
             <p>场次 / 备注：</p>
             <input type="text" name="session" placeholder="例如：早上共修 / 晚上共修">
 
-            <p>共修人员：</p>
-
             <p>义工名单：</p>
 
             <button type="button" onclick="selectAllNames()" style="margin-bottom:10px;">
-            ✅ 全选全部义工
+                ✅ 全选全部义工
             </button>
 
             {% for name in attendees %}
@@ -566,6 +579,7 @@ def reading():
         <table>
             <tr>
                 <th>姓名</th>
+                <th>身份</th>
                 <th>主题</th>
                 <th>时间</th>
                 <th>操作</th>
@@ -574,17 +588,19 @@ def reading():
             {% for r in today_records %}
             <tr>
                 <td>{{ r["姓名"] }}</td>
+                <td>{{ r["身份"] }}</td>
                 <td>{{ r["主题"] }}</td>
                 <td>{{ r["时间"] }}</td>
                 <td>
-                    <button>修改</button>
-                    <button>删除</button>
+                    <a href="/reading_edit/{{ r['id'] }}"><button class="edit">修改</button></a>
+                    <a href="/reading_delete/{{ r['id'] }}" onclick="return confirm('确定删除吗？')">
+                        <button class="delete">删除</button>
+                    </a>
                 </td>
             </tr>
             {% endfor %}
         </table>
 
-        <!-- ⭐ 加在这里 -->
         <h3 style="margin-top:20px;">📊 今日共修次数</h3>
 
         <table>
@@ -602,7 +618,6 @@ def reading():
             </tr>
             {% endfor %}
         </table>
-
     </div>
 
     <script>
@@ -617,64 +632,60 @@ def reading():
     """
 
     return render_template_string(
-    html,
-    t=get_text(),
-    attendees=attendees,
-    today_records=today_records,
-    today_summary=today_summary_records,
-    topic_options=topic_options
-)
-
-@app.route("/reading_delete")
-def reading_delete():
-    date = request.args.get("date", "")
-    name = request.args.get("name", "")
-    topic = request.args.get("topic", "")
-
-    df = pd.read_excel(READING_FILE)
-
-    mask = (
-        (df["日期"].astype(str) == date) &
-        (df["姓名"].astype(str) == name) &
-        (df["主题"].astype(str) == topic)
+        html,
+        t=get_text(),
+        attendees=attendees,
+        today_records=today_records,
+        today_summary=today_summary_records,
+        topic_options=topic_options
     )
 
-    df = df[~mask].copy()
-    df.to_excel(READING_FILE, index=False)
-    #beautify_reading_excel()
+@app.route("/reading_delete/<int:record_id>")
+def reading_delete(record_id):
+    db_query("""
+        delete from reading
+        where id = %s
+    """, (record_id,))
 
     return redirect(url_for("reading"))
 
 
-@app.route("/reading_edit", methods=["GET", "POST"])
-def reading_edit():
-    old_date = request.args.get("date", "")
-    old_name = request.args.get("name", "")
-    old_topic = request.args.get("topic", "")
+@app.route("/reading_edit/<int:record_id>", methods=["GET", "POST"])
+def reading_edit(record_id):
+    row = db_query("""
+        select *
+        from reading
+        where id = %s
+    """, (record_id,), fetchone=True)
 
-    df = pd.read_excel(READING_FILE)
+    if not row:
+        return "找不到这笔记录<br><a href='/reading'>返回</a>"
 
     if request.method == "POST":
         new_topic = request.form.get("topic", "").strip()
+        new_session = request.form.get("session", "").strip()
 
-        mask = (
-            (df["日期"].astype(str) == old_date) &
-            (df["姓名"].astype(str) == old_name) &
-            (df["主题"].astype(str) == old_topic)
-        )
-
-        df.loc[mask, "主题"] = new_topic
-        df.to_excel(READING_FILE, index=False)
-        #beautify_reading_excel()
+        db_query("""
+            update reading
+            set topic = %s,
+                session = %s
+            where id = %s
+        """, (new_topic, new_session, record_id))
 
         return redirect(url_for("reading"))
 
     html = """
-    <h2>修改白话佛法主题</h2>
+    <h2>修改白话佛法记录</h2>
     <form method="post">
-        <p>姓名：{{name}}</p>
-        <p>原主题：{{topic}}</p>
-        <input name="topic" value="{{topic}}" style="font-size:22px;width:300px;">
+        <p>姓名：{{ name }}</p>
+        <p>身份：{{ identity }}</p>
+
+        <p>主题：</p>
+        <input name="topic" value="{{ topic }}" style="font-size:22px;width:320px;">
+
+        <p>场次 / 备注：</p>
+        <input name="session" value="{{ session }}" style="font-size:22px;width:320px;">
+
         <br><br>
         <button type="submit" style="font-size:22px;">保存修改</button>
     </form>
@@ -684,8 +695,10 @@ def reading_edit():
 
     return render_template_string(
         html,
-        name=old_name,
-        topic=old_topic
+        name=row.get("name"),
+        identity=row.get("identity"),
+        topic=row.get("topic") or "",
+        session=row.get("session") or ""
     )
 
 # =========================
