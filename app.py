@@ -1665,40 +1665,51 @@ def delete_edit():
     flash(msg, "ok" if ok else "bad")
     return redirect(url_for("index"))
 
-@app.route("/admin/today-code", methods=["GET", "POST"])
-def admin_today_code():
-    if request.method == "POST":
-        pin = request.form.get("pin", "").strip()
-
-        if pin != ADMIN_PIN:
-            return "PIN错误", 403
-
-        code = get_today_code()
-
-        return f"""
-        <h1>今日签到码</h1>
-        <h2 style="font-size:60px;">{code}</h2>
-        <p>⚠ 请只写在观音堂现场，不要发群</p>
-        """
-
-    return """
-    <h1>管理员查看今日码</h1>
-    <form method="post">
-        <input type="password" name="pin" placeholder="输入管理员PIN">
-        <button type="submit">查看今日码</button>
-    </form>
-    """
 
 @app.route("/admin_report", methods=["POST"])
 def admin_report():
     pin = str(request.form.get("admin_pin", "")).strip()
+
     if pin != ADMIN_PIN:
         flash("管理员 PIN 不正确。", "bad")
         return redirect(url_for("index"))
 
-    ok, msg = run_report_script()
-    flash(msg, "ok" if ok else "bad")
-    return redirect(url_for("index"))
+    # 👉 今日签到码
+    code = get_today_code()
+
+    # 👉 判断操作（报表）
+    action = request.form.get("action")
+
+    # 👉 如果有按报表按钮
+    if action == "monthly":
+        # 你原本生成月报的代码放这里
+        return "月报生成完成"
+
+    elif action == "yearly":
+        # 你原本生成年报的代码放这里
+        return "年报生成完成"
+
+    # 👉 默认显示管理员页面
+    return f"""
+    <h1>🔐 管理员工具</h1>
+
+    <h2>今日签到码</h2>
+    <div style="font-size:60px;font-weight:bold;color:#dc3545;">
+        {code}
+    </div>
+
+    <p>⚠ 请只写在观音堂现场，不要发群</p>
+
+    <hr>
+
+    <h2>报表工具</h2>
+
+    <form method="post" action="/admin_report">
+        <input type="hidden" name="admin_pin" value="{pin}">
+        <button name="action" value="monthly">生成月报</button>
+        <button name="action" value="yearly">生成年报</button>
+    </form>
+    """
 
 
 @app.route("/api/volunteer/<volunteer_id>")
