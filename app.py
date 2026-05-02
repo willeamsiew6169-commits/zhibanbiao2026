@@ -27,7 +27,6 @@ from io import BytesIO
 from pypinyin import lazy_pinyin
 from datetime import datetime, date
 from pathlib import Path
-from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from typing import Optional
 from sqlalchemy import create_engine, text
@@ -51,8 +50,10 @@ def get_db():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 pool = SimpleConnectionPool(
-    1, 20,  # 最小1个，最大20个连接
-    dsn=DATABASE_URL
+    1,
+    20,
+    dsn=DATABASE_URL,
+    cursor_factory=RealDictCursor
 )
 
 def db_query(sql, params=None, fetchone=False, fetchall=False):
@@ -61,10 +62,12 @@ def db_query(sql, params=None, fetchone=False, fetchall=False):
         with conn.cursor() as cur:
             cur.execute(sql, params or ())
             result = None
+
             if fetchone:
                 result = cur.fetchone()
             elif fetchall:
                 result = cur.fetchall()
+
             conn.commit()
             return result
     finally:
@@ -301,7 +304,7 @@ def beautify_reading_excel():
 
     wb.save(READING_FILE)
 
-from datetime import datetime
+
 
 def parse_time_to_datetime(t):
     today = datetime.now(MY_TZ)
