@@ -59,19 +59,39 @@ pool = SimpleConnectionPool(
 )
 
 def db_query(sql, params=None, fetchone=False, fetchall=False):
+    import psycopg2
+
     conn = pool.getconn()
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with conn.cursor() as cur:
             cur.execute(sql, params or ())
-            result = None
-
+            
             if fetchone:
                 result = cur.fetchone()
             elif fetchall:
                 result = cur.fetchall()
+            else:
+                result = None
 
             conn.commit()
             return result
+
+    except psycopg2.OperationalError:
+        # 🔥 连接坏了 → 重试一次
+        conn = pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute(sql, params or ())
+            
+            if fetchone:
+                result = cur.fetchone()
+            elif fetchall:
+                result = cur.fetchall()
+            else:
+                result = None
+
+            conn.commit()
+            return result
+
     finally:
         pool.putconn(conn)
 
