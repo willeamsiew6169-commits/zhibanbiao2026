@@ -1813,26 +1813,64 @@ def download_data():
     import pandas as pd
     import io
 
-    rows = db_query("""
-        select *
-        from attendance
-        order by id desc
-    """, fetchall=True)
+    try:
+        att_rows = db_query("""
+            select
+                date as "日期",
+                volunteer_id as "编号",
+                name as "姓名",
+                signup as "报名",
+                signin as "签到",
+                role as "岗位",
+                start_time as "开始时间",
+                end_time as "结束时间",
+                hours as "时数",
+                remark as "备注"
+            from attendance
+            order by date, start_time
+        """, fetchall=True)
 
-    df = pd.DataFrame(rows)
+        vol_rows = db_query("""
+            select
+                id as "编号",
+                name as "姓名",
+                status as "状态",
+                phone as "电话号码",
+                pin as "PIN"
+            from volunteers
+            order by id
+        """, fetchall=True)
 
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='records')
+        reading_rows = db_query("""
+            select
+                date as "日期",
+                name as "姓名",
+                identity as "身份",
+                topic as "主题",
+                session as "场次",
+                time as "时间"
+            from reading
+            order by date, time
+        """, fetchall=True)
 
-    output.seek(0)
+        output = io.BytesIO()
 
-    return send_file(
-        output,
-        as_attachment=True,
-        download_name="attendance_cloud.xlsx",
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            pd.DataFrame(att_rows).to_excel(writer, index=False, sheet_name="attendance")
+            pd.DataFrame(vol_rows).to_excel(writer, index=False, sheet_name="volunteers")
+            pd.DataFrame(reading_rows).to_excel(writer, index=False, sheet_name="reading")
+
+        output.seek(0)
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name="zhibanbiao_data.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    except Exception as e:
+        return f"下载失败：{e}"
 
 @app.route("/download_reading")
 def download_reading():
