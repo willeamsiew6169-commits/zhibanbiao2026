@@ -25,6 +25,7 @@ from pypinyin import lazy_pinyin
 from datetime import datetime, date
 from pathlib import Path
 from typing import Optional
+from sqlalchemy import create_engine, text
 from openpyxl import Workbook, load_workbook
 from excel_style_utils import beautify_attendance_file
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -35,6 +36,27 @@ from flask import (
     make_response
 )
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+engine = create_engine(DATABASE_URL)
+
+def init_db():
+    with engine.connect() as conn:
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS attendance (
+            id SERIAL PRIMARY KEY,
+            date TEXT,
+            name TEXT,
+            volunteer_id TEXT,
+            role TEXT,
+            start_time TEXT,
+            end_time TEXT,
+            hours FLOAT,
+            remark TEXT
+        )
+        """))
+
+init_db()
 
 # =========================
 # 1) 基本设定
