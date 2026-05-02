@@ -140,6 +140,9 @@ TEXT = {
         "bhff_enter": "📖 进入共修记录",
         "bhff_desc": "👉 记录今日共修（最少2人）",
         "bhff_record_title": "📖 白话佛法共修记录",
+        "today_code": "今日签到码",
+        "today_code_placeholder": "请输入现场今日码",
+
 
     },
     "en": {
@@ -199,6 +202,8 @@ TEXT = {
         "bhff_enter": "📖 Enter Study Records",
         "bhff_desc": "👉 Record today’s group study (minimum 2 participants)",
         "bhff_record_title": "📖 Bai Hua Fo Fa (BHFF) Study Records",
+        "today_code": "Today Code",
+        "today_code_placeholder": "Enter today's code (on-site)",
     }
 }
 
