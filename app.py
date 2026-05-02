@@ -59,6 +59,15 @@ ATTENDANCE_HEADERS = [
     "开始时间", "结束时间", "时数", "备注"
 ]
 
+TODAY_CODE_ENABLED = True
+
+TODAY_CODE_LIST = [
+    "2580", "7312", "4901", "8625", "1047",
+    "3698", "5206", "9174", "6842", "0359",
+    "2468", "1357", "8080", "1122", "5566",
+    "7788", "9090", "3145", "6721", "4826",
+]
+
 # 系统内部岗位永远用中文；英文只用于网页显示
 ROLES = ["值班", "卫生", "佛台", "供台", "供花", "供果", "膳食", "佛学班"]
 
@@ -202,6 +211,11 @@ READING_FILE = "reading.xlsx"
 # =========================
 # 工具函数
 # =========================
+def get_today_code():
+    today = date.today()
+    day_index = today.toordinal() % len(TODAY_CODE_LIST)
+    return TODAY_CODE_LIST[day_index]
+
 def beautify_reading_excel():
     if not os.path.exists(READING_FILE):
         return
@@ -1194,6 +1208,13 @@ PAGE = """
         </div>
       </div>
 
+      {% if today_code_enabled %}
+      <div>
+        <label>今日签到码</label>
+        <input type="text" name="today_code" placeholder="请输入现场今日码" required>
+      </div>
+      {% endif %}
+
       <button type="button" class="btn-find" onclick="lookupVolunteer()">
         {{ t.find_volunteer }}
       </button>
@@ -1491,6 +1512,7 @@ def index():
         role_label=role_label,
         open_records=get_today_open_records(),
         today_records=get_today_records(limit=20),
+        today_code_enabled=TODAY_CODE_ENABLED,
     )
 
 @app.route("/qr")
@@ -1563,6 +1585,14 @@ def qr_page():
 
 @app.route("/signin", methods=["POST"])
 def do_sign_in():
+    if TODAY_CODE_ENABLED:
+        input_code = request.form.get("today_code", "").strip()
+        real_code = get_today_code()
+
+        if input_code != real_code:
+            flash("今日签到码错误，请看现场公布的号码", "bad")
+            return redirect(url_for("index"))
+
     ok, msg = sign_in(
         request.form.get("volunteer_id", ""),
         request.form.get("pin", ""),
