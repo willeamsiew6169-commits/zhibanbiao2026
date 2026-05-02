@@ -4,7 +4,7 @@
 # 1) 编号查找、PIN验证、签到、签退
 # 2) 今日记录修改/删除、自动备份、秒按缓存
 # 3) 中文 / English 双语网页（Excel 内部仍保存中文）
-# 4) 管理员 PIN 网页按钮生成月报/年报
+# 4) 输入管理员 PIN 
 # 5) 修改 PIN
 
 from __future__ import annotations
@@ -204,8 +204,8 @@ TEXT = {
         "edit": "修改",
         "row_id": "编号",
         "admin_tools": "管理员工具",
-        "admin_pin": "管理员 PIN",
-        "generate_report": "生成月报 / 年报",
+        "admin_pin": "请输入管理员 PIN",
+        "generate_report": "管理员登录",
         "change_pin": "修改 PIN",
         "language": "语言",
         "chinese": "中文",
@@ -266,8 +266,8 @@ TEXT = {
         "edit": "Edit",
         "row_id": "ID",
         "admin_tools": "Admin Tools",
-        "admin_pin": "Admin PIN",
-        "generate_report": "Generate Monthly / Yearly Report",
+        "admin_pin": "Enter Admin PIN",
+        "generate_report": "🔐 Enter Admin Panel",
         "change_pin": "Change PIN",
         "language": "Language",
         "chinese": "中文",
