@@ -353,24 +353,13 @@ def get_today():
 
 # 👉 从 attendance.xlsx 拿今天签到名单
 def get_today_attendees():
-    try:
-        df = pd.read_excel("attendance.xlsx")
-    except:
-        return []
+    rows = db_query("""
+        select distinct name
+        from attendance
+        where date = %s and signin = 1
+    """, (now_date_str(),), fetchall=True)
 
-    if "日期" not in df.columns or "姓名" not in df.columns:
-        return []
-
-    today = get_today()
-    df["日期"] = pd.to_datetime(df["日期"], errors="coerce").dt.strftime("%Y-%m-%d")
-
-    # 👉 筛选：今天 + 已签到=1
-    if "签到" in df.columns:
-        df = df[(df["日期"] == today) & (df["签到"] == 1)]
-    else:
-        df = df[df["日期"] == today]
-
-    return sorted(df["姓名"].dropna().unique().tolist())
+    return sorted([r["name"] for r in rows if r.get("name")])
 
 
 # =========================
@@ -708,10 +697,10 @@ def reading_edit():
     )
 
 # =========================
-# 秒按模式：内存缓存
+# 已弃用（改用 Supabase）
 # =========================
 ATT_CACHE = []
-ATT_CACHE_LOADED = False
+ATT_CACHE_LOADED = True
 ATT_DIRTY = False
 ATT_LOCK = threading.Lock()
 SAVE_INTERVAL_SEC = 5
@@ -804,81 +793,29 @@ def safe_save_workbook(wb, path: Path) -> None:
 
 
 def reload_attendance_cache() -> None:
-    global ATT_CACHE, ATT_CACHE_LOADED, ATT_DIRTY
-    with ATT_LOCK:
-        ATT_CACHE = _load_attendance_rows_from_excel()
-        ATT_CACHE_LOADED = True
-        ATT_DIRTY = False
+    return
 
 
 # =========================
 # 4) Excel 读取 / 建立
 # =========================
 def ensure_attendance_file() -> None:
-    if ATTENDANCE_FILE.exists():
-        wb = load_workbook(ATTENDANCE_FILE)
-        if ATTENDANCE_SHEET not in wb.sheetnames:
-            ws = wb.create_sheet(ATTENDANCE_SHEET)
-            ws.append(ATTENDANCE_HEADERS)
-            safe_save_workbook(wb, ATTENDANCE_FILE)
-        return
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = ATTENDANCE_SHEET
-    ws.append(ATTENDANCE_HEADERS)
-    safe_save_workbook(wb, ATTENDANCE_FILE)
+    return
 
 
 def load_volunteers() -> list[dict]:
-    if not VOLUNTEERS_FILE.exists():
-        raise FileNotFoundError(f"找不到 {VOLUNTEERS_FILE.name}")
+    rows = db_query("""
+        select
+            id as "编号",
+            name as "姓名",
+            phone as "电话号码",
+            status as "状态",
+            pin as "PIN"
+        from volunteers
+        order by id
+    """, fetchall=True)
 
-    wb = load_workbook(VOLUNTEERS_FILE, data_only=True)
-    if VOLUNTEERS_SHEET not in wb.sheetnames:
-        raise ValueError(f"{VOLUNTEERS_FILE.name} 找不到工作表：{VOLUNTEERS_SHEET}")
-
-    ws = wb[VOLUNTEERS_SHEET]
-    headers = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
-
-    def col(name: str) -> Optional[int]:
-        return headers.index(name) + 1 if name in headers else None
-
-    id_col = col("编号")
-    name_col = col("姓名")
-    phone_col = col("电话号码") or col("联络号码")
-    status_col = col("状态")
-    pin_col = col("PIN") or col("pin") or col("密码")
-
-    if not id_col or not name_col:
-        raise ValueError("volunteers.xlsx 至少需要栏位：编号、姓名")
-
-    records = []
-    for row in range(2, ws.max_row + 1):
-        vid = normalize_id(ws.cell(row, id_col).value)
-        name = str(ws.cell(row, name_col).value or "").strip()
-        phone = str(ws.cell(row, phone_col).value or "").strip() if phone_col else ""
-        status = str(ws.cell(row, status_col).value or "在册").strip() if status_col else "在册"
-        pin_raw = str(ws.cell(row, pin_col).value or "").strip() if pin_col else ""
-
-        if not vid or not name:
-            continue
-
-        phone_digits = only_digits(phone)
-        default_pin = phone_digits[-4:] if len(phone_digits) >= 4 else "0000"
-        pin = pin_raw if pin_raw else default_pin
-        if pin.endswith(".0"):
-            pin = pin[:-2]
-
-        records.append({
-            "编号": vid,
-            "姓名": name,
-            "电话号码": phone,
-            "状态": status,
-            "PIN": str(pin).strip(),
-        })
-
-    return records
+    return rows or []
 
 
 def find_volunteer(volunteer_id: str):
@@ -897,41 +834,38 @@ def find_volunteer(volunteer_id: str):
 
 
 def verify_pin_for_volunteer(volunteer, pin):
-    real_pin = str(volunteer.get("PIN") or "").strip()
-
-    # 如果数据库有 PIN → 用它
-    if real_pin:
-        return pin == real_pin
-
-    # 没有 PIN → 用电话后4位
-    phone = str(volunteer.get("电话号码") or "").strip()
-    if len(phone) >= 4:
-        return pin == phone[-4:]
-
-    return False
+    phone = only_digits(volunteer.get("电话号码"))
+    return str(pin).strip() == phone[-4:]
 
 
 def _load_attendance_rows_from_excel() -> list[dict]:
-    ensure_attendance_file()
-    wb = load_workbook(ATTENDANCE_FILE, data_only=True)
-    ws = wb[ATTENDANCE_SHEET]
-    headers = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
-
-    rows = []
-    for r in range(2, ws.max_row + 1):
-        item = {headers[i]: ws.cell(r, i + 1).value for i in range(len(headers)) if headers[i]}
-        item["_row"] = r
-        rows.append(item)
-    return rows
-
+    return []
 
 def load_attendance_rows() -> list[dict]:
-    global ATT_CACHE_LOADED, ATT_CACHE
-    with ATT_LOCK:
-        if not ATT_CACHE_LOADED:
-            ATT_CACHE = _load_attendance_rows_from_excel()
-            ATT_CACHE_LOADED = True
-        return [dict(r) for r in ATT_CACHE]
+    rows = db_query("""
+        select *
+        from attendance
+        order by id desc
+        limit 200
+    """, fetchall=True)
+
+    result = []
+    for r in rows:
+        result.append({
+            "日期": r.get("date"),
+            "编号": r.get("volunteer_id"),
+            "姓名": r.get("name"),
+            "报名": r.get("signup"),
+            "签到": r.get("signin"),
+            "岗位": r.get("role"),
+            "开始时间": r.get("start_time"),
+            "结束时间": r.get("end_time") or "",
+            "时数": r.get("hours") or "",
+            "备注": r.get("remark") or "",
+            "_row": r.get("id"),
+        })
+
+    return result
 
 
 def mark_attendance_dirty() -> None:
@@ -940,39 +874,7 @@ def mark_attendance_dirty() -> None:
 
 
 def flush_attendance_to_excel(force: bool = False) -> None:
-    global ATT_DIRTY, ATT_CACHE_LOADED
-    with ATT_LOCK:
-        if not ATT_CACHE_LOADED:
-            return
-        if not ATT_DIRTY and not force:
-            return
-        rows = [dict(r) for r in ATT_CACHE]
-        ATT_DIRTY = False
-
-    ensure_attendance_file()
-    wb = load_workbook(ATTENDANCE_FILE)
-    ws = wb[ATTENDANCE_SHEET]
-    headers = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
-
-    if ws.max_row > 1:
-        ws.delete_rows(2, ws.max_row - 1)
-
-    for item in rows:
-        ws.append([item.get(h, "") for h in headers])
-
-    from openpyxl.styles import Font
-    font = Font(name="Microsoft YaHei", size=14)
-
-    for row in ws.iter_rows(min_row=2):
-        for cell in row:
-            cell.font = font
-
-    safe_save_workbook(wb, ATTENDANCE_FILE)
-    beautify_attendance_file(ATTENDANCE_FILE, ATTENDANCE_SHEET)
-
-    with ATT_LOCK:
-        for idx, item in enumerate(ATT_CACHE, start=2):
-            item["_row"] = idx
+    return
 
 
 def background_saver():
@@ -999,13 +901,32 @@ def format_date_value(d) -> str:
 
 def get_today_open_records() -> list[dict]:
     today = now_date_str()
-    open_rows = []
-    for item in load_attendance_rows():
-        d = format_date_value(item.get("日期"))
-        end_time = str(item.get("结束时间") or "").strip()
-        if d == today and end_time == "":
-            open_rows.append(item)
-    return open_rows
+
+    rows = db_query("""
+        select *
+        from attendance
+        where date = %s
+          and (end_time is null or end_time = '')
+        order by id desc
+    """, (today,), fetchall=True)
+
+    result = []
+    for r in rows:
+        result.append({
+            "日期": r.get("date"),
+            "编号": r.get("volunteer_id"),
+            "姓名": r.get("name"),
+            "报名": r.get("signup"),
+            "签到": r.get("signin"),
+            "岗位": r.get("role"),
+            "开始时间": r.get("start_time"),
+            "结束时间": r.get("end_time") or "",
+            "时数": r.get("hours") or "",
+            "备注": r.get("remark") or "",
+            "_row": r.get("id"),
+        })
+
+    return result
 
 
 def get_today_records(limit: int | None = None) -> list[dict]:
@@ -1034,7 +955,6 @@ def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
         return False, "请选择正确岗位。"
 
     volunteer = find_volunteer(volunteer_id)
-
     if not volunteer:
         return False, f"找不到编号：{volunteer_id}"
 
@@ -1045,7 +965,7 @@ def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
         return False, "PIN 不正确。"
 
     opened = db_query("""
-        select *
+        select id
         from attendance
         where date = %s
           and volunteer_id = %s
@@ -1086,7 +1006,6 @@ def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
         return False, "请输入 PIN。"
 
     volunteer = find_volunteer(volunteer_id)
-
     if not volunteer:
         return False, f"找不到编号：{volunteer_id}"
 
@@ -1128,74 +1047,73 @@ def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
 
 
 def update_record(row_number: int, role: str, start_time: str, end_time: str, remark: str) -> tuple[bool, str]:
-    flush_attendance_to_excel(force=True)
     if role not in ROLES:
         return False, "请选择正确岗位。"
 
-    ensure_attendance_file()
-    wb = load_workbook(ATTENDANCE_FILE)
-    ws = wb[ATTENDANCE_SHEET]
+    row = db_query("""
+        select *
+        from attendance
+        where id = %s
+    """, (row_number,), fetchone=True)
 
-    if row_number < 2 or row_number > ws.max_row:
+    if not row:
         return False, "找不到这笔记录。"
 
-    headers = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
-
-    def has_col(name: str) -> bool:
-        return name in headers
-
-    def col(name: str) -> int:
-        return headers.index(name) + 1
-
-    today = now_date_str()
-    d = format_date_value(ws.cell(row_number, col("日期")).value if has_col("日期") else "")
-    if d != today:
+    if row.get("date") != now_date_str():
         return False, "为了安全，页面只允许修改今天的记录。"
 
-    backup_attendance()
-    ws.cell(row_number, col("岗位")).value = role
-    ws.cell(row_number, col("开始时间")).value = start_time.strip()
-    ws.cell(row_number, col("结束时间")).value = end_time.strip()
-    if has_col("备注"):
-        ws.cell(row_number, col("备注")).value = remark.strip()
+    start_time = str(start_time or "").strip()
+    end_time = str(end_time or "").strip()
+    remark = str(remark or "").strip()
 
-    if has_col("时数"):
-        if start_time.strip() and end_time.strip():
-            ws.cell(row_number, col("时数")).value = calc_hours(start_time.strip(), end_time.strip())
-        else:
-            ws.cell(row_number, col("时数")).value = ""
+    if start_time and end_time:
+        try:
+            hours = calc_hours(start_time, end_time)
+        except Exception:
+            hours = None
+    else:
+        hours = None
 
-    safe_save_workbook(wb, ATTENDANCE_FILE)
-    beautify_attendance_file(ATTENDANCE_FILE, ATTENDANCE_SHEET)
-    reload_attendance_cache()
+    db_query("""
+        update attendance
+        set role = %s,
+            start_time = %s,
+            end_time = %s,
+            hours = %s,
+            remark = %s
+        where id = %s
+    """, (
+        role,
+        start_time,
+        end_time,
+        hours,
+        remark,
+        row_number
+    ))
+
     return True, "记录已修改。"
 
 
 def delete_record(row_number: int) -> tuple[bool, str]:
-    flush_attendance_to_excel(force=True)
-    ensure_attendance_file()
-    wb = load_workbook(ATTENDANCE_FILE)
-    ws = wb[ATTENDANCE_SHEET]
+    row = db_query("""
+        select *
+        from attendance
+        where id = %s
+    """, (row_number,), fetchone=True)
 
-    if row_number < 2 or row_number > ws.max_row:
+    if not row:
         return False, "找不到这笔记录。"
 
-    headers = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
-
-    def col(name: str) -> int:
-        return headers.index(name) + 1
-
-    today = now_date_str()
-    d = format_date_value(ws.cell(row_number, col("日期")).value)
-    if d != today:
+    if row.get("date") != now_date_str():
         return False, "为了安全，页面只允许删除今天的记录。"
 
-    name = ws.cell(row_number, col("姓名")).value if "姓名" in headers else ""
-    backup_attendance()
-    ws.delete_rows(row_number, 1)
-    safe_save_workbook(wb, ATTENDANCE_FILE)
-    beautify_attendance_file(ATTENDANCE_FILE, ATTENDANCE_SHEET)
-    reload_attendance_cache()
+    name = row.get("name") or ""
+
+    db_query("""
+        delete from attendance
+        where id = %s
+    """, (row_number,))
+
     return True, f"已删除 {name} 的这笔记录。"
 
 
@@ -1698,10 +1616,16 @@ def do_sign_out():
         row_number = int(request.form.get("row_number", "0"))
     except Exception:
         row_number = 0
-    ok, msg = sign_out(row_number, request.form.get("pin", ""))
+
+    row = db_query("select * from attendance where id=%s", (row_number,), fetchone=True)
+
+    if not row:
+        flash("记录不存在", "bad")
+        return redirect(url_for("index"))
+
+    ok, msg = sign_out(row["volunteer_id"], request.form.get("pin", ""))
     flash(msg, "ok" if ok else "bad")
     return redirect(url_for("index"))
-
 
 @app.route("/edit/<int:row_number>")
 def edit_page(row_number):
@@ -1756,10 +1680,14 @@ def download_data():
     import pandas as pd
     import io
 
-    # 👉 读取你的签到 Excel
-    df = pd.read_excel(ATTENDANCE_FILE, sheet_name=ATTENDANCE_SHEET)
+    rows = db_query("""
+        select *
+        from attendance
+        order by id desc
+    """, fetchall=True)
 
-    # 👉 写入内存（不用存硬盘）
+    df = pd.DataFrame(rows)
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='records')
@@ -1859,28 +1787,13 @@ def change_pin(volunteer_id: str, old_pin: str, new_pin: str, confirm_pin: str):
     if new_pin != confirm_pin:
         return False, "两次 PIN 不一致"
 
-    wb = load_workbook(VOLUNTEERS_FILE)
-    ws = wb[VOLUNTEERS_SHEET]
-    headers = [str(c.value).strip() if c.value else "" for c in ws[1]]
+    db_query("""
+        update volunteers
+        set pin = %s
+        where id = %s
+    """, (new_pin, normalize_id(volunteer_id)))
 
-    def col(name):
-        return headers.index(name) + 1 if name in headers else None
-
-    id_col = col("编号")
-    pin_col = col("PIN")
-
-    if not pin_col:
-        ws.cell(1, ws.max_column + 1).value = "PIN"
-        pin_col = ws.max_column
-
-    for r in range(2, ws.max_row + 1):
-        vid = normalize_id(ws.cell(r, id_col).value)
-        if vid == normalize_id(volunteer_id):
-            ws.cell(r, pin_col).value = new_pin
-            safe_save_workbook(wb, VOLUNTEERS_FILE)
-            return True, "PIN 已更新"
-
-    return False, "更新失败"
+    return True, "PIN 已更新"
 
 
 @app.route("/change_pin", methods=["GET", "POST"])
