@@ -1721,6 +1721,10 @@ def admin_report():
 
     <p>⚠ 请只写在观音堂现场，不要发群</p>
 
+    <a href="/download_data" style="display:block;margin-top:12px;font-size:20px;">
+  📥 下载签到数据
+    </a>
+
     <hr>
 
     <h2>报表工具</h2>
