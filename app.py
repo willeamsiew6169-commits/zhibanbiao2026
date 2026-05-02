@@ -21,6 +21,7 @@ import qrcode
 import base64
 import psycopg2
 
+from psycopg2.pool import SimpleConnectionPool
 from psycopg2.extras import RealDictCursor
 from io import BytesIO
 from pypinyin import lazy_pinyin
@@ -49,9 +50,13 @@ def get_db():
         raise RuntimeError("DATABASE_URL 没有设置")
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
+pool = SimpleConnectionPool(
+    1, 20,  # 最小1个，最大20个连接
+    dsn=DATABASE_URL
+)
 
 def db_query(sql, params=None, fetchone=False, fetchall=False):
-    conn = get_db()
+    conn = pool.getconn()
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params or ())
@@ -63,29 +68,7 @@ def db_query(sql, params=None, fetchone=False, fetchall=False):
             conn.commit()
             return result
     finally:
-        conn.close()
-
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-engine = create_engine(DATABASE_URL)
-
-def init_db():
-    with engine.connect() as conn:
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS attendance (
-            id SERIAL PRIMARY KEY,
-            date TEXT,
-            name TEXT,
-            volunteer_id TEXT,
-            role TEXT,
-            start_time TEXT,
-            end_time TEXT,
-            hours FLOAT,
-            remark TEXT
-        )
-        """))
-
-init_db()
+        pool.putconn(conn)
 
 # =========================
 # 1) 基本设定
