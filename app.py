@@ -13,37 +13,35 @@ import os
 import io
 import sys
 import shutil
-import threading
-import pandas as pd
 import atexit
-import subprocess
 import socket
 import qrcode
 import base64
 import psycopg2
+import threading
+import subprocess
+import pandas as pd
 
-from psycopg2.pool import SimpleConnectionPool
-from psycopg2.extras import RealDictCursor
 from io import BytesIO
-from flask import send_file
+from pathlib import Path
+from typing import Optional
+from zoneinfo import ZoneInfo
 from pypinyin import lazy_pinyin
 from datetime import datetime, date
-from pathlib import Path
-from zoneinfo import ZoneInfo
-from typing import Optional
 from sqlalchemy import create_engine, text
+from psycopg2.extras import RealDictCursor
 from openpyxl import Workbook, load_workbook
+from psycopg2.pool import SimpleConnectionPool
 from excel_style_utils import beautify_attendance_file
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-
 from flask import (
     Flask, request, redirect, url_for,
     render_template_string, flash, jsonify,
-    make_response
+    make_response, send_file,
 )
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
-
+today = datetime.today().strftime("%Y-%m-%d")
 MY_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
 def get_db():
@@ -408,6 +406,22 @@ def get_today_attendees():
 
     return sorted([r["name"] for r in rows if r.get("name")])
 
+def get_today_stats():
+    rows = db_query("""
+        select *
+        from attendance
+        where date = %s
+    """, (now_date_str(),), fetchall=True)
+
+    total = len(rows)
+    open_count = sum(1 for r in rows if not str(r.get("end_time") or "").strip())
+    finished = total - open_count
+
+    return {
+        "total": total,
+        "open": open_count,
+        "finished": finished,
+    }
 
 # =========================
 # 页面：共修记录
@@ -497,19 +511,19 @@ def reading():
                 font-family: "Microsoft YaHei", Arial;
                 background: #f6f7f2;
                 padding: 18px;
-                font-size: 20px;
+                font-size: 24px;
             }
             .card {
                 background: white;
-                padding: 18px;
+                padding: 28px;
                 border-radius: 16px;
                 margin-bottom: 18px;
                 box-shadow: 0 2px 8px #ccc;
             }
             input[type=text] {
                 width: 95%;
-                font-size: 22px;
-                padding: 12px;
+                font-size: 32px;
+                padding: 20px;
                 border-radius: 10px;
                 border: 1px solid #aaa;
             }
@@ -519,9 +533,9 @@ def reading():
                 font-size: 21px;
             }
             button {
-                font-size: 22px;
+                font-size: 32px;
                 padding: 12px 22px;
-                border-radius: 12px;
+                border-radius: 18px;
                 border: none;
                 background: #4CAF50;
                 color: white;
@@ -1206,6 +1220,15 @@ PAGE = """
   {% endwith %}
 
   <div class="card">
+    <h2>📊 今日统计</h2>
+    <div style="font-size:28px;line-height:1.8;">
+      今日签到：<b>{{ stats.total }}</b> 人次<br>
+      目前未签退：<b style="color:#dc3545;">{{ stats.open }}</b> 人<br>
+      已完成签退：<b style="color:#198754;">{{ stats.finished }}</b> 人
+    </div>
+  </div>
+
+  <div class="card">
     <h2>✅ {{ t.check_in }}</h2>
     <form method="post" action="{{ url_for('do_sign_in') }}" onsubmit="return quickSignIn();">
       <div class="row">
@@ -1525,7 +1548,72 @@ def index():
         open_records=get_today_open_records(),
         today_records=get_today_records(limit=20),
         today_code_enabled=TODAY_CODE_ENABLED,
+        stats=get_today_stats(),
     )
+
+@app.route("/admin_add_record", methods=["GET", "POST"])
+def admin_add_record():
+    from flask import request, redirect, url_for, render_template_string
+
+    pin = request.args.get("pin") or request.form.get("pin")
+
+    if pin != ADMIN_PIN:
+        return "无权限"
+
+    if request.method == "POST":
+        date = request.form.get("date")
+        vid = request.form.get("id")
+        name = request.form.get("name")
+        role = request.form.get("role")
+        start = request.form.get("start")
+        end = request.form.get("end")
+        remark = request.form.get("remark")
+
+        hours = ""
+        if start and end:
+            hours = calc_hours(start, end)
+
+        db_query("""
+            insert into attendance
+            (date, volunteer_id, name, role, start_time, end_time, hours, remark)
+            values (%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (date, vid, name, role, start, end, hours, remark))
+
+        return redirect(url_for("admin_add_record", pin=pin))
+
+    return render_template_string("""
+<h1>🛠 补录签到记录</h1>
+
+<form method="post">
+  <input type="hidden" name="pin" value="{{ pin }}">
+
+  日期：<br>
+  <input type="date" name="date" value="{{ today }}" required><br><br>
+
+  编号：<br>
+  <input type="text" name="id"><br><br>
+
+  姓名：<br>
+  <input type="text" name="name" required><br><br>
+
+  岗位：<br>
+  <input type="text" name="role"><br><br>
+
+  开始时间（如 10:00am）：<br>
+  <input type="text" name="start"><br><br>
+
+  结束时间（如 2:00pm）：<br>
+  <input type="text" name="end"><br><br>
+
+  备注：<br>
+  <input type="text" name="remark"><br><br>
+
+  <button style="font-size:20px;">➕ 添加记录</button>
+</form>
+
+<br>
+<a href="/admin_report?pin={{ pin }}">⬅ 返回管理员</a>
+""", pin=pin)
 
 @app.route("/qr")
 def qr_page():
@@ -1805,8 +1893,12 @@ def admin_report():
 
 <p>⚠ 请只写在观音堂现场，不要发群</p>
 
-<a href="/download_data" style="display:block;margin-top:12px;font-size:20px;">
+<a href="/download_data" style="display:block;margin-top:12px;font-size:24px;">
     📥 下载签到数据
+</a>
+
+<a href="/admin_add_record?pin={pin}" style="display:block;margin-top:12px;font-size:24px;">
+  🛠 补录签到
 </a>
 
 <br>
