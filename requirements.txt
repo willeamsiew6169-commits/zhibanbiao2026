@@ -6,3 +6,5 @@ pypinyin
 gunicorn
 Pillow
 lunardate
+psycopg2-binary
+sqlalchemy
