@@ -20,6 +20,8 @@ import socket
 import qrcode
 import base64
 
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from io import BytesIO
 from pypinyin import lazy_pinyin
 from datetime import datetime, date
@@ -35,6 +37,29 @@ from flask import (
     render_template_string, flash, jsonify,
     make_response
 )
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+def get_db():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL 没有设置")
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+
+
+def db_query(sql, params=None, fetchone=False, fetchall=False):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params or ())
+            result = None
+            if fetchone:
+                result = cur.fetchone()
+            elif fetchall:
+                result = cur.fetchall()
+            conn.commit()
+            return result
+    finally:
+        conn.close()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -288,6 +313,21 @@ def beautify_reading_excel():
     ws.auto_filter.ref = f"A1:E{ws.max_row}"
 
     wb.save(READING_FILE)
+
+from datetime import datetime
+
+def parse_time_to_datetime(t):
+    today = datetime.now()
+    s = str(t).strip().lower()
+
+    for fmt in ["%H:%M", "%I:%M%p", "%I:%M %p"]:
+        try:
+            parsed = datetime.strptime(s, fmt)
+            return today.replace(hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
+        except ValueError:
+            pass
+
+    raise ValueError(f"不能解析时间：{t}")
 
 def ensure_reading_file():
     required_cols = ["日期", "姓名", "主题", "场次", "时间"]
@@ -841,21 +881,19 @@ def load_volunteers() -> list[dict]:
     return records
 
 
-def find_volunteer(volunteer_id: str) -> Optional[dict]:
-    target = normalize_id(volunteer_id)
-    volunteers = load_volunteers()
+def find_volunteer(volunteer_id: str):
+    volunteer_id = normalize_id(volunteer_id)
 
-    for v in volunteers:
-        if normalize_id(v["编号"]) == target:
-            return v
-
-    if target.isdigit():
-        target_int = int(target)
-        for v in volunteers:
-            vid = normalize_id(v["编号"])
-            if vid.isdigit() and int(vid) == target_int:
-                return v
-    return None
+    return db_query("""
+        select
+            id as "编号",
+            name as "姓名",
+            status as "状态",
+            phone as "电话号码",
+            pin as "PIN"
+        from volunteers
+        where id = %s
+    """, (volunteer_id,), fetchone=True)
 
 
 def verify_pin_for_volunteer(volunteer: dict, pin: str) -> bool:
@@ -987,6 +1025,7 @@ def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
         return False, "请选择正确岗位。"
 
     volunteer = find_volunteer(volunteer_id)
+
     if not volunteer:
         return False, f"找不到编号：{volunteer_id}"
 
@@ -996,77 +1035,87 @@ def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
     if not verify_pin_for_volunteer(volunteer, pin):
         return False, "PIN 不正确。"
 
-    with ATT_LOCK:
-        global ATT_CACHE_LOADED, ATT_CACHE
-        if not ATT_CACHE_LOADED:
-            ATT_CACHE = _load_attendance_rows_from_excel()
-            ATT_CACHE_LOADED = True
+    opened = db_query("""
+        select *
+        from attendance
+        where date = %s
+          and volunteer_id = %s
+          and (end_time is null or end_time = '')
+        order by id desc
+        limit 1
+    """, (now_date_str(), volunteer["编号"]), fetchone=True)
 
-        for item in ATT_CACHE:
-            d = format_date_value(item.get("日期"))
-            end_time = str(item.get("结束时间") or "").strip()
-            same_id = "编号" in item and normalize_id(item.get("编号")) == normalize_id(volunteer["编号"])
-            same_name = str(item.get("姓名") or "").strip() == volunteer["姓名"]
-            if d == now_date_str() and end_time == "" and (same_id or same_name):
-                return False, f"{volunteer['姓名']} 今天已经签到，还没签退。请先签退。"
+    if opened:
+        return False, f"{volunteer['姓名']} 今天已经签到，还没签退。请先签退。"
 
-        next_row = max([int(r.get("_row", 1)) for r in ATT_CACHE] + [1]) + 1
-        ATT_CACHE.append({
-            "日期": now_date_str(),
-            "编号": volunteer["编号"],
-            "姓名": volunteer["姓名"],
-            "报名": 0,
-            "签到": 1,
-            "岗位": role,
-            "开始时间": now_time_str(),
-            "结束时间": "",
-            "时数": "",
-            "备注": "iPad签到",
-            "_row": next_row,
-        })
-        mark_attendance_dirty()
+    db_query("""
+        insert into attendance
+        (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, remark)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (
+        now_date_str(),
+        volunteer["编号"],
+        volunteer["姓名"],
+        0,
+        1,
+        role,
+        now_time_str(),
+        "",
+        None,
+        "iPad签到"
+    ))
 
     return True, f"{volunteer['姓名']} 已签到：{role}"
 
 
-def sign_out(row_number: int, pin: str) -> tuple[bool, str]:
-    with ATT_LOCK:
-        global ATT_CACHE_LOADED, ATT_CACHE
-        if not ATT_CACHE_LOADED:
-            ATT_CACHE = _load_attendance_rows_from_excel()
-            ATT_CACHE_LOADED = True
+def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
+    volunteer_id = normalize_id(volunteer_id)
 
-        target = None
-        for item in ATT_CACHE:
-            if int(item.get("_row", 0)) == row_number and format_date_value(item.get("日期")) == now_date_str() and str(item.get("结束时间") or "").strip() == "":
-                target = item
-                break
+    if not volunteer_id:
+        return False, "请输入编号。"
+    if not pin:
+        return False, "请输入 PIN。"
 
-        if not target:
-            return False, "找不到这笔进行中的签到记录，可能已经签退了。"
+    volunteer = find_volunteer(volunteer_id)
 
-        name = str(target.get("姓名") or "").strip()
-        volunteer = None
-        for v in load_volunteers():
-            if v.get("姓名") == name:
-                volunteer = v
-                break
+    if not volunteer:
+        return False, f"找不到编号：{volunteer_id}"
 
-        if not volunteer:
-            return False, "找不到此义工资料，无法验证 PIN。"
+    if not verify_pin_for_volunteer(volunteer, pin):
+        return False, "PIN 不正确。"
 
-        if not verify_pin_for_volunteer(volunteer, pin):
-            return False, "PIN 不正确，不能签退。"
+    row = db_query("""
+        select *
+        from attendance
+        where date = %s
+          and volunteer_id = %s
+          and (end_time is null or end_time = '')
+        order by id desc
+        limit 1
+    """, (now_date_str(), volunteer["编号"]), fetchone=True)
 
-        end = now_time_str()
-        start = str(target.get("开始时间") or "").strip()
-        hours = calc_hours(start, end)
-        target["结束时间"] = end
-        target["时数"] = hours
-        role = target.get("岗位", "")
-        mark_attendance_dirty()
+    if not row:
+        return False, f"{volunteer['姓名']} 今天没有未签退记录。"
 
-    return True, f"{name} 已签退：{role}，共 {hours} 小时。"
+    end_time = now_time_str()
+
+    try:
+        start_dt = parse_time_to_datetime(row["start_time"])
+        end_dt = parse_time_to_datetime(end_time)
+        hours = round((end_dt - start_dt).total_seconds() / 3600, 2)
+        if hours < 0:
+            hours = 0
+    except Exception:
+        hours = None
+
+    db_query("""
+        update attendance
+        set end_time = %s,
+            hours = %s
+        where id = %s
+    """, (end_time, hours, row["id"]))
+
+    return True, f"{volunteer['姓名']} 已签退。"
 
 
 def update_record(row_number: int, role: str, start_time: str, end_time: str, remark: str) -> tuple[bool, str]:
