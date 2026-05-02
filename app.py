@@ -826,91 +826,6 @@ def safe_save_workbook(wb, path: Path) -> None:
 def reload_attendance_cache() -> None:
     return
 
-def export_data_for_old_report():
-    
-    # volunteers
-    vol_rows = db_query("""
-        select
-            id as "编号",
-            name as "姓名",
-            status as "状态",
-            phone as "电话号码"
-        from volunteers
-        order by id
-    """, fetchall=True)
-
-    vol_df = pd.DataFrame(vol_rows)
-
-    if not vol_df.empty:
-        vol_df["是否义工"] = "是"
-
-        for col in ["编号", "姓名", "状态", "电话号码", "是否义工"]:
-            if col not in vol_df.columns:
-                vol_df[col] = ""
-
-        vol_df = vol_df[["编号", "姓名", "状态", "电话号码", "是否义工"]]
-
-        vol_df.to_excel(
-            VOLUNTEERS_FILE,
-            index=False,
-            sheet_name=VOLUNTEERS_SHEET
-        )
-
-    # attendance
-    rows = db_query("""
-        select *
-        from attendance
-        order by date, start_time
-    """, fetchall=True)
-
-    att_df = pd.DataFrame(rows)
-
-    if not att_df.empty:
-        att_df = att_df.rename(columns={
-            "date": "日期",
-            "volunteer_id": "编号",
-            "name": "姓名",
-            "signup": "报名",
-            "signin": "签到",
-            "role": "岗位",
-            "start_time": "开始时间",
-            "end_time": "结束时间",
-            "hours": "时数",
-            "remark": "备注",
-        })
-
-        for col in ["日期", "编号", "姓名", "报名", "签到", "岗位", "开始时间", "结束时间", "时数", "备注"]:
-            if col not in att_df.columns:
-                att_df[col] = ""
-
-        att_df = att_df[["日期", "编号", "姓名", "报名", "签到", "岗位", "开始时间", "结束时间", "时数", "备注"]]
-        att_df.to_excel(ATTENDANCE_FILE, index=False, sheet_name=ATTENDANCE_SHEET)
-
-    # reading
-    reading_rows = db_query("""
-        select *
-        from reading
-        order by date, time
-    """, fetchall=True)
-
-    reading_df = pd.DataFrame(reading_rows)
-
-    if not reading_df.empty:
-        reading_df = reading_df.rename(columns={
-            "date": "日期",
-            "name": "姓名",
-            "identity": "身份",
-            "topic": "主题",
-            "session": "场次",
-            "time": "时间",
-        })
-
-        for col in ["日期", "姓名", "身份", "主题", "场次", "时间"]:
-            if col not in reading_df.columns:
-                reading_df[col] = ""
-
-        reading_df = reading_df[["日期", "姓名", "身份", "主题", "场次", "时间"]]
-        reading_df.to_excel(READING_FILE, index=False)
 
 # =========================
 # 4) Excel 读取 / 建立
@@ -1232,47 +1147,7 @@ def delete_record(row_number: int) -> tuple[bool, str]:
 
     return True, f"已删除 {name} 的这笔记录。"
 
-
-def run_report_script() -> tuple[bool, str]:
-    if not REPORT_SCRIPT.exists():
-        return False, f"找不到报表脚本：{REPORT_SCRIPT.name}"
-
-    try:
-        export_data_for_old_report()
-
-        result = subprocess.run(
-            [sys.executable, str(REPORT_SCRIPT)],
-            cwd=str(BASE_DIR),
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-
-        if result.returncode != 0:
-            err = result.stderr.strip() or result.stdout.strip() or "未知错误"
-            return False, "生成报表失败：" + err[-500:]
-
-        return True, "报表已生成。"
-
-    except subprocess.TimeoutExpired:
-        return False, "生成报表超时，请用 BAT 手动生成。"
-    except Exception as e:
-        return False, f"生成报表失败：{e}"
-    
-def get_latest_report_file():
-    reports_dir = BASE_DIR / "reports"
-
-    if not reports_dir.exists():
-        return None
-
-    files = list(reports_dir.glob("*.xlsx"))
-    if not files:
-        return None
-
-    # 按修改时间排序，拿最新
-    latest = max(files, key=lambda f: f.stat().st_mtime)
-    return latest
-
+   
 
 # =========================
 # 6) 页面
@@ -1919,14 +1794,6 @@ def admin_report():
         return redirect(url_for("index"))
 
     code = get_today_code()
-    action = request.form.get("action")
-
-    # 🔥 这里改
-    if action == "monthly":
-        return redirect(url_for("download_month_report"))
-
-    elif action == "yearly":
-        return redirect(url_for("download_year_report"))
 
     return f"""
 <h1>🔐 管理员工具</h1>
@@ -1942,29 +1809,9 @@ def admin_report():
     📥 下载签到数据
 </a>
 
-<hr>
-
-<h2>报表工具</h2>
-
-<form method="get" action="/download_month_report">
-    <label>选择月份：</label>
-    <input type="month" name="month" required style="font-size:18px;">
-    <button style="font-size:20px;">📊 下载指定月报</button>
-</form>
-
 <br>
-
-<form method="get" action="/download_year_report">
-    <label>选择年份：</label>
-    <input type="number" name="year" placeholder="2026" required style="font-size:18px;">
-    <button style="font-size:20px;">📈 下载指定年报</button>
-</form>
-
-<a href="/download_year_report" style="display:block;margin-top:12px;font-size:20px;">
-  📈 下载今年年报
-</a>
+<a href="/" style="font-size:20px;">⬅ 返回首页</a>
 """
-
 
 @app.route("/api/volunteer/<volunteer_id>")
 def api_volunteer(volunteer_id):
@@ -1976,63 +1823,6 @@ def api_volunteer(volunteer_id):
         return jsonify({"ok": True, "volunteer": safe_v})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
-
-
-@app.route("/download_month_report")
-def download_month_report():
-    from flask import request, send_file
-
-    selected_month = request.args.get("month")
-
-    if not selected_month:
-        return "请选择月份"
-
-    # 👉 传给 zhibanbiao2026
-    os.environ["REPORT_MONTH"] = selected_month
-
-    ok, msg = run_report_script()
-
-    if not ok:
-        return msg
-
-    latest = get_latest_report_file()
-
-    if not latest:
-        return "找不到报表文件"
-
-    return send_file(
-        latest,
-        as_attachment=True,
-        download_name=latest.name
-    )
-
-@app.route("/download_year_report")
-def download_year_report():
-    from flask import request, send_file
-
-    selected_year = request.args.get("year")
-
-    if not selected_year:
-        return "请输入年份"
-
-    # 👉 传给报表脚本
-    os.environ["REPORT_YEAR"] = selected_year
-
-    ok, msg = run_report_script()
-
-    if not ok:
-        return msg
-
-    latest = get_latest_report_file()
-
-    if not latest:
-        return "找不到报表文件"
-
-    return send_file(
-        latest,
-        as_attachment=True,
-        download_name=latest.name
-    )
 
 # =========================
 # 8) 修改 PIN
@@ -2078,18 +1868,6 @@ def change_pin_page():
         flash(msg, "ok" if ok else "bad")
         return redirect(url_for("change_pin_page"))
     return render_template_string(PIN_PAGE, t=get_text())
-
-
-# =========================
-# 9) 启动
-# =========================
-if __name__ == "__main__":
-    ensure_attendance_file()
-    load_attendance_rows()
-    start_background_saver_once()
-    atexit.register(lambda: flush_attendance_to_excel(force=True))
-
-    import os
 
 if __name__ == "__main__":
     print("====================================")
