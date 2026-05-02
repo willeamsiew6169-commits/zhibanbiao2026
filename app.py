@@ -19,13 +19,15 @@ import subprocess
 import socket
 import qrcode
 import base64
-
 import psycopg2
+
 from psycopg2.extras import RealDictCursor
 from io import BytesIO
 from pypinyin import lazy_pinyin
 from datetime import datetime, date
 from pathlib import Path
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
 from typing import Optional
 from sqlalchemy import create_engine, text
 from openpyxl import Workbook, load_workbook
@@ -39,6 +41,8 @@ from flask import (
 )
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
+
+MY_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
 def get_db():
     if not DATABASE_URL:
@@ -264,7 +268,7 @@ READING_FILE = "reading.xlsx"
 # 工具函数
 # =========================
 def get_today_code():
-    today = date.today()
+    today = datetime.now(MY_TZ)
     day_index = today.toordinal() % len(TODAY_CODE_LIST)
     return TODAY_CODE_LIST[day_index]
 
@@ -317,7 +321,7 @@ def beautify_reading_excel():
 from datetime import datetime
 
 def parse_time_to_datetime(t):
-    today = datetime.now()
+    today = datetime.now(MY_TZ)
     s = str(t).strip().lower()
 
     for fmt in ["%H:%M", "%I:%M%p", "%I:%M %p"]:
@@ -349,7 +353,7 @@ def ensure_reading_file():
 
 
 def get_today():
-    return datetime.now().strftime("%Y-%m-%d")
+    return datetime.now(MY_TZ).strftime("%Y-%m-%d")
 
 # 👉 从 attendance.xlsx 拿今天签到名单
 def get_today_attendees():
@@ -401,7 +405,7 @@ def reading():
             if col not in df.columns:
                 df[col] = ""
 
-        now_time = datetime.now().strftime("%I:%M %p").lstrip("0")
+        now_time = datetime.now(MY_TZ).strftime("%I:%M %p").lstrip("0")
         new_rows = []
 
         today_attendees = set(get_today_attendees())
@@ -736,11 +740,11 @@ def set_lang(lang):
 # 3) 工具函数
 # =========================
 def now_date_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    return datetime.now(MY_TZ).strftime("%Y-%m-%d")
 
 
 def now_time_str() -> str:
-    return datetime.now().strftime("%I:%M%p").lstrip("0").lower()
+    return datetime.now(MY_TZ).strftime("%I:%M%p").lstrip("0").lower()
 
 
 def normalize_id(value) -> str:
@@ -782,7 +786,7 @@ def calc_hours(start_time: str, end_time: str) -> float:
 def backup_attendance() -> None:
     if ATTENDANCE_FILE.exists():
         BACKUP_DIR.mkdir(exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now(MY_TZ).strftime("%Y%m%d_%H%M%S")
         shutil.copy2(ATTENDANCE_FILE, BACKUP_DIR / f"attendance_{ts}.xlsx")
 
 
