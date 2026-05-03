@@ -1192,7 +1192,18 @@ def delete_record(row_number: int) -> tuple[bool, str]:
 
     return True, f"已删除 {name} 的这笔记录。"
 
-   
+def get_member_payment(member_id):
+    rows = db_query("""
+        select paid_month
+        from member_payments
+        where member_id = %s
+        order by paid_month
+    """, (member_id,), fetchall=True)
+
+    months = [r["paid_month"] for r in rows]
+    latest = months[-1] if months else ""
+
+    return months, latest  
 
 # =========================
 # 6) 页面
@@ -2105,6 +2116,41 @@ def api_volunteer(volunteer_id):
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
+    
+@app.route("/member", methods=["GET", "POST"])
+def member():
+    if request.method == "POST":
+        member_id = request.form.get("member_id")
+        pin = request.form.get("pin")
+
+        # 查人
+        m = db_query("""
+            select * from members where member_id = %s
+        """, (member_id,), fetchone=True)
+
+        if not m:
+            return "❌ 找不到佛友"
+
+        # PIN 验证
+        real_pin = m.get("pin") or m.get("phone")[-4:]
+        if str(pin) != str(real_pin):
+            return "❌ PIN 错误"
+
+        months, latest = get_member_payment(member_id)
+
+        return f"""
+        姓名：{m['name']}<br>
+        已供养月份：{', '.join(months)}<br>
+        已供养至：{latest}
+        """
+
+    return """
+    <form method="post">
+        编号：<input name="member_id"><br>
+        PIN：<input name="pin"><br>
+        <button>查询</button>
+    </form>
+    """
 
 # =========================
 # 8) 修改 PIN
