@@ -1930,6 +1930,176 @@ def download_reading():
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+def normalize_member_query_id(value: str) -> str:
+    s = str(value or "").strip().upper()
+
+    if not s:
+        return ""
+
+    if s.endswith(".0"):
+        s = s[:-2]
+
+    if "-" in s:
+        return s
+
+    if s.startswith("0") and s.isdigit():
+        return f"STW-{int(s)}"
+
+    if s.isdigit():
+        return f"CHE-{int(s)}"
+
+    return s
+
+
+def verify_member_pin(member, input_pin):
+    input_pin = str(input_pin or "").strip()
+
+    real_pin = str(member.get("pin") or "").strip()
+
+    if real_pin:
+        return input_pin == real_pin
+
+    phone = only_digits(member.get("phone") or "")
+    return input_pin == phone[-4:]
+
+
+def get_member_payment(member_id):
+    rows = db_query("""
+        select paid_month
+        from member_payments
+        where member_id = %s
+        order by paid_month
+    """, (member_id,), fetchall=True)
+
+    months = [r["paid_month"] for r in (rows or [])]
+    latest = months[-1] if months else ""
+
+    return months, latest
+
+
+@app.route("/member", methods=["GET", "POST"])
+def member_page():
+    result = None
+    error = ""
+
+    if request.method == "POST":
+        raw_id = request.form.get("member_id", "")
+        pin = request.form.get("pin", "")
+        member_id = normalize_member_query_id(raw_id)
+
+        member = db_query("""
+            select *
+            from members
+            where member_id = %s
+        """, (member_id,), fetchone=True)
+
+        if not member:
+            error = "❌ 找不到月费编号"
+        elif not verify_member_pin(member, pin):
+            error = "❌ PIN 不正确"
+        else:
+            months, latest = get_member_payment(member_id)
+            result = {
+                "member_id": member_id,
+                "name": member.get("name") or "",
+                "english_name": member.get("english_name") or "",
+                "phone": member.get("phone") or "",
+                "months": months,
+                "latest": latest,
+            }
+
+    return render_template_string("""
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>月费查询</title>
+<style>
+body {
+    font-family: "Microsoft YaHei", Arial, sans-serif;
+    background:#f6f6f6;
+    padding:20px;
+}
+.card {
+    max-width:650px;
+    margin:auto;
+    background:white;
+    border-radius:18px;
+    padding:22px;
+    box-shadow:0 2px 12px rgba(0,0,0,.08);
+}
+input {
+    width:100%;
+    font-size:26px;
+    padding:14px;
+    margin:8px 0 16px;
+    border-radius:12px;
+    border:1px solid #ccc;
+    box-sizing:border-box;
+}
+button {
+    width:100%;
+    font-size:26px;
+    padding:14px;
+    border:0;
+    border-radius:14px;
+    background:#198754;
+    color:white;
+    font-weight:bold;
+}
+.result {
+    margin-top:20px;
+    font-size:22px;
+    line-height:1.8;
+    background:#f8f9fa;
+    padding:16px;
+    border-radius:12px;
+}
+.error {
+    margin-top:20px;
+    font-size:22px;
+    color:#842029;
+    background:#f8d7da;
+    padding:14px;
+    border-radius:12px;
+}
+a { font-size:20px; }
+</style>
+</head>
+<body>
+<div class="card">
+<a href="/">← 返回签到首页</a>
+<h1>月费查询</h1>
+
+<form method="post">
+    <label>月费编号</label>
+    <input name="member_id" placeholder="例如：208 / CHE-208 / 0208" required>
+
+    <label>PIN</label>
+    <input name="pin" type="password" inputmode="numeric" required>
+
+    <button type="submit">查询</button>
+</form>
+
+{% if error %}
+<div class="error">{{ error }}</div>
+{% endif %}
+
+{% if result %}
+<div class="result">
+    姓名：<b>{{ result.name }}</b><br>
+    英文名：{{ result.english_name or "-" }}<br>
+    电话：{{ result.phone or "-" }}<br>
+    月费编号：{{ result.member_id }}<br>
+    已供养月份：{{ ", ".join(result.months) if result.months else "暂无记录" }}<br>
+    已供养至：<b>{{ result.latest or "暂无记录" }}</b>
+</div>
+{% endif %}
+</div>
+</body>
+</html>
+""", result=result, error=error)
+
 
 @app.route("/admin_report", methods=["POST"])
 def admin_report():
