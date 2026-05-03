@@ -1408,7 +1408,6 @@ async function lookupVolunteer() {
     currentVolunteerName = data.volunteer.姓名;
     box.innerHTML =
       `${TXT.name}：<b>${data.volunteer.姓名}</b><br>` +
-      `${TXT.phone}：${data.volunteer.电话号码 || '-'}<br>` +
       `${TXT.status}：${data.volunteer.状态 || '-'}`;
     btn.disabled = false;
   } else {
@@ -2094,8 +2093,16 @@ def api_volunteer(volunteer_id):
         v = find_volunteer(volunteer_id)
         if not v:
             return jsonify({"ok": False})
-        safe_v = {k: v.get(k, "") for k in ["编号", "姓名", "电话号码", "状态"]}
+
+        # 安全版：只给前端显示姓名，不给电话、不回传PIN
+        safe_v = {
+            "编号": v.get("编号", ""),
+            "姓名": v.get("姓名", ""),
+            "状态": v.get("状态", ""),
+        }
+
         return jsonify({"ok": True, "volunteer": safe_v})
+
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
