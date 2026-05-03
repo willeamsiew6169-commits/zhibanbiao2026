@@ -27,11 +27,12 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 from pypinyin import lazy_pinyin
-from datetime import datetime, date
+from id_utils import normalize_member_id
 from sqlalchemy import create_engine, text
 from psycopg2.extras import RealDictCursor
 from openpyxl import Workbook, load_workbook
 from psycopg2.pool import SimpleConnectionPool
+from datetime import datetime, date, time, timedelta
 from excel_style_utils import beautify_attendance_file
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from flask import (
@@ -41,8 +42,8 @@ from flask import (
 )
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
-today = datetime.today().strftime("%Y-%m-%d")
 MY_TZ = ZoneInfo("Asia/Kuala_Lumpur")
+today = datetime.now(MY_TZ).strftime("%Y-%m-%d")
 
 def get_db():
     if not DATABASE_URL:
@@ -312,6 +313,18 @@ def get_today_code():
     today = datetime.now(MY_TZ)
     day_index = today.toordinal() % len(TODAY_CODE_LIST)
     return TODAY_CODE_LIST[day_index]
+
+
+def get_display_today_code():
+    """管理员页面显示用：晚上7点后显示明天的现场码。"""
+    now = datetime.now(MY_TZ)
+
+    if now.hour >= 19:
+        tomorrow = now + timedelta(days=1)
+        day_index = tomorrow.toordinal() % len(TODAY_CODE_LIST)
+        return TODAY_CODE_LIST[day_index]
+
+    return get_today_code()
 
 def beautify_reading_excel():
     if not os.path.exists(READING_FILE):
@@ -788,15 +801,6 @@ def now_time_str() -> str:
     return datetime.now(MY_TZ).strftime("%I:%M%p").lstrip("0").lower()
 
 
-def normalize_id(value) -> str:
-    if value is None:
-        return ""
-    s = str(value).strip()
-    if s.endswith(".0"):
-        s = s[:-2]
-    return s.strip()
-
-
 def only_digits(value) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
 
@@ -857,16 +861,31 @@ def load_volunteers() -> list[dict]:
             status as "状态",
             pin as "PIN"
         from volunteers
+        where status = '在册'
         order by id
     """, fetchall=True)
 
     return rows or []
 
+def verify_today_code(input_code):
+    now = datetime.now(MY_TZ)
+
+    # 1️⃣ 当前有效码
+    today_code = get_today_code()
+
+    # 2️⃣ 如果超过晚上7点 → 用“明天的码”
+    if now.hour >= 19:
+        tomorrow = now + timedelta(days=1)
+        day_index = tomorrow.toordinal() % len(TODAY_CODE_LIST)
+        today_code = TODAY_CODE_LIST[day_index]
+
+    return str(input_code).strip() == str(today_code)
+
 
 def find_volunteer(volunteer_id: str):
-    volunteer_id = normalize_id(volunteer_id)
+    volunteer_id = normalize_member_id(volunteer_id)
 
-    return db_query("""
+    result = db_query("""
         select
             id as "编号",
             name as "姓名",
@@ -877,11 +896,23 @@ def find_volunteer(volunteer_id: str):
         where id = %s
     """, (volunteer_id,), fetchone=True)
 
+    if not result:
+        return None
+
+    return result
 
 def verify_pin_for_volunteer(volunteer, pin):
-    phone = only_digits(volunteer.get("电话号码"))
-    return str(pin).strip() == phone[-4:]
+    input_pin = str(pin).strip()
 
+    # 1️⃣ 先用数据库 PIN（如果有）
+    real_pin = volunteer.get("PIN")
+
+    if real_pin:
+        return input_pin == str(real_pin).strip()
+
+    # 2️⃣ fallback → 电话后4位
+    phone = only_digits(volunteer.get("电话号码", ""))
+    return input_pin == phone[-4:]
 
 def _load_attendance_rows_from_excel() -> list[dict]:
     return []
@@ -989,7 +1020,7 @@ def get_today_records(limit: int | None = None) -> list[dict]:
 # 5) 签到 / 签退 / 修改
 # =========================
 def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
-    volunteer_id = normalize_id(volunteer_id)
+    volunteer_id = normalize_member_id(volunteer_id)
     role = str(role or "").strip()
 
     if not volunteer_id:
@@ -1043,7 +1074,7 @@ def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
 
 
 def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
-    volunteer_id = normalize_id(volunteer_id)
+    volunteer_id = normalize_member_id(volunteer_id)
 
     if not volunteer_id:
         return False, "请输入编号。"
@@ -1582,38 +1613,57 @@ def admin_add_record():
         return redirect(url_for("admin_add_record", pin=pin))
 
     return render_template_string("""
-<h1>🛠 补录签到记录</h1>
+    <h1>🛠 补录签到</h1>
 
-<form method="post">
-  <input type="hidden" name="pin" value="{{ pin }}">
+    <form method="post">
+    <input type="hidden" name="pin" value="{{ pin }}">
 
-  日期：<br>
-  <input type="date" name="date" value="{{ today }}" required><br><br>
+    日期：
+    <input type="date" name="date" value="{{ today }}" required><br><br>
 
-  编号：<br>
-  <input type="text" name="id"><br><br>
+    选择义工：
+    <select name="id" id="vol_id" onchange="fillName()" required>
+        <option value="">--请选择--</option>
+        {% for v in volunteers %}
+        <option value="{{ v.id }}">{{ v.name }} ({{ v.id }})</option>
+        {% endfor %}
+    </select><br><br>
 
-  姓名：<br>
-  <input type="text" name="name" required><br><br>
+    姓名：
+    <input type="text" name="name" id="vol_name" required><br><br>
 
-  岗位：<br>
-  <input type="text" name="role"><br><br>
+    岗位：
+    <input type="text" name="role"><br><br>
 
-  开始时间（如 10:00am）：<br>
-  <input type="text" name="start"><br><br>
+    开始时间：
+    <input type="text" name="start" value="{{ now }}"><br><br>
 
-  结束时间（如 2:00pm）：<br>
-  <input type="text" name="end"><br><br>
+    结束时间：
+    <input type="text" name="end"><br><br>
 
-  备注：<br>
-  <input type="text" name="remark"><br><br>
+    备注：
+    <input type="text" name="remark"><br><br>
 
-  <button style="font-size:20px;">➕ 添加记录</button>
-</form>
+    <button style="font-size:20px;">➕ 添加记录</button>
+    </form>
 
-<br>
-<a href="/admin_report?pin={{ pin }}">⬅ 返回管理员</a>
-""", pin=pin)
+    <script>
+    function fillName() {
+    const sel = document.getElementById("vol_id");
+    const text = sel.options[sel.selectedIndex].text;
+    const name = text.split(" (")[0];
+    document.getElementById("vol_name").value = name;
+    }
+    </script>
+
+    <br>
+    <a href="/admin_report?pin={{ pin }}">⬅ 返回</a>
+    """, 
+    pin=pin,
+    today=now_date_str(),
+    now=datetime.now(MY_TZ).strftime("%I:%M%p").lower(),
+    volunteers=db_query("select id, name from volunteers where status='在册'", fetchall=True)
+    )
 
 @app.route("/qr")
 def qr_page():
@@ -1687,9 +1737,7 @@ def qr_page():
 def do_sign_in():
     if TODAY_CODE_ENABLED:
         input_code = request.form.get("today_code", "").strip()
-        real_code = get_today_code()
-
-        if input_code != real_code:
+        if not verify_today_code(input_code):
             flash("今日签到码错误，请看现场公布的号码", "bad")
             return redirect(url_for("index"))
 
@@ -1881,7 +1929,7 @@ def admin_report():
         flash("管理员 PIN 不正确。", "bad")
         return redirect(url_for("index"))
 
-    code = get_today_code()
+    code = get_display_today_code()
 
     return f"""
 <h1>🔐 管理员工具</h1>
@@ -1901,9 +1949,144 @@ def admin_report():
   🛠 补录签到
 </a>
 
+<a href="/admin_records?pin={pin}" style="display:block;margin-top:12px;font-size:24px;">
+  ✏️ 修改 / 删除今日记录
+</a>
+
 <br>
 <a href="/" style="font-size:20px;">⬅ 返回首页</a>
 """
+
+@app.route("/admin_records")
+def admin_records():
+    pin = request.args.get("pin", "")
+
+    if pin != ADMIN_PIN:
+        return "无权限"
+
+    rows = db_query("""
+        select *
+        from attendance
+        where date = %s
+        order by id desc
+    """, (now_date_str(),), fetchall=True)
+
+    return render_template_string("""
+<h1>✏️ 今日记录管理</h1>
+
+<a href="/admin_report?pin={{ pin }}">⬅ 返回管理员</a>
+<br><br>
+
+<table border="1" cellpadding="8" style="border-collapse:collapse;font-size:18px;">
+<tr>
+  <th>姓名</th>
+  <th>岗位</th>
+  <th>开始</th>
+  <th>结束</th>
+  <th>时数</th>
+  <th>操作</th>
+</tr>
+
+{% for r in rows %}
+<tr>
+  <td>{{ r.name }}</td>
+  <td>{{ r.role }}</td>
+  <td>{{ r.start_time }}</td>
+  <td>{{ r.end_time }}</td>
+  <td>{{ r.hours }}</td>
+  <td>
+    <a href="/admin_edit_record/{{ r.id }}?pin={{ pin }}">修改</a>
+    |
+    <a href="/admin_delete_record/{{ r.id }}?pin={{ pin }}"
+       onclick="return confirm('确定删除这笔记录吗？');">
+       删除
+    </a>
+  </td>
+</tr>
+{% endfor %}
+</table>
+""", rows=rows, pin=pin)
+
+@app.route("/admin_edit_record/<int:record_id>", methods=["GET", "POST"])
+def admin_edit_record(record_id):
+    pin = request.args.get("pin") or request.form.get("pin")
+
+    if pin != ADMIN_PIN:
+        return "无权限"
+
+    row = db_query("""
+        select *
+        from attendance
+        where id = %s
+    """, (record_id,), fetchone=True)
+
+    if not row:
+        return "找不到记录"
+
+    if request.method == "POST":
+        role = request.form.get("role", "").strip()
+        start_time = request.form.get("start_time", "").strip()
+        end_time = request.form.get("end_time", "").strip()
+        remark = request.form.get("remark", "").strip()
+
+        hours = None
+        if start_time and end_time:
+            hours = calc_hours(start_time, end_time)
+
+        db_query("""
+            update attendance
+            set role = %s,
+                start_time = %s,
+                end_time = %s,
+                hours = %s,
+                remark = %s
+            where id = %s
+        """, (role, start_time, end_time, hours, remark, record_id))
+
+        return redirect(url_for("admin_records", pin=pin))
+
+    return render_template_string("""
+<h1>✏️ 修改记录</h1>
+
+<form method="post">
+  <input type="hidden" name="pin" value="{{ pin }}">
+
+  <p>姓名：<b>{{ row.name }}</b></p>
+  <p>日期：{{ row.date }}</p>
+
+  岗位：<br>
+  <input name="role" value="{{ row.role or '' }}" style="font-size:22px;"><br><br>
+
+  开始时间：<br>
+  <input name="start_time" value="{{ row.start_time or '' }}" style="font-size:22px;"><br><br>
+
+  结束时间：<br>
+  <input name="end_time" value="{{ row.end_time or '' }}" style="font-size:22px;"><br><br>
+
+  备注：<br>
+  <input name="remark" value="{{ row.remark or '' }}" style="font-size:22px;"><br><br>
+
+  <button style="font-size:22px;">保存修改</button>
+</form>
+
+<br>
+<a href="/admin_records?pin={{ pin }}">⬅ 返回</a>
+""", row=row, pin=pin)
+
+@app.route("/admin_delete_record/<int:record_id>")
+def admin_delete_record(record_id):
+    pin = request.args.get("pin", "")
+
+    if pin != ADMIN_PIN:
+        return "无权限"
+
+    db_query("""
+        delete from attendance
+        where id = %s
+          and date = %s
+    """, (record_id, now_date_str()))
+
+    return redirect(url_for("admin_records", pin=pin))
 
 @app.route("/api/volunteer/<volunteer_id>")
 def api_volunteer(volunteer_id):
@@ -1943,7 +2126,7 @@ def change_pin(volunteer_id: str, old_pin: str, new_pin: str, confirm_pin: str):
         update volunteers
         set pin = %s
         where id = %s
-    """, (new_pin, normalize_id(volunteer_id)))
+    """, (new_pin, normalize_member_id(volunteer_id)))
 
     return True, "PIN 已更新"
 
