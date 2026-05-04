@@ -973,8 +973,12 @@ def verify_pin_for_volunteer(volunteer, pin):
     if real_pin:
         return input_pin == str(real_pin).strip()
 
-    # 2️⃣ fallback → 电话后4位
+    # 2️⃣ fallback → 电话后4位 or 0000
     phone = only_digits(volunteer.get("电话号码", ""))
+
+    if not phone:
+        return input_pin == "0000"   # ✅ 关键在这里
+
     return input_pin == phone[-4:]
 
 def get_member_paid_until(member_id):
