@@ -1325,24 +1325,24 @@ PAGE = """
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ t.system_title }}</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Microsoft YaHei", Arial, sans-serif; background:#f6f6f6; margin:0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Microsoft YaHei", Arial, sans-serif; background:#f6f6f6; margin:0; font-size: 22px;}
     .wrap { max-width: 900px; margin: 0 auto; padding: 18px; }
-    .card { background:white; border-radius:18px; padding:20px; margin-bottom:16px; box-shadow:0 2px 12px rgba(0,0,0,.08); }
+    .card { background:white; border-radius:18px; padding:24px; margin-bottom:18px; box-shadow:0 2px 12px rgba(0,0,0,.08); }
     h1 { font-size: 30px; margin: 6px 0 18px; }
     h2 { font-size: 24px; margin: 0 0 14px; }
     label { font-size: 20px; font-weight: 700; display:block; margin-bottom:8px; }
-    input, select { width:100%; font-size: 26px; padding: 14px; border-radius: 12px; border:1px solid #ccc; box-sizing:border-box; }
+    input, select { width:100%; font-size: 30px; padding: 16px; border-radius: 14px; border:1px solid #ccc; box-sizing:border-box; }
     .row { display:grid; grid-template-columns: 1fr 1fr; gap:14px; }
-    button { font-size: 24px; font-weight: 800; padding: 14px 18px; border:0; border-radius: 14px; cursor:pointer; }
+    button { font-size: 28px; font-weight: 800; padding: 14px 18px; border:0; border-radius: 16px; cursor:pointer; }
     .btn-find { background:#0d6efd; color:white; width:100%; margin-top:16px; }
-    .btn-in { background:#198754; color:white; width:100%; margin-top:16px; }
+    .btn-in { background:#198754; color:white; width:100%; margin-top:16px; font-size:30px; }
     .btn-out { background:#dc3545; color:white; }
     .btn-admin { background:#6f42c1; color:white; width:100%; margin-top:16px; }
     .btn-lang { display:inline-block; font-size:18px; padding:8px 12px; background:white; border-radius:999px; text-decoration:none; color:#333; border:1px solid #ddd; margin-right:6px; }
-    .msg { padding:14px; border-radius:12px; font-size:20px; margin-bottom:14px; white-space:pre-wrap; }
+    .msg { padding:18px; border-radius:14px; font-size:20px; margin-bottom:14px; white-space:pre-wrap; }
     .ok { background:#d1e7dd; color:#0f5132; }
     .bad { background:#f8d7da; color:#842029; }
-    .person { font-size: 22px; line-height:1.7; background:#f8f9fa; padding:12px; border-radius:12px; margin-top:12px; }
+    .person { font-size: 26px; line-height:1.8; background:#f8f9fa; padding:16px; border-radius:14px; margin-top:12px; }
     table { width:100%; border-collapse: collapse; font-size:20px; }
     th, td { padding:12px; border-bottom:1px solid #eee; text-align:left; vertical-align:top; }
     th { background:#f1f1f1; }
