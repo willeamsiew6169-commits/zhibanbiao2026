@@ -1310,11 +1310,11 @@ PAGE = """
   {% endwith %}
 
   <div class="card">
-    <h2>{t["today_stats"]}</h2>
-    {t["today_checkin"]}：{today_count} {t["people_count"]}<br>
-    {t["today_not_checkout"]}：{not_out} {t["people"]}<br>
-    {t["today_checkout_done"]}：{done_out} {t["people"]}
-    </div>
+    <h2>{{ t.today_stats }}</h2>
+
+    {{ t.today_checkin }}：{{ today_count }} {{ t.people_count }}<br>
+    {{ t.today_not_checkout }}：{{ not_out }} {{ t.people }}<br>
+    {{ t.today_checkout_done }}：{{ done_out }} {{ t.people }}
   </div>
 
   <div class="card">
