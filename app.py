@@ -247,6 +247,8 @@ TEXT = {
         "today_checkout_done": "已完成签退",
         "people_count": "人次",
         "people": "人",
+        "paid_until": "月费已供养至",
+        "pin_wrong": "PIN 不正确，无法显示个人资料",
 
 
     },
@@ -321,6 +323,8 @@ TEXT = {
         "today_checkout_done": "Completed",
         "people_count": "times",
         "people": "people",
+        "paid_until": "Paid Until",
+        "pin_wrong": "PIN incorrect. Cannot display personal info.",
     }
 }
 
