@@ -241,6 +241,12 @@ TEXT = {
         "download_data": "📥 下载签到数据",
         "admin_add_record": "🛠 补录签到",
         "admin_records": "✏️ 修改 / 删除今日记录",
+        "today_stats": "📊 今日统计",
+        "today_checkin": "今日签到",
+        "today_not_checkout": "目前未签退",
+        "today_checkout_done": "已完成签退",
+        "people_count": "人次",
+        "people": "人",
 
 
     },
@@ -309,6 +315,12 @@ TEXT = {
         "download_data": "📥 Download Check-in Data",
         "admin_add_record": "🛠 Add Record",
         "admin_records": "✏️ Edit / Delete Today’s Records",
+        "today_stats": "📊 Today Summary",
+        "today_checkin": "Check-ins",
+        "today_not_checkout": "Not Signed Out",
+        "today_checkout_done": "Completed",
+        "people_count": "times",
+        "people": "people",
     }
 }
 
@@ -1298,11 +1310,10 @@ PAGE = """
   {% endwith %}
 
   <div class="card">
-    <h2>📊 今日统计</h2>
-    <div style="font-size:28px;line-height:1.8;">
-      今日签到：<b>{{ stats.total }}</b> 人次<br>
-      目前未签退：<b style="color:#dc3545;">{{ stats.open }}</b> 人<br>
-      已完成签退：<b style="color:#198754;">{{ stats.finished }}</b> 人
+    <h2>{t["today_stats"]}</h2>
+    {t["today_checkin"]}：{today_count} {t["people_count"]}<br>
+    {t["today_not_checkout"]}：{not_out} {t["people"]}<br>
+    {t["today_checkout_done"]}：{done_out} {t["people"]}
     </div>
   </div>
 
