@@ -1158,11 +1158,19 @@ def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
     phone = volunteer.get("电话号码") or ""
     paid_until = get_member_paid_until(volunteer["编号"])
 
-    extra = f"\n电话：{phone}" if phone else ""
-    extra += f"\n月费已供养至：{paid_until}" if paid_until else "\n月费记录：暂无"
+    # 电话显示
+    if phone:
+        phone_text = phone
+    else:
+        phone_text = "未登记"
+
+    extra = f"\n电话：{phone_text}"
+
+    # 月费显示（只在有记录时才显示）
+    if paid_until:
+        extra += f"\n月费已供养至：{paid_until}"
 
     return True, f"{volunteer['姓名']} 已签到：{role}{extra}"
-
 
 def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
     volunteer_id = normalize_member_id(volunteer_id)
@@ -1533,8 +1541,16 @@ async function lookupVolunteer() {
       `${TXT.status}：${data.volunteer.状态 || '-'}`;
 
     if (data.volunteer.pin_ok) {
-      html += `<br>${TXT.phone}：${data.volunteer.电话号码 || '-'}`;
-      html += `<br>${TXT.paid_until}：${data.volunteer["月费已供养至"] || '-'}`;
+      html += `<br>${TXT.phone}：${data.volunteer.电话号码 || '未登记'}`;
+
+      const paidUntil = data.volunteer["月费已供养至"];
+
+      if (paidUntil && paidUntil !== "-") {
+       html += `<br>${TXT.paid_until}：${paidUntil}`;
+      } else {
+        html += `<br><span style="color:#999;">暂无月费记录</span>`;
+      }
+
     } else if (pin) {
       html += `<br><span style="color:#842029;">${TXT.pin_wrong}</span>`;
     }
