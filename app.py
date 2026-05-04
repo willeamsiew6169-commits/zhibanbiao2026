@@ -955,12 +955,19 @@ def verify_today_code(input_code):
 
 
 def find_volunteer(volunteer_id: str):
-    volunteer_id = str(volunteer_id or "").strip()
+    raw_id = str(volunteer_id or "").strip()
 
-    # 签到系统 volunteers.id 只用数字：208 / 800
-    # 如果输入 CHE-208，就自动转成 208
-    if "-" in volunteer_id:
-        volunteer_id = volunteer_id.split("-")[-1].strip()
+    if not raw_id:
+        return None
+
+    if "-" in raw_id:
+        id1 = raw_id
+        id2 = raw_id.split("-")[-1].strip()
+    else:
+        id1 = raw_id
+        id2 = f"CHE-{raw_id}"
+
+    print("DEBUG find_volunteer:", raw_id, id1, id2)
 
     result = db_query("""
         select
@@ -971,8 +978,11 @@ def find_volunteer(volunteer_id: str):
             pin as "PIN",
             branch as "分会"
         from volunteers
-        where id = %s
-    """, (volunteer_id,), fetchone=True)
+        where id = %s or id = %s
+        limit 1
+    """, (id1, id2), fetchone=True)
+
+    print("DEBUG result:", result)
 
     return result
 
