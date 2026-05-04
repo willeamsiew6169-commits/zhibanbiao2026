@@ -960,16 +960,34 @@ def find_volunteer(volunteer_id: str):
     if not raw_id:
         return None
 
+    ids = [raw_id]
+
+    # CHE-208 / STW-160 → 同时尝试数字部分
     if "-" in raw_id:
-        id1 = raw_id
-        id2 = raw_id.split("-")[-1].strip()
+        branch, num = raw_id.split("-", 1)
+        branch = branch.strip().upper()
+        num = num.strip()
+
+        ids.append(num)
+
+        # STW-160 也尝试 0160
+        if branch == "STW" and num.isdigit():
+            ids.append("0" + num)
+
     else:
-        id1 = raw_id
-        id2 = f"CHE-{raw_id}"
+        # 208 → 尝试 CHE-208
+        ids.append(f"CHE-{raw_id}")
 
-    print("DEBUG find_volunteer:", raw_id, id1, id2)
+        # 0160 → 尝试 STW-160
+        if raw_id.startswith("0") and raw_id[1:].isdigit():
+            ids.append(f"STW-{raw_id[1:]}")
 
-    result = db_query("""
+    # 去重
+    ids = list(dict.fromkeys(ids))
+
+    placeholders = ",".join(["%s"] * len(ids))
+
+    result = db_query(f"""
         select
             id as "编号",
             name as "姓名",
@@ -978,11 +996,9 @@ def find_volunteer(volunteer_id: str):
             pin as "PIN",
             branch as "分会"
         from volunteers
-        where id = %s or id = %s
+        where id in ({placeholders})
         limit 1
-    """, (id1, id2), fetchone=True)
-
-    print("DEBUG result:", result)
+    """, tuple(ids), fetchone=True)
 
     return result
 
