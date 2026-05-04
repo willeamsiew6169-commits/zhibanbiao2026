@@ -945,7 +945,11 @@ def verify_today_code(input_code):
 
 
 def find_volunteer(volunteer_id: str):
-    volunteer_id = normalize_member_id(volunteer_id)
+    volunteer_id = volunteer_id.strip()
+
+    # 如果是 CHE-xxx，就取后面的数字
+    if "-" in volunteer_id:
+        volunteer_id = volunteer_id.split("-")[-1]
 
     result = db_query("""
         select
@@ -957,9 +961,6 @@ def find_volunteer(volunteer_id: str):
         from volunteers
         where id = %s
     """, (volunteer_id,), fetchone=True)
-
-    if not result:
-        return None
 
     return result
 
