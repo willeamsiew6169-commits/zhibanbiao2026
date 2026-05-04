@@ -914,6 +914,24 @@ def verify_pin_for_volunteer(volunteer, pin):
     phone = only_digits(volunteer.get("电话号码", ""))
     return input_pin == phone[-4:]
 
+def get_member_paid_until(member_id):
+    row = db_query("""
+        select max(paid_month) as paid_until
+        from member_payments
+        where member_id = %s
+    """, (member_id,), fetchone=True)
+
+    return row.get("paid_until") if row else ""
+
+def get_member_paid_until(member_id):
+    row = db_query("""
+        select max(paid_month) as paid_until
+        from member_payments
+        where member_id = %s
+    """, (member_id,), fetchone=True)
+
+    return row.get("paid_until") if row else ""
+
 def _load_attendance_rows_from_excel() -> list[dict]:
     return []
 
@@ -1070,7 +1088,13 @@ def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
         "iPad签到"
     ))
 
-    return True, f"{volunteer['姓名']} 已签到：{role}"
+    phone = volunteer.get("电话号码") or ""
+    paid_until = get_member_paid_until(volunteer["编号"])
+
+    extra = f"\n电话：{phone}" if phone else ""
+    extra += f"\n月费已供养至：{paid_until}" if paid_until else "\n月费记录：暂无"
+
+    return True, f"{volunteer['姓名']} 已签到：{role}{extra}"
 
 
 def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
@@ -1411,19 +1435,35 @@ async function lookupVolunteer() {
     return;
   }
 
-  const res = await fetch('/api/volunteer/' + encodeURIComponent(id));
+  const pin = document.getElementById('pin').value.trim();
+
+  const formData = new FormData();
+  formData.append('pin', pin);
+
+  const res = await fetch('/api/volunteer/' + encodeURIComponent(id), {
+    method: 'POST',
+    body: formData
+  });
+
   const data = await res.json();
   box.style.display = 'block';
 
   if (data.ok) {
-    currentVolunteerName = data.volunteer.姓名;
-    box.innerHTML =
-      `${TXT.name}：<b>${data.volunteer.姓名}</b><br>` +
-      `${TXT.status}：${data.volunteer.状态 || '-'}`;
-    btn.disabled = false;
-  } else {
-    box.innerHTML = `<span style="color:#842029;">${TXT.not_found_id}：${id}</span>`;
+  currentVolunteerName = data.volunteer.姓名;
+
+  let html =
+    `${TXT.name}：<b>${data.volunteer.姓名}</b><br>` +
+    `${TXT.status}：${data.volunteer.状态 || '-'}`;
+
+  if (data.volunteer.pin_ok) {
+    html += `<br>电话：${data.volunteer.电话号码 || '-'}`;
+    html += `<br>月费已供养至：${data.volunteer["月费已供养至"] || '暂无记录'}`;
+  } else if (pin) {
+    html += `<br><span style="color:#842029;">PIN 不正确，无法显示个人资料</span>`;
   }
+
+  box.innerHTML = html;
+  btn.disabled = false;
 }
 
 function quickSignIn() {
@@ -1449,6 +1489,13 @@ function askSignOutPin(form) {
   form.querySelector('input[name="pin"]').value = pin.trim();
   return true;
 }
+
+setTimeout(() => {
+  document.querySelectorAll('.msg.ok').forEach(el => {
+    el.style.display = 'none';
+  });
+}, 8000);
+
 </script>
 </body>
 </html>
@@ -2268,19 +2315,26 @@ def admin_delete_record(record_id):
 
     return redirect(url_for("admin_records", pin=pin))
 
-@app.route("/api/volunteer/<volunteer_id>")
+@app.route("/api/volunteer/<volunteer_id>", methods=["POST"])
 def api_volunteer(volunteer_id):
     try:
         v = find_volunteer(volunteer_id)
         if not v:
             return jsonify({"ok": False})
 
-        # 安全版：只给前端显示姓名，不给电话、不回传PIN
+        pin = request.form.get("pin", "").strip()
+        pin_ok = verify_pin_for_volunteer(v, pin) if pin else False
+
         safe_v = {
             "编号": v.get("编号", ""),
             "姓名": v.get("姓名", ""),
             "状态": v.get("状态", ""),
+            "pin_ok": pin_ok,
         }
+
+        if pin_ok:
+            safe_v["电话号码"] = v.get("电话号码", "")
+            safe_v["月费已供养至"] = get_member_paid_until(v.get("编号"))
 
         return jsonify({"ok": True, "volunteer": safe_v})
 
