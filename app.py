@@ -1426,6 +1426,7 @@ async function lookupVolunteer() {
   const id = document.getElementById('volunteer_id').value.trim();
   const box = document.getElementById('personBox');
   const btn = document.getElementById('signInBtn');
+
   currentVolunteerName = '';
   btn.disabled = true;
 
@@ -1449,21 +1450,25 @@ async function lookupVolunteer() {
   box.style.display = 'block';
 
   if (data.ok) {
-  currentVolunteerName = data.volunteer.姓名;
+    currentVolunteerName = data.volunteer.姓名;
 
-  let html =
-    `${TXT.name}：<b>${data.volunteer.姓名}</b><br>` +
-    `${TXT.status}：${data.volunteer.状态 || '-'}`;
+    let html =
+      `${TXT.name}：<b>${data.volunteer.姓名}</b><br>` +
+      `${TXT.status}：${data.volunteer.状态 || '-'}`;
 
-  if (data.volunteer.pin_ok) {
-    html += `<br>电话：${data.volunteer.电话号码 || '-'}`;
-    html += `<br>月费已供养至：${data.volunteer["月费已供养至"] || '暂无记录'}`;
-  } else if (pin) {
-    html += `<br><span style="color:#842029;">PIN 不正确，无法显示个人资料</span>`;
+    if (data.volunteer.pin_ok) {
+      html += `<br>电话：${data.volunteer.电话号码 || '-'}`;
+      html += `<br>月费已供养至：${data.volunteer["月费已供养至"] || '暂无记录'}`;
+    } else if (pin) {
+      html += `<br><span style="color:#842029;">PIN 不正确，无法显示个人资料</span>`;
+    }
+
+    box.innerHTML = html;
+    btn.disabled = false;
+
+  } else {
+    box.innerHTML = `<span style="color:#842029;">${TXT.not_found_id}：${id}</span>`;
   }
-
-  box.innerHTML = html;
-  btn.disabled = false;
 }
 
 function quickSignIn() {
