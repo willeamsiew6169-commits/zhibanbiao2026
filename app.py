@@ -265,6 +265,11 @@ TEXT = {
         "operation": "操作",
         "today_study_count": "📊 今日共修次数",
         "count": "次数",
+        "name": "姓名",
+        "status": "状态",
+        "phone": "电话",
+        "not_registered": "未登记",
+        "no_contribution": "暂无月费记录",
 
 
     },
@@ -357,6 +362,11 @@ TEXT = {
         "operation": "Action",
         "today_study_count": "📊 Today’s Study Count",
         "count": "Count",
+        "name": "Name",
+        "status": "Status",
+        "phone": "Phone",
+        "not_registered": "Not Registered",
+        "no_contribution": "No Contribution Record",
 
     }
 }
@@ -1541,14 +1551,14 @@ async function lookupVolunteer() {
       `${TXT.status}：${data.volunteer.状态 || '-'}`;
 
     if (data.volunteer.pin_ok) {
-      html += `<br>${TXT.phone}：${data.volunteer.电话号码 || '未登记'}`;
+      html += `<br>${TXT.phone}：${data.volunteer.电话号码 || TXT.not_registered}`;
 
       const paidUntil = data.volunteer["月费已供养至"];
 
       if (paidUntil && paidUntil !== "-") {
-       html += `<br>${TXT.paid_until}：${paidUntil}`;
+        html += `<br>${TXT.paid_until}：${paidUntil}`;
       } else {
-        html += `<br><span style="color:#999;">暂无月费记录</span>`;
+        html += `<br>${TXT.no_contribution}`;
       }
 
     } else if (pin) {
