@@ -249,6 +249,22 @@ TEXT = {
         "people": "人",
         "paid_until": "月费已供养至",
         "pin_wrong": "PIN 不正确，无法显示个人资料",
+        "today_topic": "今日主题",
+        "topic_placeholder": "例如：佛陀的大智慧",
+        "session_remark": "场次 / 备注",
+        "session_placeholder": "例如：早上共修 / 晚上共修",
+        "volunteer_list": "义工名单",
+        "select_all_volunteers": "✅ 全选全部义工",
+        "record_study": "✅ 记录共修",
+        "extra_friend_name": "非义工佛友姓名",
+        "extra_friend_placeholder": "例如：王小明、李美玲、陈先生",
+        "extra_friend_tip": "多个名字用逗号、空格或顿号隔开",
+        "today_recorded": "今日已记录",
+        "identity": "身份",
+        "topic": "主题",
+        "operation": "操作",
+        "today_study_count": "📊 今日共修次数",
+        "count": "次数",
 
 
     },
@@ -325,6 +341,23 @@ TEXT = {
         "people": "people",
         "paid_until": "Paid Until",
         "pin_wrong": "PIN incorrect. Cannot display personal info.",
+        "today_topic": "Today’s Topic",
+        "topic_placeholder": "Example: The Buddha’s Great Wisdom",
+        "session_remark": "Session / Remark",
+        "session_placeholder": "Example: Morning Study / Evening Study",
+        "volunteer_list": "Volunteer List",
+        "select_all_volunteers": "✅ Select All Volunteers",
+        "record_study": "✅ Save Study Record",
+        "extra_friend_name": "Non-volunteer Names",
+        "extra_friend_placeholder": "Example: Wang Xiao Ming, Li Mei Ling",
+        "extra_friend_tip": "Separate multiple names with commas, spaces, or new lines.",
+        "today_recorded": "Today’s Records",
+        "identity": "Identity",
+        "topic": "Topic",
+        "operation": "Action",
+        "today_study_count": "📊 Today’s Study Count",
+        "count": "Count",
+
     }
 }
 
@@ -469,6 +502,7 @@ def get_today_stats():
 # =========================
 @app.route("/reading", methods=["GET", "POST"])
 def reading():
+    t = get_text()
     attendees = get_today_attendees()
     today = now_date_str()
 
@@ -485,17 +519,17 @@ def reading():
             extra_names = [x.strip() for x in extra_text.split(" ") if x.strip()]
 
         if len(names) + len(extra_names) < 2:
-            return "❌ 至少需要2位共修人员<br><a href='/reading'>返回</a>"
+            return f"❌ {t['need_two_people']}<br><a href='/reading'>{t['back_home']}</a>"
 
         if not topic:
-            return "❌ 请输入主题<br><a href='/reading'>返回</a>"
+            return f"❌ {t['enter_topic']}<br><a href='/reading'>{t['back_home']}</a>"
 
         now_time = datetime.now(MY_TZ).strftime("%I:%M %p").lstrip("0")
 
         for name in names:
             add_reading_record(
                 name=name,
-                identity="义工",
+                identity=t["volunteer_identity"],
                 topic=topic,
                 session=session,
                 time_text=now_time
@@ -504,7 +538,7 @@ def reading():
         for name in extra_names:
             add_reading_record(
                 name=name,
-                identity="佛友",
+                identity=t["friend_identity"],
                 topic=topic,
                 session=session,
                 time_text=now_time
@@ -544,7 +578,7 @@ def reading():
 
     html = """
     <!doctype html>
-    <html>
+    <html lang="{{ t.html_lang }}">
     <head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
@@ -609,18 +643,18 @@ def reading():
     </head>
     <body>
 
-    <a href="/"><button>⬅ 返回签到首页</button></a>
+    <a href="/"><button>⬅ {{ t.back_home }}</button></a>
 
     <a href="/download_reading">
-        <button style="background:#2196F3;">📥 下载报表</button>
+        <button style="background:#2196F3;">{{ t.download_report }}</button>
     </a>
 
     <div class="card">
         <h2>{{ t.bhff_record_title }}</h2>
 
         <form method="post">
-            <p>今日主题：</p>
-            <input type="text" name="topic" list="topicList" placeholder="例如：佛陀的大智慧">
+            <p>{{ t.today_topic }}：</p>
+            <input type="text" name="topic" list="topicList" placeholder="{{ t.topic_placeholder }}">
 
             <datalist id="topicList">
             {% for topic in topic_options %}
@@ -628,13 +662,13 @@ def reading():
             {% endfor %}
             </datalist>
 
-            <p>场次 / 备注：</p>
-            <input type="text" name="session" placeholder="例如：早上共修 / 晚上共修">
+            <p>{{ t.session_remark }}：</p>
+            <input type="text" name="session" placeholder="{{ t.session_placeholder }}">
 
-            <p>义工名单：</p>
+            <p>{{ t.volunteer_list }}：</p>
 
             <button type="button" onclick="selectAllNames()" style="margin-bottom:10px;">
-                ✅ 全选全部义工
+                {{ t.select_all_volunteers }}
             </button>
 
             {% for name in attendees %}
@@ -645,25 +679,25 @@ def reading():
             {% endfor %}
 
             <br>
-            <button type="submit">✅ 记录共修</button>
+            <button type="submit">{{ t.record_study }}</button>
 
-            <p>非义工佛友姓名：</p>
-            <input type="text" name="extra_names" placeholder="例如：王小明、李美玲、陈先生"
+            <p>{{ t.extra_friend_name }}：</p>
+            <input type="text" name="extra_names" placeholder="{{ t.extra_friend_placeholder }}"
                 style="font-size:20px;width:420px;padding:8px;">
-            <p style="color:#777;">多个名字用逗号、空格或顿号隔开</p>
+            <p style="color:#777;">{{ t.extra_friend_tip }}</p>
         </form>
     </div>
 
     <div class="card">
-        <h2>今日已记录</h2>
+        <h2>{{ t.today_recorded }}</h2>
 
         <table>
             <tr>
-                <th>姓名</th>
-                <th>身份</th>
-                <th>主题</th>
-                <th>时间</th>
-                <th>操作</th>
+                <th>{{ t.name }}</th>
+                <th>{{ t.identity }}</th>
+                <th>{{ t.topic }}</th>
+                <th>{{ t.time }}</th>
+                <th>{{ t.operation }}</th>
             </tr>
 
             {% for r in today_records %}
@@ -673,22 +707,22 @@ def reading():
                 <td>{{ r["主题"] }}</td>
                 <td>{{ r["时间"] }}</td>
                 <td>
-                    <a href="/reading_edit/{{ r['id'] }}"><button class="edit">修改</button></a>
-                    <a href="/reading_delete/{{ r['id'] }}" onclick="return confirm('确定删除吗？')">
-                        <button class="delete">删除</button>
+                    <a href="/reading_edit/{{ r['id'] }}"><button class="edit">{{ t.edit }}</button></a>
+                    <a href="/reading_delete/{{ r['id'] }}" onclick="return confirm('{{ t.delete_confirm_simple }}')">
+                        <button class="delete">{{ t.delete_record }}</button>
                     </a>
                 </td>
             </tr>
             {% endfor %}
         </table>
 
-        <h3 style="margin-top:20px;">📊 今日共修次数</h3>
+        <h3 style="margin-top:20px;">{{ t.today_study_count }}</h3>
 
         <table>
             <tr>
-                <th>姓名</th>
-                <th>身份</th>
-                <th>次数</th>
+                <th>{{ t.name }}</th>
+                <th>{{ t.identity }}</th>
+                <th>{{ t.count }}</th>
             </tr>
 
             {% for r in today_summary %}
@@ -707,14 +741,14 @@ def reading():
         boxes.forEach(b => b.checked = true);
     }
     </script>
-    
+
     </body>
     </html>
     """
 
     return render_template_string(
         html,
-        t=get_text(),
+        t=t,
         attendees=attendees,
         today_records=today_records,
         today_summary=today_summary_records,
