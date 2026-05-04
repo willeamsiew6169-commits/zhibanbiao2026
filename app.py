@@ -955,11 +955,12 @@ def verify_today_code(input_code):
 
 
 def find_volunteer(volunteer_id: str):
-    volunteer_id = volunteer_id.strip()
+    volunteer_id = str(volunteer_id or "").strip()
 
-    # 如果是 CHE-xxx，就取后面的数字
+    # 签到系统 volunteers.id 只用数字：208 / 800
+    # 如果输入 CHE-208，就自动转成 208
     if "-" in volunteer_id:
-        volunteer_id = volunteer_id.split("-")[-1]
+        volunteer_id = volunteer_id.split("-")[-1].strip()
 
     result = db_query("""
         select
@@ -967,12 +968,25 @@ def find_volunteer(volunteer_id: str):
             name as "姓名",
             status as "状态",
             phone as "电话号码",
-            pin as "PIN"
+            pin as "PIN",
+            branch as "分会"
         from volunteers
         where id = %s
     """, (volunteer_id,), fetchone=True)
 
     return result
+
+def to_member_id(volunteer):
+    branch = str(volunteer.get("分会") or "CHE").strip()
+    vol_id = str(volunteer.get("编号") or "").strip()
+
+    if not vol_id:
+        return ""
+
+    if "-" in vol_id:
+        return vol_id
+
+    return f"{branch}-{vol_id}"
 
 def verify_pin_for_volunteer(volunteer, pin):
     input_pin = str(pin).strip()
@@ -1166,7 +1180,7 @@ def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
     ))
 
     phone = volunteer.get("电话号码") or ""
-    paid_until = get_member_paid_until(volunteer["编号"])
+    paid_until = get_member_paid_until(to_member_id(volunteer))
 
     # 电话显示
     if phone:
