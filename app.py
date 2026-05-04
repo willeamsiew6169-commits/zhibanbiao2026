@@ -1372,7 +1372,15 @@ PAGE = """
       {% if today_code_enabled %}
       <div>
         <label>{{ t.today_code }}</label>
-        <input type="text" name="today_code" placeholder="{{ t.today_code_placeholder }}" required>
+        <input 
+          type="tel" 
+          name="today_code" 
+          inputmode="numeric" 
+          pattern="[0-9]*"
+          placeholder="{{ t.today_code_placeholder }}" 
+          required
+        
+        >
       </div>
       {% endif %}
 
