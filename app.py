@@ -235,6 +235,12 @@ TEXT = {
         "bhff_record_title": "📖 白话佛法共修记录",
         "today_code": "今日签到码",
         "today_code_placeholder": "请输入现场今日码",
+        "admin_title": "🔐 管理员工具",
+        "today_code_big": "今日签到码",
+        "today_code_warning": "⚠ 请只写在观音堂现场，不要发群",
+        "download_data": "📥 下载签到数据",
+        "admin_add_record": "🛠 补录签到",
+        "admin_records": "✏️ 修改 / 删除今日记录",
 
 
     },
@@ -297,6 +303,12 @@ TEXT = {
         "bhff_record_title": "📖 Bai Hua Fo Fa (BHFF) Study Records",
         "today_code": "Today Code",
         "today_code_placeholder": "Enter today's code (on-site)",
+        "admin_title": "🔐 Admin Tools",
+        "today_code_big": "Today Code",
+        "today_code_warning": "⚠ Display this only on-site. Do not share it in group chats.",
+        "download_data": "📥 Download Check-in Data",
+        "admin_add_record": "🛠 Add Record",
+        "admin_records": "✏️ Edit / Delete Today’s Records",
     }
 }
 
@@ -1420,6 +1432,8 @@ const TXT = {
   enter_pin: {{ t.enter_pin|tojson }},
   signout_prompt: {{ t.signout_prompt|tojson }},
   pin_empty: {{ t.pin_empty|tojson }},
+  paid_until: {{ t.paid_until|tojson }},
+  pin_wrong: {{ t.pin_wrong|tojson }},
 };
 
 async function lookupVolunteer() {
@@ -1457,10 +1471,10 @@ async function lookupVolunteer() {
       `${TXT.status}：${data.volunteer.状态 || '-'}`;
 
     if (data.volunteer.pin_ok) {
-      html += `<br>电话：${data.volunteer.电话号码 || '-'}`;
-      html += `<br>月费已供养至：${data.volunteer["月费已供养至"] || '暂无记录'}`;
+      html += `<br>${TXT.phone}：${data.volunteer.电话号码 || '-'}`;
+      html += `<br>${TXT.paid_until}：${data.volunteer["月费已供养至"] || '-'}`;
     } else if (pin) {
-      html += `<br><span style="color:#842029;">PIN 不正确，无法显示个人资料</span>`;
+      html += `<br><span style="color:#842029;">${TXT.pin_wrong}</span>`;
     }
 
     box.innerHTML = html;
@@ -2157,36 +2171,38 @@ a { font-size:20px; }
 def admin_report():
     pin = str(request.form.get("admin_pin", "")).strip()
 
+    t = get_text()  # ⭐ 加这一行
+
     if pin != ADMIN_PIN:
-        flash("管理员 PIN 不正确。", "bad")
+        flash(t["admin_pin_wrong"], "bad")
         return redirect(url_for("index"))
 
     code = get_display_today_code()
 
     return f"""
-<h1>🔐 管理员工具</h1>
+<h1>{t["admin_title"]}</h1>
 
-<h2>今日签到码</h2>
+<h2>{t["today_code_big"]}</h2>
 <div style="font-size:60px;font-weight:bold;color:#dc3545;">
     {code}
 </div>
 
-<p>⚠ 请只写在观音堂现场，不要发群</p>
+<p>{t["today_code_warning"]}</p>
 
 <a href="/download_data" style="display:block;margin-top:12px;font-size:24px;">
-    📥 下载签到数据
+    {t["download_data"]}
 </a>
 
 <a href="/admin_add_record?pin={pin}" style="display:block;margin-top:12px;font-size:24px;">
-  🛠 补录签到
+  {t["admin_add_record"]}
 </a>
 
 <a href="/admin_records?pin={pin}" style="display:block;margin-top:12px;font-size:24px;">
-  ✏️ 修改 / 删除今日记录
+  {t["admin_records"]}
 </a>
 
 <br>
-<a href="/" style="font-size:20px;">⬅ 返回首页</a>
+<a href="/" style="font-size:20px;">⬅ {t["back_home"]}</a>
 """
 
 @app.route("/admin_records")
