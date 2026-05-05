@@ -590,49 +590,6 @@ th {
 
 <hr>
 
-<hr>
-
-<h2>🙏 佛台请假 / 换人</h2>
-
-<form method="post" action="/schedule/override">
-    日期：
-    <input type="date" name="date" value="{{ tomorrow }}" required>
-
-    <br><br>
-
-    佛台位置1：
-    <select name="name1">
-        <option value="">-- 留空 --</option>
-        {% for n in buddha_names %}
-        <option value="{{ n }}">{{ n }}</option>
-        {% endfor %}
-    </select>
-
-    <br>
-
-    佛台位置2：
-    <select name="name2">
-        <option value="">-- 留空 --</option>
-        {% for n in buddha_names %}
-        <option value="{{ n }}">{{ n }}</option>
-        {% endfor %}
-    </select>
-
-    <br>
-
-    佛台位置3：
-    <select name="name3">
-        <option value="">-- 留空 --</option>
-        {% for n in buddha_names %}
-        <option value="{{ n }}">{{ n }}</option>
-        {% endfor %}
-    </select>
-
-    <br><br>
-
-    <button type="submit">💾 保存佛台替换</button>
-</form>
-
 {% elif mode == "prebook" %}
 
 <h2>📢 月预报名模式</h2>
