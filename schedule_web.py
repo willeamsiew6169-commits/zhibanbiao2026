@@ -505,6 +505,7 @@ th {
 <h2>📋 当天排班模式</h2>
 
 <form method="post" action="/schedule/add">
+    <input type="hidden" name="mode" value="prebook">
     <h3>1. 选择日期</h3>
     <input type="date" name="single_date" value="{{ tomorrow }}" required>
 
@@ -599,9 +600,7 @@ th {
     <h3>1. 输入义工编号</h3>
     <input name="vol_id" placeholder="例如 208 / 0160 / 803" required>
 
-    <h3>2. 选择月份</h3>
-    <input name="month" placeholder="例如 2026-05" required>
-
+    
     <h3>3. 多选日期</h3>
     <div class="day-box">
     {% for d in range(1, 32) %}
@@ -643,9 +642,8 @@ th {
 
 <hr>
 
-<h2>📢 输出月预报名表</h2>
-
 <form method="post" action="/schedule/monthly_prebook">
+
     年份：
     <input name="year" value="2026" style="width:120px;" required>
 
@@ -657,7 +655,24 @@ th {
     </select>
 
     <button type="submit">📢 生成月预报名表</button>
+
 </form>
+
+<hr>
+
+<h3>📅 选择月份</h3>
+
+年份：
+<input name="year" value="2026" style="width:120px;" required>
+
+月份：
+<select name="month">
+    {% for m in range(1, 13) %}
+    <option value="{{ m }}">{{ m }}月</option>
+    {% endfor %}
+</select>
+
+<hr>
 
 {% else %}
 
