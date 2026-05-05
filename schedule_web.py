@@ -3,6 +3,7 @@
 import os
 import pandas as pd
 from openpyxl import load_workbook
+from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
 from schedule_builder import run_schedule_for_date
 from monthly_prebook_message import generate_monthly_prebook_message
@@ -119,6 +120,30 @@ def save_prebook_record(record):
     with pd.ExcelWriter(PREBOOK_FILE, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="预报名", index=False)
 
+def delete_prebook_record(record):
+    if not os.path.exists(PREBOOK_FILE):
+        return
+
+    try:
+        df = pd.read_excel(PREBOOK_FILE, sheet_name="预报名")
+        df.columns = df.columns.astype(str).str.strip()
+
+        cond = (
+            (df["日期"].astype(str) == str(record["日期"])) &
+            (df["姓名"].astype(str) == str(record["姓名"])) &
+            (df["岗位"].astype(str) == str(record["岗位"])) &
+            (df["开始时间"].astype(str) == str(record["开始时间"])) &
+            (df["结束时间"].astype(str) == str(record["结束时间"]))
+        )
+
+        df = df[~cond]
+
+        with pd.ExcelWriter(PREBOOK_FILE, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name="预报名", index=False)
+
+    except Exception as e:
+        print("delete_prebook_record error:", e)
+
 
 @schedule_bp.route("/schedule", methods=["GET", "POST"])
 def schedule():
@@ -132,6 +157,8 @@ def schedule():
             return "❌ PIN 错误<br><a href='/schedule'>返回</a>"
 
         return LOGIN_HTML
+    
+    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
     mode = request.args.get("mode", "")
 
@@ -140,7 +167,8 @@ def schedule():
         mode=mode,
         times=TIME_OPTIONS,
         roles=ROLE_OPTIONS,
-        records=schedule_records
+        records=schedule_records,
+        tomorrow=tomorrow
     )
 
 
@@ -239,6 +267,36 @@ def schedule_clear():
 
     schedule_records.clear()
     return redirect(url_for("schedule.schedule"))
+
+@schedule_bp.route("/schedule/delete/<int:index>", methods=["POST"])
+def schedule_delete(index):
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule"))
+
+    mode = request.form.get("mode", "")
+
+    if 0 <= index < len(schedule_records):
+        schedule_records.pop(index)
+
+    return redirect(url_for("schedule.schedule", mode=mode))
+
+@schedule_bp.route("/schedule/delete/<int:index>", methods=["POST"])
+def schedule_delete(index):
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule"))
+
+    mode = request.form.get("mode", "")
+
+    if 0 <= index < len(schedule_records):
+        record = schedule_records[index]
+
+        # 删除 Excel
+        delete_prebook_record(record)
+
+        # 删除页面
+        schedule_records.pop(index)
+
+    return redirect(url_for("schedule.schedule", mode=mode))
 
 
 LOGIN_HTML = """
@@ -343,7 +401,7 @@ th {
 
 <form method="post" action="/schedule/add">
     <h3>1. 选择日期</h3>
-    <input type="date" name="single_date" required>
+    <input type="date" name="single_date" value="{{ tomorrow }}" required>
 
     <h3>2. 输入义工编号</h3>
     <input name="vol_id" placeholder="例如 208 / 0160 / 803" required>
@@ -383,7 +441,7 @@ th {
 <form method="post" action="/schedule/generate_day">
     <h3>5. 输出 WhatsApp 值班表</h3>
     日期：
-    <input type="date" name="date" required>
+    <input type="date" name="date" value="{{ tomorrow }}" required>
     <button type="submit">⚡ 生成 WhatsApp 值班表</button>
 </form>
 
@@ -477,7 +535,9 @@ th {
     <th>姓名</th>
     <th>岗位</th>
     <th>时间</th>
+    <th>操作</th>
 </tr>
+
 {% for r in records %}
 <tr>
     <td>{{ r["日期"] }}</td>
@@ -485,6 +545,13 @@ th {
     <td>{{ r["姓名"] }}</td>
     <td>{{ r["岗位"] }}</td>
     <td>{{ r["开始时间"] }} ~ {{ r["结束时间"] }}</td>
+
+    <td>
+        <form method="post" action="/schedule/delete/{{ loop.index0 }}">
+            <input type="hidden" name="mode" value="{{ mode }}">
+            <button type="submit">❌</button>
+        </form>
+    </td>
 </tr>
 {% endfor %}
 </table>
@@ -500,21 +567,65 @@ DAY_OUTPUT_HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>当天排班结果</title>
+<title>排班结果</title>
 <style>
-body { font-family: "Microsoft YaHei", Arial; background:#f5f5f5; padding:20px; }
-.box { background:white; max-width:900px; margin:auto; padding:25px; border-radius:15px; }
-textarea { width:100%; height:650px; font-size:20px; padding:15px; box-sizing:border-box; }
-a, button { font-size:22px; padding:10px 18px; margin:8px; }
+body {
+    font-family: "Microsoft YaHei";
+    background: #f5f5f5;
+    padding: 20px;
+}
+.box {
+    background: white;
+    max-width: 900px;
+    margin: auto;
+    padding: 25px;
+    border-radius: 15px;
+}
+textarea {
+    width: 100%;
+    height: 600px;
+    font-size: 20px;
+    padding: 15px;
+}
+button, a {
+    font-size: 22px;
+    padding: 10px 18px;
+    margin: 8px;
+}
+.copy-btn {
+    background: #4CAF50;
+    color: white;
+    border: none;
+}
 </style>
 </head>
 <body>
 <div class="box">
+
 <h1>📋 WhatsApp 值班表</h1>
-<a href="/schedule?mode=day">⬅ 返回当天排班</a>
+
+<a href="/schedule?mode=day">⬅ 返回</a>
+
 <br><br>
-<textarea readonly>{{ output }}</textarea>
+
+<button class="copy-btn" onclick="copyText()">📋 一键复制</button>
+
+<br><br>
+
+<textarea id="output">{{ output }}</textarea>
+
 </div>
+
+<script>
+function copyText() {
+    var text = document.getElementById("output");
+    text.select();
+    text.setSelectionRange(0, 99999);
+    document.execCommand("copy");
+    alert("✅ 已复制，可以直接贴去 WhatsApp");
+}
+</script>
+
 </body>
 </html>
 """
