@@ -1,9 +1,17 @@
 # schedule_web.py
 
+import os
+import pandas as pd
+from openpyxl import load_workbook
 from monthly_prebook_message import generate_monthly_prebook_message
 from flask import Blueprint, request, session, redirect, url_for, render_template_string
 
 schedule_bp = Blueprint("schedule", __name__)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+MASTER_FILE = os.path.join(BASE_DIR, "master_volunteers.xlsx")
+PREBOOK_FILE = os.path.join(BASE_DIR, "prebook_schedule.xlsx")
 
 SCHEDULE_PIN = "1234"
 
@@ -18,6 +26,58 @@ TIME_OPTIONS = [
 ROLE_OPTIONS = ["值班", "卫生", "佛台", "供台"]
 
 schedule_records = []
+
+def find_name_by_id(vol_id):
+    vol_id = str(vol_id).strip()
+
+    if not os.path.exists(MASTER_FILE):
+        return vol_id
+
+    df = pd.read_excel(MASTER_FILE)
+    df.columns = df.columns.astype(str).str.strip()
+
+    if "编号" not in df.columns or "姓名" not in df.columns:
+        return vol_id
+
+    df["编号"] = df["编号"].astype(str).str.strip()
+    df["姓名"] = df["姓名"].astype(str).str.strip()
+
+    possible_ids = [vol_id]
+
+    if vol_id.isdigit():
+        possible_ids.append(f"CHE-{int(vol_id)}")
+
+        if vol_id.startswith("0"):
+            possible_ids.append(f"STW-{int(vol_id)}")
+            possible_ids.append(vol_id)
+
+    match = df[df["编号"].isin(possible_ids)]
+
+    if match.empty:
+        return vol_id
+
+    return str(match.iloc[0]["姓名"]).strip()
+
+def save_prebook_record(record):
+    new_df = pd.DataFrame([record])
+
+    if os.path.exists(PREBOOK_FILE):
+        try:
+            old_df = pd.read_excel(PREBOOK_FILE, sheet_name="预报名")
+            old_df.columns = old_df.columns.astype(str).str.strip()
+            df = pd.concat([old_df, new_df], ignore_index=True)
+        except Exception:
+            df = new_df
+    else:
+        df = new_df
+
+    df = df.drop_duplicates(
+        subset=["日期", "姓名", "岗位", "开始时间", "结束时间"],
+        keep="first"
+    )
+
+    with pd.ExcelWriter(PREBOOK_FILE, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="预报名", index=False)
 
 
 @schedule_bp.route("/schedule", methods=["GET", "POST"])
@@ -54,16 +114,24 @@ def schedule_add():
     start_time = request.form.get("start_time", "")
     end_time = request.form.get("end_time", "")
 
+    name = find_name_by_id(vol_id)
+
     for day in days:
         for role in roles:
-            schedule_records.append({
+            date_text = f"{month}-{int(day):02d}"
+
+            record = {
+                "日期": date_text,
                 "编号": vol_id,
-                "月份": month,
-                "日期": day,
+                "姓名": name,
                 "岗位": role,
                 "开始时间": start_time,
                 "结束时间": end_time,
-            })
+                "备注": "网页录入",
+            }
+
+            schedule_records.append(record)
+            save_prebook_record(record)
 
     return redirect(url_for("schedule.schedule"))
 
@@ -217,17 +285,17 @@ th {
 
 <table>
 <tr>
-    <th>编号</th>
-    <th>月份</th>
     <th>日期</th>
+    <th>编号</th>
+    <th>姓名</th>
     <th>岗位</th>
     <th>时间</th>
 </tr>
 {% for r in records %}
 <tr>
-    <td>{{ r["编号"] }}</td>
-    <td>{{ r["月份"] }}</td>
     <td>{{ r["日期"] }}</td>
+    <td>{{ r["编号"] }}</td>
+    <td>{{ r["姓名"] }}</td>
     <td>{{ r["岗位"] }}</td>
     <td>{{ r["开始时间"] }} ~ {{ r["结束时间"] }}</td>
 </tr>
