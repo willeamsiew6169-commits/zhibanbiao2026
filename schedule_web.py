@@ -120,6 +120,33 @@ def save_prebook_record(record):
     with pd.ExcelWriter(PREBOOK_FILE, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="预报名", index=False)
 
+def save_buddha_override(date_str, ids):
+    import pandas as pd
+
+    file = os.path.join(BASE_DIR, "buddha_override.xlsx")
+
+    names = [find_name_by_id(i) for i in ids if i.strip()]
+
+    new_row = {
+        "日期": date_str,
+        "姓名1": names[0] if len(names) > 0 else "",
+        "姓名2": names[1] if len(names) > 1 else "",
+        "姓名3": names[2] if len(names) > 2 else "",
+    }
+
+    if os.path.exists(file):
+        df = pd.read_excel(file)
+        df.columns = df.columns.astype(str).str.strip()
+
+        df = df[df["日期"].astype(str) != date_str]
+
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    else:
+        df = pd.DataFrame([new_row])
+
+    with pd.ExcelWriter(file, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+
 def delete_prebook_record(record):
     if not os.path.exists(PREBOOK_FILE):
         return
@@ -282,6 +309,23 @@ def schedule_delete(index):
 
     return redirect(url_for("schedule.schedule", mode=mode))
 
+@schedule_bp.route("/schedule/override", methods=["POST"])
+def schedule_override():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule"))
+
+    date = request.form.get("date", "").strip()
+
+    ids = [
+        request.form.get("id1", "").strip(),
+        request.form.get("id2", "").strip(),
+        request.form.get("id3", "").strip(),
+    ]
+
+    save_buddha_override(date, ids)
+
+    return redirect(url_for("schedule.schedule", mode="day"))
+
 
 LOGIN_HTML = """
 <!doctype html>
@@ -381,6 +425,7 @@ th {
 
 {% if mode == "day" %}
 
+
 <h2>📋 当天排班模式</h2>
 
 <form method="post" action="/schedule/add">
@@ -427,6 +472,30 @@ th {
     日期：
     <input type="date" name="date" value="{{ tomorrow }}" required>
     <button type="submit">⚡ 生成 WhatsApp 值班表</button>
+</form>
+
+<hr>
+
+<h2>🙏 佛台请假 / 换人</h2>
+
+<form method="post" action="/schedule/override">
+
+    日期：
+    <input type="date" name="date" value="{{ tomorrow }}" required>
+
+    <br><br>
+
+    替换义工：
+    <br>
+
+    <input name="id1" placeholder="编号1（例如 208）">
+    <input name="id2" placeholder="编号2">
+    <input name="id3" placeholder="编号3">
+
+    <br><br>
+
+    <button type="submit">💾 保存佛台替换</button>
+
 </form>
 
 {% elif mode == "prebook" %}
@@ -638,3 +707,4 @@ a, button { font-size:22px; padding:10px 18px; margin:8px; }
 </body>
 </html>
 """
+
