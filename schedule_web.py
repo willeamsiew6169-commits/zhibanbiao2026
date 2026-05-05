@@ -29,7 +29,7 @@ TIME_OPTIONS = [
     "4:00pm", "4:30pm", "5:00pm", "5:30pm", "6:00pm"
 ]
 
-ROLE_OPTIONS = ["值班", "卫生", "佛台", "供台"]
+ROLE_OPTIONS = ["值班", "卫生"]
 
 schedule_records = []
 
