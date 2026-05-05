@@ -1,5 +1,6 @@
 # schedule_web.py
 
+from monthly_prebook_message import generate_monthly_prebook_message
 from flask import Blueprint, request, session, redirect, url_for, render_template_string
 
 schedule_bp = Blueprint("schedule", __name__)
@@ -65,6 +66,21 @@ def schedule_add():
             })
 
     return redirect(url_for("schedule.schedule"))
+
+@schedule_bp.route("/schedule/monthly_prebook", methods=["POST"])
+def schedule_monthly_prebook():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule"))
+
+    year = request.form.get("year", "").strip()
+    month = request.form.get("month", "").strip()
+
+    try:
+        output = generate_monthly_prebook_message(int(year), int(month))
+    except Exception as e:
+        output = f"❌ 生成失败：{e}"
+
+    return render_template_string(MONTHLY_PREBOOK_HTML, output=output)
 
 
 @schedule_bp.route("/schedule/clear", methods=["POST"])
@@ -173,6 +189,24 @@ th {
 <br><br>
 <button type="submit">➕ 加入报名</button>
 
+<hr>
+<h2>📢 生成月预报名表</h2>
+
+<form method="post" action="/schedule/monthly_prebook">
+    年份：
+    <input name="year" value="2026" style="width:120px;" required>
+
+    月份：
+    <select name="month">
+        {% for m in range(1, 13) %}
+        <option value="{{ m }}">{{ m }}月</option>
+        {% endfor %}
+    </select>
+
+    <button type="submit">📢 生成预报名表</button>
+</form>
+<hr>
+
 </form>
 
 <form method="post" action="/schedule/clear">
@@ -199,6 +233,54 @@ th {
 </tr>
 {% endfor %}
 </table>
+
+</div>
+</body>
+</html>
+"""
+
+MONTHLY_PREBOOK_HTML = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>月预报名表</title>
+<style>
+body {
+    font-family: "Microsoft YaHei", Arial;
+    background: #f5f5f5;
+    padding: 20px;
+}
+.box {
+    background: white;
+    max-width: 900px;
+    margin: auto;
+    padding: 25px;
+    border-radius: 15px;
+}
+textarea {
+    width: 100%;
+    height: 650px;
+    font-size: 20px;
+    padding: 15px;
+    box-sizing: border-box;
+}
+button, a {
+    font-size: 22px;
+    padding: 10px 18px;
+    margin: 8px;
+}
+</style>
+</head>
+<body>
+<div class="box">
+<h1>📢 月预报名表</h1>
+
+<a href="/schedule">⬅ 返回排班系统</a>
+
+<br><br>
+
+<textarea readonly>{{ output }}</textarea>
 
 </div>
 </body>
