@@ -8,15 +8,13 @@ from schedule_builder import run_schedule_for_date
 from monthly_prebook_message import generate_monthly_prebook_message
 from flask import Blueprint, request, session, redirect, url_for, render_template_string
 
+
 schedule_bp = Blueprint("schedule", __name__)
 
-
 DATABASE_URL = os.environ.get("DATABASE_URL")
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True) if DATABASE_URL else None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-MASTER_FILE = os.path.join(BASE_DIR, "master_volunteers.xlsx")
 PREBOOK_FILE = os.path.join(BASE_DIR, "prebook_schedule.xlsx")
 
 SCHEDULE_PIN = "1234"
@@ -34,9 +32,9 @@ ROLE_OPTIONS = ["值班", "卫生", "佛台", "供台"]
 
 schedule_records = []
 
+
 def find_name_by_id(vol_id):
     raw_id = str(vol_id or "").strip()
-
     if not raw_id:
         return raw_id
 
@@ -46,29 +44,30 @@ def find_name_by_id(vol_id):
         branch, num = raw_id.split("-", 1)
         branch = branch.strip().upper()
         num = num.strip()
-
         ids.append(num)
 
         if branch == "STW" and num.isdigit():
             ids.append("0" + num)
-
     else:
-        ids.append(f"CHE-{raw_id}")
-
         if raw_id.startswith("0") and raw_id[1:].isdigit():
             ids.append(f"STW-{raw_id[1:]}")
+        else:
+            ids.append(f"CHE-{raw_id}")
 
     ids = list(dict.fromkeys(ids))
+
+    if not engine:
+        return raw_id
 
     try:
         placeholders = ", ".join([f":id{i}" for i in range(len(ids))])
         params = {f"id{i}": v for i, v in enumerate(ids)}
 
         sql = text(f"""
-            select id, name, status, branch
-            from volunteers
-            where id in ({placeholders})
-            limit 1
+            SELECT id, name, status, branch
+            FROM volunteers
+            WHERE id IN ({placeholders})
+            LIMIT 1
         """)
 
         with engine.connect() as conn:
@@ -83,14 +82,13 @@ def find_name_by_id(vol_id):
         print("find_name_by_id error:", e)
         return raw_id
 
+
 def get_default_time_by_role(role, start_time, end_time):
     role = str(role).strip()
 
-    # 值班才用负责人选择的时间
     if role == "值班":
         return start_time, end_time
 
-    # 第一版先固定普通日时间
     if role in ["卫生", "佛台"]:
         return "8:00am", "10:00am"
 
@@ -98,6 +96,7 @@ def get_default_time_by_role(role, start_time, end_time):
         return "6:00am", "8:00am"
 
     return start_time, end_time
+
 
 def save_prebook_record(record):
     new_df = pd.DataFrame([record])
@@ -120,20 +119,6 @@ def save_prebook_record(record):
     with pd.ExcelWriter(PREBOOK_FILE, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="预报名", index=False)
 
-@schedule_bp.route("/schedule/generate_day", methods=["POST"])
-def schedule_generate_day():
-    if not session.get("schedule_login"):
-        return redirect(url_for("schedule.schedule"))
-
-    date = request.form.get("date", "").strip()
-
-    try:
-        output = run_schedule_for_date(date)
-    except Exception as e:
-        output = f"❌ 生成失败：{e}"
-
-    return render_template_string(DAY_OUTPUT_HTML, output=output)
-
 
 @schedule_bp.route("/schedule", methods=["GET", "POST"])
 def schedule():
@@ -146,15 +131,17 @@ def schedule():
 
             return "❌ PIN 错误<br><a href='/schedule'>返回</a>"
 
-        return """
-        <h2>📅 负责人排班系统</h2>
-        <form method="post">
-            <input type="password" name="pin" placeholder="请输入负责人PIN" style="font-size:24px;padding:10px;">
-            <button type="submit" style="font-size:24px;padding:10px;">进入</button>
-        </form>
-        """
+        return LOGIN_HTML
 
-    return render_template_string(SCHEDULE_HTML, times=TIME_OPTIONS, roles=ROLE_OPTIONS, records=schedule_records)
+    mode = request.args.get("mode", "")
+
+    return render_template_string(
+        SCHEDULE_HTML,
+        mode=mode,
+        times=TIME_OPTIONS,
+        roles=ROLE_OPTIONS,
+        records=schedule_records
+    )
 
 
 @schedule_bp.route("/schedule/add", methods=["POST"])
@@ -162,19 +149,40 @@ def schedule_add():
     if not session.get("schedule_login"):
         return redirect(url_for("schedule.schedule"))
 
+    mode = request.form.get("mode", "").strip()
+
     vol_id = request.form.get("vol_id", "").strip()
-    month = request.form.get("month", "").strip()
-    days = request.form.getlist("days")
     roles = request.form.getlist("roles")
-    start_time = request.form.get("start_time", "")
-    end_time = request.form.get("end_time", "")
+    start_time = request.form.get("start_time", "").strip()
+    end_time = request.form.get("end_time", "").strip()
+
+    if not vol_id:
+        return "❌ 请填写义工编号<br><a href='/schedule'>返回</a>"
+
+    if not roles:
+        return "❌ 请至少选择一个岗位<br><a href='/schedule'>返回</a>"
 
     name = find_name_by_id(vol_id)
 
-    for day in days:
-        for role in roles:
-            date_text = f"{month}-{int(day):02d}"
+    if mode == "day":
+        single_date = request.form.get("single_date", "").strip()
+        if not single_date:
+            return "❌ 请选择日期<br><a href='/schedule?mode=day'>返回</a>"
+        date_list = [single_date]
+    else:
+        month = request.form.get("month", "").strip()
+        days = request.form.getlist("days")
 
+        if not month:
+            return "❌ 请填写月份，例如 2026-05<br><a href='/schedule?mode=prebook'>返回</a>"
+
+        if not days:
+            return "❌ 请至少选择一天<br><a href='/schedule?mode=prebook'>返回</a>"
+
+        date_list = [f"{month}-{int(day):02d}" for day in days]
+
+    for date_text in date_list:
+        for role in roles:
             job_start, job_end = get_default_time_by_role(role, start_time, end_time)
 
             record = {
@@ -190,7 +198,23 @@ def schedule_add():
             schedule_records.append(record)
             save_prebook_record(record)
 
-    return redirect(url_for("schedule.schedule"))
+    return redirect(url_for("schedule.schedule", mode=mode))
+
+
+@schedule_bp.route("/schedule/generate_day", methods=["POST"])
+def schedule_generate_day():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule"))
+
+    date = request.form.get("date", "").strip()
+
+    try:
+        output = run_schedule_for_date(date)
+    except Exception as e:
+        output = f"❌ 生成失败：{e}"
+
+    return render_template_string(DAY_OUTPUT_HTML, output=output)
+
 
 @schedule_bp.route("/schedule/monthly_prebook", methods=["POST"])
 def schedule_monthly_prebook():
@@ -217,6 +241,31 @@ def schedule_clear():
     return redirect(url_for("schedule.schedule"))
 
 
+LOGIN_HTML = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>负责人排班系统</title>
+<style>
+body { font-family: "Microsoft YaHei", Arial; background:#f5f5f5; padding:30px; }
+.box { background:white; max-width:600px; margin:auto; padding:30px; border-radius:15px; text-align:center; }
+input, button { font-size:24px; padding:12px; margin:8px; }
+</style>
+</head>
+<body>
+<div class="box">
+<h1>📅 负责人排班系统</h1>
+<form method="post">
+    <input type="password" name="pin" placeholder="请输入负责人PIN">
+    <button type="submit">进入</button>
+</form>
+</div>
+</body>
+</html>
+"""
+
+
 SCHEDULE_HTML = """
 <!doctype html>
 <html>
@@ -231,7 +280,7 @@ body {
 }
 .box {
     background: white;
-    max-width: 900px;
+    max-width: 950px;
     margin: auto;
     padding: 25px;
     border-radius: 15px;
@@ -240,6 +289,12 @@ input, select, button {
     font-size: 22px;
     padding: 10px;
     margin: 6px;
+}
+.big-btn {
+    font-size: 28px;
+    padding: 18px 28px;
+    margin: 12px;
+    border-radius: 12px;
 }
 .day-box label, .role-box label {
     display: inline-block;
@@ -270,52 +325,122 @@ th {
 
 <h1>📅 负责人排班系统</h1>
 
-<form method="post" action="/schedule/add">
+<div style="text-align:center;">
+    <a href="/schedule?mode=day">
+        <button type="button" class="big-btn">📋 生成当天排班</button>
+    </a>
 
-<h2>1. 输入义工编号</h2>
-<input name="vol_id" placeholder="例如 208 / 0160 / 803" required>
-
-<h2>2. 选择月份</h2>
-<input name="month" placeholder="例如 2026-05" required>
-
-<h2>3. 多选日期</h2>
-<div class="day-box">
-{% for d in range(1, 32) %}
-<label>
-    <input type="checkbox" name="days" value="{{ d }}"> {{ d }}
-</label>
-{% endfor %}
+    <a href="/schedule?mode=prebook">
+        <button type="button" class="big-btn">📢 生成月预报名表</button>
+    </a>
 </div>
-
-<h2>4. 选择岗位</h2>
-<div class="role-box">
-{% for role in roles %}
-<label>
-    <input type="checkbox" name="roles" value="{{ role }}"> {{ role }}
-</label>
-{% endfor %}
-</div>
-
-<h2>5. 选择时间</h2>
-开始：
-<select name="start_time">
-{% for t in times %}
-<option value="{{ t }}">{{ t }}</option>
-{% endfor %}
-</select>
-
-结束：
-<select name="end_time">
-{% for t in times %}
-<option value="{{ t }}">{{ t }}</option>
-{% endfor %}
-</select>
-
-<br><br>
-<button type="submit">➕ 加入报名</button>
 
 <hr>
-<h2>📢 生成月预报名表</h2>
+
+{% if mode == "day" %}
+
+<h2>📋 当天排班模式</h2>
+
+<form method="post" action="/schedule/add">
+    <h3>1. 选择日期</h3>
+    <input type="date" name="single_date" required>
+
+    <h3>2. 输入义工编号</h3>
+    <input name="vol_id" placeholder="例如 208 / 0160 / 803" required>
+
+    <h3>3. 选择岗位</h3>
+    <div class="role-box">
+    {% for role in roles %}
+    <label>
+        <input type="checkbox" name="roles" value="{{ role }}"> {{ role }}
+    </label>
+    {% endfor %}
+    </div>
+
+    <h3>4. 选择时间（只给值班用）</h3>
+    开始：
+    <select name="start_time">
+    {% for t in times %}
+    <option value="{{ t }}">{{ t }}</option>
+    {% endfor %}
+    </select>
+
+    结束：
+    <select name="end_time">
+    {% for t in times %}
+    <option value="{{ t }}">{{ t }}</option>
+    {% endfor %}
+    </select>
+
+    <input type="hidden" name="mode" value="day">
+
+    <br><br>
+    <button type="submit">➕ 加入当天名单</button>
+</form>
+
+<hr>
+
+<form method="post" action="/schedule/generate_day">
+    <h3>5. 输出 WhatsApp 值班表</h3>
+    日期：
+    <input type="date" name="date" required>
+    <button type="submit">⚡ 生成 WhatsApp 值班表</button>
+</form>
+
+{% elif mode == "prebook" %}
+
+<h2>📢 月预报名模式</h2>
+
+<form method="post" action="/schedule/add">
+
+    <h3>1. 输入义工编号</h3>
+    <input name="vol_id" placeholder="例如 208 / 0160 / 803" required>
+
+    <h3>2. 选择月份</h3>
+    <input name="month" placeholder="例如 2026-05" required>
+
+    <h3>3. 多选日期</h3>
+    <div class="day-box">
+    {% for d in range(1, 32) %}
+    <label>
+        <input type="checkbox" name="days" value="{{ d }}"> {{ d }}
+    </label>
+    {% endfor %}
+    </div>
+
+    <h3>4. 选择岗位</h3>
+    <div class="role-box">
+    {% for role in roles %}
+    <label>
+        <input type="checkbox" name="roles" value="{{ role }}"> {{ role }}
+    </label>
+    {% endfor %}
+    </div>
+
+    <h3>5. 选择时间（只给值班用）</h3>
+    开始：
+    <select name="start_time">
+    {% for t in times %}
+    <option value="{{ t }}">{{ t }}</option>
+    {% endfor %}
+    </select>
+
+    结束：
+    <select name="end_time">
+    {% for t in times %}
+    <option value="{{ t }}">{{ t }}</option>
+    {% endfor %}
+    </select>
+
+    <input type="hidden" name="mode" value="prebook">
+
+    <br><br>
+    <button type="submit">➕ 加入预报名</button>
+</form>
+
+<hr>
+
+<h2>📢 输出月预报名表</h2>
 
 <form method="post" action="/schedule/monthly_prebook">
     年份：
@@ -328,28 +453,22 @@ th {
         {% endfor %}
     </select>
 
-    <button type="submit">📢 生成预报名表</button>
+    <button type="submit">📢 生成月预报名表</button>
 </form>
-<hr>
+
+{% else %}
+
+<h2 style="text-align:center;">请选择要做的功能</h2>
+
+{% endif %}
 
 <hr>
-<h2>📅 生成当天排班</h2>
-
-<form method="post" action="/schedule/generate_day">
-    日期：
-    <input type="date" name="date" required>
-
-    <button type="submit">⚡ 生成排班</button>
-</form>
-<hr>
-
-</form>
 
 <form method="post" action="/schedule/clear">
-<button type="submit">🗑 清空名单</button>
+<button type="submit">🗑 清空下方显示名单</button>
 </form>
 
-<h2>已加入报名名单</h2>
+<h2>已加入名单</h2>
 
 <table>
 <tr>
@@ -375,6 +494,32 @@ th {
 </html>
 """
 
+
+DAY_OUTPUT_HTML = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>当天排班结果</title>
+<style>
+body { font-family: "Microsoft YaHei", Arial; background:#f5f5f5; padding:20px; }
+.box { background:white; max-width:900px; margin:auto; padding:25px; border-radius:15px; }
+textarea { width:100%; height:650px; font-size:20px; padding:15px; box-sizing:border-box; }
+a, button { font-size:22px; padding:10px 18px; margin:8px; }
+</style>
+</head>
+<body>
+<div class="box">
+<h1>📋 WhatsApp 值班表</h1>
+<a href="/schedule?mode=day">⬅ 返回当天排班</a>
+<br><br>
+<textarea readonly>{{ output }}</textarea>
+</div>
+</body>
+</html>
+"""
+
+
 MONTHLY_PREBOOK_HTML = """
 <!doctype html>
 <html>
@@ -382,83 +527,18 @@ MONTHLY_PREBOOK_HTML = """
 <meta charset="utf-8">
 <title>月预报名表</title>
 <style>
-body {
-    font-family: "Microsoft YaHei", Arial;
-    background: #f5f5f5;
-    padding: 20px;
-}
-.box {
-    background: white;
-    max-width: 900px;
-    margin: auto;
-    padding: 25px;
-    border-radius: 15px;
-}
-textarea {
-    width: 100%;
-    height: 650px;
-    font-size: 20px;
-    padding: 15px;
-    box-sizing: border-box;
-}
-button, a {
-    font-size: 22px;
-    padding: 10px 18px;
-    margin: 8px;
-}
+body { font-family: "Microsoft YaHei", Arial; background:#f5f5f5; padding:20px; }
+.box { background:white; max-width:900px; margin:auto; padding:25px; border-radius:15px; }
+textarea { width:100%; height:650px; font-size:20px; padding:15px; box-sizing:border-box; }
+a, button { font-size:22px; padding:10px 18px; margin:8px; }
 </style>
 </head>
 <body>
 <div class="box">
 <h1>📢 月预报名表</h1>
-
-<a href="/schedule">⬅ 返回排班系统</a>
-
+<a href="/schedule?mode=prebook">⬅ 返回月预报名</a>
 <br><br>
-
 <textarea readonly>{{ output }}</textarea>
-
-</div>
-</body>
-</html>
-"""
-
-DAY_OUTPUT_HTML = """
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>排班结果</title>
-<style>
-body {
-    font-family: "Microsoft YaHei";
-    background: #f5f5f5;
-    padding: 20px;
-}
-.box {
-    background: white;
-    max-width: 900px;
-    margin: auto;
-    padding: 25px;
-    border-radius: 15px;
-}
-textarea {
-    width: 100%;
-    height: 650px;
-    font-size: 20px;
-}
-</style>
-</head>
-<body>
-<div class="box">
-<h1>📅 排班结果</h1>
-
-<a href="/schedule">⬅ 返回</a>
-
-<br><br>
-
-<textarea readonly>{{ output }}</textarea>
-
 </div>
 </body>
 </html>
