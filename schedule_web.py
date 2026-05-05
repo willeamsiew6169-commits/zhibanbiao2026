@@ -590,28 +590,6 @@ th {
 
 <hr>
 
-<h2>🙏 佛台请假 / 换人</h2>
-
-<form method="post" action="/schedule/override">
-
-    日期：
-    <input type="date" name="date" value="{{ tomorrow }}" required>
-
-    <br><br>
-
-    替换义工：
-    <br>
-
-    <input name="id1" placeholder="编号1（例如 208）">
-    <input name="id2" placeholder="编号2">
-    <input name="id3" placeholder="编号3">
-
-    <br><br>
-
-    <button type="submit">💾 保存佛台替换</button>
-
-</form>
-
 <hr>
 
 <h2>🙏 佛台请假 / 换人</h2>
