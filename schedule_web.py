@@ -3,6 +3,7 @@
 import os
 import pandas as pd
 from openpyxl import load_workbook
+from schedule_builder import run_schedule_for_date
 from monthly_prebook_message import generate_monthly_prebook_message
 from flask import Blueprint, request, session, redirect, url_for, render_template_string
 
@@ -16,6 +17,7 @@ PREBOOK_FILE = os.path.join(BASE_DIR, "prebook_schedule.xlsx")
 SCHEDULE_PIN = "1234"
 
 TIME_OPTIONS = [
+    "6:00am", "6:30am", "7:00am", "7:30am",
     "8:00am", "8:30am", "9:00am", "9:30am",
     "10:00am", "10:30am", "11:00am", "11:30am",
     "12:00pm", "12:30pm", "1:00pm", "1:30pm",
@@ -45,11 +47,12 @@ def find_name_by_id(vol_id):
     possible_ids = [vol_id]
 
     if vol_id.isdigit():
-        possible_ids.append(f"CHE-{int(vol_id)}")
-
+        # 0160 = STW-160
         if vol_id.startswith("0"):
             possible_ids.append(f"STW-{int(vol_id)}")
-            possible_ids.append(vol_id)
+        else:
+            # 160 = CHE-160
+            possible_ids.append(f"CHE-{int(vol_id)}")
 
     match = df[df["编号"].isin(possible_ids)]
 
@@ -57,6 +60,22 @@ def find_name_by_id(vol_id):
         return vol_id
 
     return str(match.iloc[0]["姓名"]).strip()
+
+def get_default_time_by_role(role, start_time, end_time):
+    role = str(role).strip()
+
+    # 值班才用负责人选择的时间
+    if role == "值班":
+        return start_time, end_time
+
+    # 第一版先固定普通日时间
+    if role in ["卫生", "佛台"]:
+        return "8:00am", "10:00am"
+
+    if role == "供台":
+        return "6:00am", "8:00am"
+
+    return start_time, end_time
 
 def save_prebook_record(record):
     new_df = pd.DataFrame([record])
@@ -78,6 +97,20 @@ def save_prebook_record(record):
 
     with pd.ExcelWriter(PREBOOK_FILE, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="预报名", index=False)
+
+@schedule_bp.route("/schedule/generate_day", methods=["POST"])
+def schedule_generate_day():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule"))
+
+    date = request.form.get("date", "").strip()
+
+    try:
+        output = run_schedule_for_date(date)
+    except Exception as e:
+        output = f"❌ 生成失败：{e}"
+
+    return render_template_string(DAY_OUTPUT_HTML, output=output)
 
 
 @schedule_bp.route("/schedule", methods=["GET", "POST"])
@@ -120,13 +153,15 @@ def schedule_add():
         for role in roles:
             date_text = f"{month}-{int(day):02d}"
 
+            job_start, job_end = get_default_time_by_role(role, start_time, end_time)
+
             record = {
                 "日期": date_text,
                 "编号": vol_id,
                 "姓名": name,
                 "岗位": role,
-                "开始时间": start_time,
-                "结束时间": end_time,
+                "开始时间": job_start,
+                "结束时间": job_end,
                 "备注": "网页录入",
             }
 
@@ -275,6 +310,17 @@ th {
 </form>
 <hr>
 
+<hr>
+<h2>📅 生成当天排班</h2>
+
+<form method="post" action="/schedule/generate_day">
+    日期：
+    <input type="date" name="date" required>
+
+    <button type="submit">⚡ 生成排班</button>
+</form>
+<hr>
+
 </form>
 
 <form method="post" action="/schedule/clear">
@@ -345,6 +391,47 @@ button, a {
 <h1>📢 月预报名表</h1>
 
 <a href="/schedule">⬅ 返回排班系统</a>
+
+<br><br>
+
+<textarea readonly>{{ output }}</textarea>
+
+</div>
+</body>
+</html>
+"""
+
+DAY_OUTPUT_HTML = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>排班结果</title>
+<style>
+body {
+    font-family: "Microsoft YaHei";
+    background: #f5f5f5;
+    padding: 20px;
+}
+.box {
+    background: white;
+    max-width: 900px;
+    margin: auto;
+    padding: 25px;
+    border-radius: 15px;
+}
+textarea {
+    width: 100%;
+    height: 650px;
+    font-size: 20px;
+}
+</style>
+</head>
+<body>
+<div class="box">
+<h1>📅 排班结果</h1>
+
+<a href="/schedule">⬅ 返回</a>
 
 <br><br>
 
