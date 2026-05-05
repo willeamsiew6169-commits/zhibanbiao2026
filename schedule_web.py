@@ -106,6 +106,47 @@ def load_buddha_name_options():
         print("load_buddha_name_options error:", e)
         return []
 
+def get_fixed_buddha_for_date(date_str):
+    file = os.path.join(BASE_DIR, "fixed_schedule.xlsx")
+
+    if not os.path.exists(file):
+        return []
+
+    try:
+        date_obj = pd.to_datetime(date_str)
+        weekday_map = {
+            0: "星期一",
+            1: "星期二",
+            2: "星期三",
+            3: "星期四",
+            4: "星期五",
+            5: "星期六",
+            6: "星期日",
+        }
+        weekday = weekday_map[date_obj.weekday()]
+
+        df = pd.read_excel(file, sheet_name="佛台固定")
+        df.columns = df.columns.astype(str).str.strip()
+
+        row = df[df["星期"].astype(str).str.strip() == weekday]
+
+        if row.empty:
+            return []
+
+        names = []
+        r = row.iloc[0]
+
+        for col in ["姓名1", "姓名2", "姓名3"]:
+            if col in df.columns:
+                name = str(r.get(col, "")).strip()
+                if name and name != "nan":
+                    names.append(name)
+
+        return names
+
+    except Exception as e:
+        print("get_fixed_buddha_for_date error:", e)
+        return []
 
 def get_default_time_by_role(role, start_time, end_time):
     role = str(role).strip()
@@ -143,10 +184,10 @@ def save_prebook_record(record):
     with pd.ExcelWriter(PREBOOK_FILE, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="预报名", index=False)
 
-def save_buddha_override(date_str, names):
+def save_buddha_override(date_str, final_names):
     file = os.path.join(BASE_DIR, "buddha_override.xlsx")
 
-    names = [str(n).strip() for n in names if str(n).strip()]
+    names = [str(n).strip() for n in final_names if str(n).strip()]
 
     new_row = {
         "日期": date_str,
@@ -210,6 +251,9 @@ def schedule():
 
     buddha_names = load_buddha_name_options()
 
+    override_date = request.args.get("override_date", tomorrow)
+    fixed_buddha_today = get_fixed_buddha_for_date(override_date)
+
     return render_template_string(
         SCHEDULE_HTML,
         mode=mode,
@@ -217,7 +261,9 @@ def schedule():
         roles=ROLE_OPTIONS,
         records=schedule_records,
         tomorrow=tomorrow,
-        buddha_names=buddha_names
+        buddha_names=buddha_names,
+        override_date=override_date,
+        fixed_buddha_today=fixed_buddha_today,
     )
 
 
@@ -338,15 +384,23 @@ def schedule_override():
 
     date = request.form.get("date", "").strip()
 
-    names = [
-        request.form.get("name1", "").strip(),
-        request.form.get("name2", "").strip(),
-        request.form.get("name3", "").strip(),
-    ]
+    original_names = request.form.getlist("original_name")
+    replacement_names = request.form.getlist("replacement_name")
 
-    save_buddha_override(date, names)
+    final_names = []
 
-    return redirect(url_for("schedule.schedule", mode="day"))
+    for original, replacement in zip(original_names, replacement_names):
+        original = str(original).strip()
+        replacement = str(replacement).strip()
+
+        if replacement:
+            final_names.append(replacement)
+        elif original:
+            final_names.append(original)
+
+    save_buddha_override(date, final_names)
+
+    return redirect(url_for("schedule.schedule", mode="day", override_date=date))
 
 
 LOGIN_HTML = """
@@ -494,6 +548,44 @@ th {
     日期：
     <input type="date" name="date" value="{{ tomorrow }}" required>
     <button type="submit">⚡ 生成 WhatsApp 值班表</button>
+</form>
+
+<hr>
+
+<h2>🙏 佛台请假 / 换人</h2>
+
+<form method="get" action="/schedule">
+    <input type="hidden" name="mode" value="day">
+    日期：
+    <input type="date" name="override_date" value="{{ override_date }}" required>
+    <button type="submit">查看当天佛台</button>
+</form>
+
+<form method="post" action="/schedule/override">
+    <input type="hidden" name="date" value="{{ override_date }}">
+
+    <h3>原本佛台：</h3>
+
+    {% if fixed_buddha_today %}
+        {% for old_name in fixed_buddha_today %}
+            <div style="font-size:22px; margin:10px 0;">
+                {{ old_name }}
+                <input type="hidden" name="original_name" value="{{ old_name }}">
+
+                换成：
+                <select name="replacement_name">
+                    <option value="">不换，保留原本</option>
+                    {% for n in buddha_names %}
+                    <option value="{{ n }}">{{ n }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        {% endfor %}
+
+        <button type="submit">💾 保存佛台请假 / 换人</button>
+    {% else %}
+        <p style="font-size:22px;">这一天没有找到固定佛台名单。</p>
+    {% endif %}
 </form>
 
 <hr>
