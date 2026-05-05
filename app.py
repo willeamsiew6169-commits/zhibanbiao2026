@@ -1645,6 +1645,28 @@ setTimeout(() => {
   });
 }, 8000);
 
+// Enter 自动跳格
+document.getElementById('volunteer_id').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    document.getElementById('pin').focus();
+  }
+});
+
+document.getElementById('pin').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    document.getElementById('today_code').focus();
+  }
+});
+
+document.getElementById('today_code').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    lookupVolunteer(); // 或直接 submit 表单
+  }
+});
+
 </script>
 </body>
 </html>
