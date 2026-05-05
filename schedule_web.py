@@ -36,30 +36,28 @@ def find_name_by_id(vol_id):
         return vol_id
 
     df = pd.read_excel(MASTER_FILE)
-    df.columns = df.columns.astype(str).str.strip()
+    df.columns = df.columns.astype(str).str.strip().str.lower()
 
-    if "编号" not in df.columns or "姓名" not in df.columns:
+    if "id" not in df.columns or "name" not in df.columns:
         return vol_id
 
-    df["编号"] = df["编号"].astype(str).str.strip()
-    df["姓名"] = df["姓名"].astype(str).str.strip()
+    df["id"] = df["id"].astype(str).str.strip()
+    df["name"] = df["name"].astype(str).str.strip()
 
     possible_ids = [vol_id]
 
     if vol_id.isdigit():
-        # 0160 = STW-160
         if vol_id.startswith("0"):
             possible_ids.append(f"STW-{int(vol_id)}")
         else:
-            # 160 = CHE-160
             possible_ids.append(f"CHE-{int(vol_id)}")
 
-    match = df[df["编号"].isin(possible_ids)]
+    match = df[df["id"].isin(possible_ids)]
 
     if match.empty:
         return vol_id
 
-    return str(match.iloc[0]["姓名"]).strip()
+    return str(match.iloc[0]["name"]).strip()
 
 def get_default_time_by_role(role, start_time, end_time):
     role = str(role).strip()
