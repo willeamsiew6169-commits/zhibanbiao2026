@@ -3,11 +3,16 @@
 import os
 import pandas as pd
 from openpyxl import load_workbook
+from sqlalchemy import create_engine, text
 from schedule_builder import run_schedule_for_date
 from monthly_prebook_message import generate_monthly_prebook_message
 from flask import Blueprint, request, session, redirect, url_for, render_template_string
 
 schedule_bp = Blueprint("schedule", __name__)
+
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -30,34 +35,53 @@ ROLE_OPTIONS = ["值班", "卫生", "佛台", "供台"]
 schedule_records = []
 
 def find_name_by_id(vol_id):
-    vol_id = str(vol_id).strip()
+    raw_id = str(vol_id or "").strip()
 
-    if not os.path.exists(MASTER_FILE):
-        return vol_id
+    if not raw_id:
+        return raw_id
 
-    df = pd.read_excel(MASTER_FILE)
-    df.columns = df.columns.astype(str).str.strip().str.lower()
+    ids = [raw_id]
 
-    if "id" not in df.columns or "name" not in df.columns:
-        return vol_id
+    if "-" in raw_id:
+        branch, num = raw_id.split("-", 1)
+        branch = branch.strip().upper()
+        num = num.strip()
 
-    df["id"] = df["id"].astype(str).str.strip()
-    df["name"] = df["name"].astype(str).str.strip()
+        ids.append(num)
 
-    possible_ids = [vol_id]
+        if branch == "STW" and num.isdigit():
+            ids.append("0" + num)
 
-    if vol_id.isdigit():
-        if vol_id.startswith("0"):
-            possible_ids.append(f"STW-{int(vol_id)}")
-        else:
-            possible_ids.append(f"CHE-{int(vol_id)}")
+    else:
+        ids.append(f"CHE-{raw_id}")
 
-    match = df[df["id"].isin(possible_ids)]
+        if raw_id.startswith("0") and raw_id[1:].isdigit():
+            ids.append(f"STW-{raw_id[1:]}")
 
-    if match.empty:
-        return vol_id
+    ids = list(dict.fromkeys(ids))
 
-    return str(match.iloc[0]["name"]).strip()
+    try:
+        placeholders = ", ".join([f":id{i}" for i in range(len(ids))])
+        params = {f"id{i}": v for i, v in enumerate(ids)}
+
+        sql = text(f"""
+            select id, name, status, branch
+            from volunteers
+            where id in ({placeholders})
+            limit 1
+        """)
+
+        with engine.connect() as conn:
+            row = conn.execute(sql, params).mappings().first()
+
+        if not row:
+            return raw_id
+
+        return str(row["name"]).strip()
+
+    except Exception as e:
+        print("find_name_by_id error:", e)
+        return raw_id
 
 def get_default_time_by_role(role, start_time, end_time):
     role = str(role).strip()
