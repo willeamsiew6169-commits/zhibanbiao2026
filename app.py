@@ -1438,6 +1438,7 @@ PAGE = """
       <div>
         <label>{{ t.today_code }}</label>
         <input 
+          id="today_code"
           type="tel" 
           name="today_code" 
           inputmode="numeric" 
