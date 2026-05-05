@@ -1476,9 +1476,7 @@ def run_schedule_for_date(date_str):
         special_info = get_special_day_info(date_obj)
         remove_info = get_next_day_remove_info(date_obj)
 
-        signup_df = load_signup_input(date_str)
-        prebook_df = load_prebook_input(date_str)
-        signup_df = merge_signup_and_prebook(signup_df, prebook_df)
+        signup_df = load_prebook_input(date_str)
 
         arranged = assign_jobs(fixed_people, signup_df, special_info)
 
