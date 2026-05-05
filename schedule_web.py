@@ -293,16 +293,27 @@ def schedule_add():
             return "❌ 请选择日期<br><a href='/schedule?mode=day'>返回</a>"
         date_list = [single_date]
     else:
+        action = request.form.get("action", "add")
+
+        year = request.form.get("year", "").strip()
         month = request.form.get("month", "").strip()
         days = request.form.getlist("days")
 
-        if not month:
-            return "❌ 请填写月份，例如 2026-05<br><a href='/schedule?mode=prebook'>返回</a>"
+        if action == "generate_monthly":
+            try:
+                output = generate_monthly_prebook_message(int(year), int(month))
+            except Exception as e:
+                output = f"❌ 生成失败：{e}"
+            return render_template_string(MONTHLY_PREBOOK_HTML, output=output)
+
+        if not year or not month:
+            return "❌ 请选择年份和月份<br><a href='/schedule?mode=prebook'>返回</a>"
 
         if not days:
             return "❌ 请至少选择一天<br><a href='/schedule?mode=prebook'>返回</a>"
 
-        date_list = [f"{month}-{int(day):02d}" for day in days]
+        month_full = f"{int(year)}-{int(month):02d}"
+        date_list = [f"{month_full}-{int(day):02d}" for day in days]
 
     for date_text in date_list:
         for role in roles:
@@ -597,11 +608,24 @@ th {
 
 <form method="post" action="/schedule/add">
 
+    <div style="background:#fff2cc; padding:15px; border-radius:12px; margin-bottom:18px;">
+        <h3>📅 选择月份</h3>
+
+        年份：
+        <input name="year" value="2026" style="width:120px;" required>
+
+        月份：
+        <select name="month">
+            {% for m in range(1, 13) %}
+            <option value="{{ m }}">{{ m }}月</option>
+            {% endfor %}
+        </select>
+    </div>
+
     <h3>1. 输入义工编号</h3>
     <input name="vol_id" placeholder="例如 208 / 0160 / 803" required>
 
-    
-    <h3>3. 多选日期</h3>
+    <h3>2. 多选日期</h3>
     <div class="day-box">
     {% for d in range(1, 32) %}
     <label>
@@ -610,7 +634,7 @@ th {
     {% endfor %}
     </div>
 
-    <h3>4. 选择岗位</h3>
+    <h3>3. 选择岗位</h3>
     <div class="role-box">
     {% for role in roles %}
     <label>
@@ -619,7 +643,7 @@ th {
     {% endfor %}
     </div>
 
-    <h3>5. 选择时间（只给值班用）</h3>
+    <h3>4. 选择时间（只给值班用）</h3>
     开始：
     <select name="start_time">
     {% for t in times %}
@@ -637,42 +661,11 @@ th {
     <input type="hidden" name="mode" value="prebook">
 
     <br><br>
-    <button type="submit">➕ 加入预报名</button>
-</form>
 
-<hr>
-
-<form method="post" action="/schedule/monthly_prebook">
-
-    年份：
-    <input name="year" value="2026" style="width:120px;" required>
-
-    月份：
-    <select name="month">
-        {% for m in range(1, 13) %}
-        <option value="{{ m }}">{{ m }}月</option>
-        {% endfor %}
-    </select>
-
-    <button type="submit">📢 生成月预报名表</button>
+    <button type="submit" name="action" value="add">➕ 加入预报名</button>
+    <button type="submit" name="action" value="generate_monthly">📢 生成月预报名表</button>
 
 </form>
-
-<hr>
-
-<h3>📅 选择月份</h3>
-
-年份：
-<input name="year" value="2026" style="width:120px;" required>
-
-月份：
-<select name="month">
-    {% for m in range(1, 13) %}
-    <option value="{{ m }}">{{ m }}月</option>
-    {% endfor %}
-</select>
-
-<hr>
 
 {% else %}
 
