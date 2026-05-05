@@ -82,6 +82,29 @@ def find_name_by_id(vol_id):
     except Exception as e:
         print("find_name_by_id error:", e)
         return raw_id
+    
+def load_buddha_name_options():
+    file = os.path.join(BASE_DIR, "fixed_schedule.xlsx")
+
+    if not os.path.exists(file):
+        return []
+
+    try:
+        df = pd.read_excel(file, sheet_name="佛台固定")
+        df.columns = df.columns.astype(str).str.strip()
+
+        names = []
+        for col in ["姓名1", "姓名2", "姓名3"]:
+            if col in df.columns:
+                for v in df[col].dropna():
+                    name = str(v).strip()
+                    if name and name != "nan" and name not in names:
+                        names.append(name)
+
+        return names
+    except Exception as e:
+        print("load_buddha_name_options error:", e)
+        return []
 
 
 def get_default_time_by_role(role, start_time, end_time):
@@ -120,12 +143,10 @@ def save_prebook_record(record):
     with pd.ExcelWriter(PREBOOK_FILE, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="预报名", index=False)
 
-def save_buddha_override(date_str, ids):
-    import pandas as pd
-
+def save_buddha_override(date_str, names):
     file = os.path.join(BASE_DIR, "buddha_override.xlsx")
 
-    names = [find_name_by_id(i) for i in ids if i.strip()]
+    names = [str(n).strip() for n in names if str(n).strip()]
 
     new_row = {
         "日期": date_str,
@@ -137,9 +158,7 @@ def save_buddha_override(date_str, ids):
     if os.path.exists(file):
         df = pd.read_excel(file)
         df.columns = df.columns.astype(str).str.strip()
-
         df = df[df["日期"].astype(str) != date_str]
-
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
     else:
         df = pd.DataFrame([new_row])
@@ -189,13 +208,16 @@ def schedule():
 
     mode = request.args.get("mode", "")
 
+    buddha_names = load_buddha_name_options()
+
     return render_template_string(
         SCHEDULE_HTML,
         mode=mode,
         times=TIME_OPTIONS,
         roles=ROLE_OPTIONS,
         records=schedule_records,
-        tomorrow=tomorrow
+        tomorrow=tomorrow,
+        buddha_names=buddha_names
     )
 
 
@@ -316,13 +338,13 @@ def schedule_override():
 
     date = request.form.get("date", "").strip()
 
-    ids = [
-        request.form.get("id1", "").strip(),
-        request.form.get("id2", "").strip(),
-        request.form.get("id3", "").strip(),
+    names = [
+        request.form.get("name1", "").strip(),
+        request.form.get("name2", "").strip(),
+        request.form.get("name3", "").strip(),
     ]
 
-    save_buddha_override(date, ids)
+    save_buddha_override(date, names)
 
     return redirect(url_for("schedule.schedule", mode="day"))
 
@@ -496,6 +518,49 @@ th {
 
     <button type="submit">💾 保存佛台替换</button>
 
+</form>
+
+<hr>
+
+<h2>🙏 佛台请假 / 换人</h2>
+
+<form method="post" action="/schedule/override">
+    日期：
+    <input type="date" name="date" value="{{ tomorrow }}" required>
+
+    <br><br>
+
+    佛台位置1：
+    <select name="name1">
+        <option value="">-- 留空 --</option>
+        {% for n in buddha_names %}
+        <option value="{{ n }}">{{ n }}</option>
+        {% endfor %}
+    </select>
+
+    <br>
+
+    佛台位置2：
+    <select name="name2">
+        <option value="">-- 留空 --</option>
+        {% for n in buddha_names %}
+        <option value="{{ n }}">{{ n }}</option>
+        {% endfor %}
+    </select>
+
+    <br>
+
+    佛台位置3：
+    <select name="name3">
+        <option value="">-- 留空 --</option>
+        {% for n in buddha_names %}
+        <option value="{{ n }}">{{ n }}</option>
+        {% endfor %}
+    </select>
+
+    <br><br>
+
+    <button type="submit">💾 保存佛台替换</button>
 </form>
 
 {% elif mode == "prebook" %}
