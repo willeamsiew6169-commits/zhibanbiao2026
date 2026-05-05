@@ -276,24 +276,8 @@ def schedule_delete(index):
     mode = request.form.get("mode", "")
 
     if 0 <= index < len(schedule_records):
-        schedule_records.pop(index)
-
-    return redirect(url_for("schedule.schedule", mode=mode))
-
-@schedule_bp.route("/schedule/delete/<int:index>", methods=["POST"])
-def schedule_delete(index):
-    if not session.get("schedule_login"):
-        return redirect(url_for("schedule.schedule"))
-
-    mode = request.form.get("mode", "")
-
-    if 0 <= index < len(schedule_records):
         record = schedule_records[index]
-
-        # 删除 Excel
         delete_prebook_record(record)
-
-        # 删除页面
         schedule_records.pop(index)
 
     return redirect(url_for("schedule.schedule", mode=mode))
