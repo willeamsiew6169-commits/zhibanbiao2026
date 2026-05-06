@@ -1,19 +1,18 @@
 import os
 import re
-from datetime import datetime
-
 import pandas as pd
 
+from datetime import datetime
+from sqlalchemy import create_engine, text
 from lunar_rules import get_special_day_info, get_next_day_remove_info
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 FIXED_FILE = os.path.join(BASE_DIR, "fixed_schedule.xlsx")
-SIGNUP_FILE = os.path.join(BASE_DIR, "signup_input.xlsx")
-OUTPUT_FILE = os.path.join(BASE_DIR, "schedule_output.txt")
-HISTORY_FILE = os.path.join(BASE_DIR, "assignment_history.xlsx")
-HISTORY_SHEET = "history"
 PREBOOK_FILE = os.path.join(BASE_DIR, "prebook_schedule.xlsx")
+OUTPUT_FILE = os.path.join(BASE_DIR, "schedule_output.txt")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+engine = create_engine(DATABASE_URL, pool_pre_ping=True) if DATABASE_URL else None
 
 
 def load_prebook_input(target_date_str):
@@ -46,6 +45,25 @@ def load_prebook_input(target_date_str):
 
     return df[["姓名", "岗位", "开始时间", "结束时间", "优先岗位", "备注"]].copy()
 
+def get_latest_date_from_prebook():
+    if not os.path.exists(PREBOOK_FILE):
+        return None
+
+    df = pd.read_excel(PREBOOK_FILE, sheet_name="预报名")
+    df.columns = df.columns.astype(str).str.strip()
+
+    if "日期" not in df.columns:
+        return None
+
+    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+    df = df.dropna(subset=["日期"])
+
+    if df.empty:
+        return None
+
+    latest_date = df["日期"].max()
+    return latest_date.to_pydatetime()
+
 def merge_signup_and_prebook(signup_df, prebook_df):
     if signup_df is None or signup_df.empty:
         return prebook_df.copy()
@@ -62,51 +80,7 @@ def merge_signup_and_prebook(signup_df, prebook_df):
 
     return merged
 
-def save_assignment_history(date_obj, result):
-    records = []
-
-    def add_records(names, job):
-        for n in names:
-            if n:
-                records.append({
-                    "日期": date_obj.strftime("%Y-%m-%d"),
-                    "姓名": n,
-                    "岗位": job
-                })
-
-    # ===== 值班 =====
-    for key in ["橙观音堂", "橙活动中心", "黄观音堂", "黄活动中心"]:
-        for item in result[key]:
-            name = item[0]
-            job = "观音堂" if "观音堂" in key else "活动中心"
-            add_records([name], job)
-
-    # ===== 卫生 =====
-    add_records(result["佛堂卫生"], "佛堂卫生")
-    add_records(result["二楼卫生"], "二楼卫生")
-    add_records(result["楼梯卫生"], "楼梯卫生")
-
-    # ===== 佛台 / 供台（可选，一起记下来也行）=====
-    add_records(result["整理佛台"], "整理佛台")
-    add_records(result["设师父供台"], "设师父供台")
-
-    new_df = pd.DataFrame(records)
-
-    if new_df.empty:
-        return
-
-    if os.path.exists(HISTORY_FILE):
-        try:
-            old_df = pd.read_excel(HISTORY_FILE, sheet_name=HISTORY_SHEET)
-            df = pd.concat([old_df, new_df], ignore_index=True)
-        except Exception:
-            df = new_df
-    else:
-        df = new_df
-
-    with pd.ExcelWriter(HISTORY_FILE, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name=HISTORY_SHEET, index=False)
-
+# ===== 星期映射 =====
 WEEKDAY_MAP = {
     0: "星期一",
     1: "星期二",
@@ -145,97 +119,98 @@ SPECIAL_DEFAULT_TIME = {
     "绿活动中心": ("08:00", "10:00"),
 }
 
-HISTORY_FILE = os.path.join(BASE_DIR, "assignment_history.xlsx")
-
-
-def load_last_assignment():
-    if not os.path.exists(HISTORY_FILE):
-        return {}
-
-    df = pd.read_excel(HISTORY_FILE, sheet_name="history")
-
-    if df.empty:
-        return {}
-
-    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
-    df = df.dropna(subset=["日期"])
-
-    last = df.sort_values("日期").groupby("姓名").tail(1)
-
-    return dict(zip(last["姓名"], last["岗位"]))
 
 def save_assignment_history(date_obj, result):
+    if not engine:
+        print("⚠️ 没有 DATABASE_URL，不能保存 assignment_history")
+        return
+
     records = []
 
     def add_records(names, job):
         for n in names:
-            records.append({
-                "日期": date_obj.strftime("%Y-%m-%d"),
-                "姓名": n,
-                "岗位": job
-            })
+            if n:
+                records.append({
+                    "date": date_obj.strftime("%Y-%m-%d"),
+                    "name": str(n).strip(),
+                    "role": job
+                })
 
-    # ===== 值班 =====
     for key in ["橙观音堂", "橙活动中心", "黄观音堂", "黄活动中心"]:
-        for item in result[key]:
+        for item in result.get(key, []):
             name = item[0]
             job = "观音堂" if "观音堂" in key else "活动中心"
             add_records([name], job)
 
-    # ===== 卫生 =====
-    add_records(result["佛堂卫生"], "佛堂卫生")
-    add_records(result["二楼卫生"], "二楼卫生")
-    add_records(result["楼梯卫生"], "楼梯卫生")
+    add_records(result.get("佛堂卫生", []), "佛堂卫生")
+    add_records(result.get("二楼卫生", []), "二楼卫生")
+    add_records(result.get("楼梯卫生", []), "楼梯卫生")
+    add_records(result.get("整理佛台", []), "整理佛台")
+    add_records(result.get("设师父供台", []), "设师父供台")
 
-    new_df = pd.DataFrame(records)
+    if not records:
+        return
 
-    if os.path.exists(HISTORY_FILE):
-        old_df = pd.read_excel(HISTORY_FILE, sheet_name="history")
-        df = pd.concat([old_df, new_df], ignore_index=True)
-    else:
-        df = new_df
+    date_str = date_obj.strftime("%Y-%m-%d")
 
-    with pd.ExcelWriter(HISTORY_FILE, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="history", index=False)
+    with engine.begin() as conn:
+        # 重新生成同一天时，先删旧记录，避免重复
+        conn.execute(
+            text("delete from assignment_history where date = :date"),
+            {"date": date_str}
+        )
 
+        for r in records:
+            conn.execute(
+                text("""
+                    insert into assignment_history (date, name, role)
+                    values (:date, :name, :role)
+                """),
+                r
+            )
+
+
+def load_last_assignment():
+    if not engine:
+        return {}
+
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                select distinct on (name)
+                    name, role
+                from assignment_history
+                order by name, date desc, id desc
+            """)).mappings().all()
+
+        return {r["name"]: r["role"] for r in rows}
+
+    except Exception as e:
+        print("load_last_assignment error:", e)
+        return {}
+    
 def load_yesterday_hygiene_assignment(date_obj):
-    """
-    读取昨天每个人的卫生岗位：
-    返回格式：
-    {
-        "郑筱頵": "佛堂卫生",
-        "陈彩群": "二楼卫生"
-    }
-    """
-    if not os.path.exists(HISTORY_FILE):
+    if not engine:
         return {}
 
-    df = pd.read_excel(HISTORY_FILE, sheet_name="history")
+    yesterday = (pd.to_datetime(date_obj) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
-    if df.empty:
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                select distinct on (name)
+                    name, role
+                from assignment_history
+                where date = :date
+                  and role in ('佛堂卫生', '二楼卫生', '楼梯卫生')
+                order by name, id desc
+            """), {"date": yesterday}).mappings().all()
+
+        return {r["name"]: r["role"] for r in rows}
+
+    except Exception as e:
+        print("load_yesterday_hygiene_assignment error:", e)
         return {}
-
-    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
-    df = df.dropna(subset=["日期"])
-
-    yesterday = pd.to_datetime(date_obj) - pd.Timedelta(days=1)
-
-    hygiene_jobs = ["佛堂卫生", "二楼卫生", "楼梯卫生"]
-
-    df = df[
-        (df["日期"].dt.date == yesterday.date()) &
-        (df["岗位"].astype(str).isin(hygiene_jobs))
-    ].copy()
-
-    if df.empty:
-        return {}
-
-    df["姓名"] = df["姓名"].astype(str).str.strip()
-    df["岗位"] = df["岗位"].astype(str).str.strip()
-
-    last = df.groupby("姓名").tail(1)
-
-    return dict(zip(last["姓名"], last["岗位"]))
 
 def assign_hygiene_no_same_as_yesterday(hygiene_names, date_obj):
     jobs = ["佛堂卫生", "二楼卫生", "楼梯卫生"]
@@ -300,21 +275,6 @@ def get_weekday_name(date_obj):
     return WEEKDAY_MAP[date_obj.weekday()]
 
 
-def get_latest_date_from_signup():
-    df = pd.read_excel(SIGNUP_FILE, sheet_name="报名")
-    df.columns = df.columns.astype(str).str.strip()
-
-    if "日期" not in df.columns:
-        raise ValueError("signup_input.xlsx 的【报名】sheet 缺少【日期】栏位")
-
-    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
-    df = df.dropna(subset=["日期"])
-
-    if df.empty:
-        raise ValueError("signup_input.xlsx 的【报名】sheet 里没有有效日期")
-
-    latest_date = df["日期"].max()
-    return latest_date.to_pydatetime()
 
 
 def load_fixed_schedule():
@@ -444,47 +404,6 @@ def fix_time_range_v2(text):
     return text
 
 
-def load_signup_input(target_date_str):
-    df = pd.read_excel(SIGNUP_FILE, sheet_name="报名")
-    df.columns = df.columns.astype(str).str.strip()
-
-    if "日期" not in df.columns:
-        raise ValueError("❌ 报名表需要【日期】栏位")
-
-    if "报名原文" not in df.columns:
-        raise ValueError("❌ 报名表需要【报名原文】栏位")
-
-    df["日期"] = pd.to_datetime(df["日期"], errors="coerce").dt.strftime("%Y-%m-%d")
-    df = df[df["日期"] == target_date_str].copy()
-
-    records = []
-
-    for idx, row in df.iterrows():
-        raw_text = str(row.get("报名原文", "")).strip()
-        if not raw_text:
-            continue
-
-        # 支持一格多行
-        lines = raw_text.split("\n")
-
-        for line in lines:
-            line = normalize_time_text(line.strip())
-            if not line:
-                continue
-
-            parsed_list = parse_signup_line_multi(line)
-            if not parsed_list:
-                print(f"⚠️ 无法解析：{line}")
-                continue
-
-            records.extend(parsed_list)
-
-    result_df = pd.DataFrame(records)
-
-    if result_df.empty:
-        return pd.DataFrame(columns=["姓名", "岗位", "开始时间", "结束时间", "优先岗位", "备注"])
-
-    return result_df
 
 def normalize_time_range(text):
     import re
@@ -571,6 +490,34 @@ def get_fixed_people(date_obj, buddhist_df, cleaning_df):
                         result["楼梯卫生"].append(str(row.get(col)).strip())
 
     return result
+
+def load_buddha_override(date_obj):
+    file = "buddha_override.xlsx"
+
+    if not os.path.exists(file):
+        return None
+
+    df = pd.read_excel(file)
+
+    if "日期" not in df.columns:
+        return None
+
+    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+
+    row = df[df["日期"] == date_obj]
+
+    if row.empty:
+        return None
+
+    names = []
+
+    for col in ["姓名1", "姓名2", "姓名3"]:
+        if col in row.columns:
+            val = str(row.iloc[0][col]).strip()
+            if val and val != "nan":
+                names.append(val)
+
+    return names if names else None
 
 
 def normalize_job_name(job):
@@ -1416,46 +1363,23 @@ def build_buddhist_festival_message(date_obj, arranged, special_info, remove_inf
 
 def main():
     try:
-        date_obj = get_latest_date_from_signup()
+        date_obj = get_latest_date_from_prebook()
+        if date_obj is None:
+            print("❌ prebook_schedule.xlsx 没有有效日期")
+            return
+
         target_date_str = date_obj.strftime("%Y-%m-%d")
         print(f"自动使用日期：{target_date_str}")
+
     except Exception as e:
         print(f"❌ 读取日期失败：{e}")
         return
 
     try:
-        buddhist_df, cleaning_df = load_fixed_schedule()
-    except Exception as e:
-        print(f"❌ 读取 fixed_schedule.xlsx 失败：{e}")
-        return
-
-    try:
-        fixed_people = get_fixed_people(date_obj, buddhist_df, cleaning_df)
-        special_info = get_special_day_info(date_obj)
-        remove_info = get_next_day_remove_info(date_obj)
-
-        signup_df = load_signup_input(target_date_str)
-        prebook_df = load_prebook_input(target_date_str)
-        signup_df = merge_signup_and_prebook(signup_df, prebook_df)
-
-        print("=== 合并后的报名资料（含预报名） ===")
-        print(signup_df)
-
-        arranged = assign_jobs(fixed_people, signup_df, special_info)
-
-        if special_info["template_type"] == "normal":
-            message = build_normal_message(date_obj, arranged, special_info, remove_info)
-        elif special_info["template_type"] == "lunar_1_15":
-            message = build_lunar_1_15_message(date_obj, arranged, special_info, remove_info)
-        elif special_info["template_type"] == "buddhist_festival":
-            message = build_buddhist_festival_message(date_obj, arranged, special_info, remove_info)
-        else:
-            message = build_normal_message(date_obj, arranged, special_info, remove_info)
+        message = run_schedule_for_date(target_date_str)
 
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             f.write(message)
-
-        save_assignment_history(date_obj, arranged)
 
         print("已生成排班文案：", OUTPUT_FILE)
         print("=" * 50)
@@ -1472,6 +1396,27 @@ def run_schedule_for_date(date_str):
     try:
         buddhist_df, cleaning_df = load_fixed_schedule()
         fixed_people = get_fixed_people(date_obj, buddhist_df, cleaning_df)
+        override_names = load_buddha_override(date_obj)
+
+        if override_names:
+            original = fixed_people.get("整理佛台", [])
+
+            final = []
+            used = set()
+
+            for i in range(3):
+                if i < len(override_names) and override_names[i]:
+                    name = override_names[i]
+                    if name not in used:
+                        final.append(name)
+                        used.add(name)
+                elif i < len(original):
+                    name = original[i]
+                    if name not in used:
+                        final.append(name)
+                        used.add(name)
+
+            fixed_people["整理佛台"] = final
 
         special_info = get_special_day_info(date_obj)
         remove_info = get_next_day_remove_info(date_obj)
