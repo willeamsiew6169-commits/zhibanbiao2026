@@ -143,22 +143,23 @@ def find_volunteer_by_keyword(keyword):
             """)
             volunteers = cur.fetchall()
 
-    # 1. 编号
-    for v in volunteers:
-        if str(v["id"]).strip() == keyword:
-            return v
+    matches = []
 
-    # 2. 名字（简繁）
     for v in volunteers:
         if key_simple in to_simple(v["name"]):
-            return v
+            matches.append(v)
 
-    # 3. 电话
+    # 编号优先
+    for v in volunteers:
+        if str(v["id"]) == keyword:
+            return [v]
+
+    # 电话优先
     for v in volunteers:
         if keyword in str(v["phone"] or ""):
-            return v
+            return [v]
 
-    return None
+    return matches
     
 def load_buddha_name_options():
     file = os.path.join(BASE_DIR, "fixed_schedule.xlsx")
@@ -362,14 +363,61 @@ def schedule_add():
     if not roles:
         return "❌ 请至少选择一个岗位<br><a href='/schedule'>返回</a>"
 
-    vol = find_volunteer_by_keyword(vol_keyword)
+    # 🔍 查找义工（支持编号 / 姓名 / 电话 / 简繁体）
+    matches = find_volunteer_by_keyword(vol_keyword)
 
-    if not vol:
-        return "❌ 找不到这个义工<br><a href='/schedule'>返回</a>"
+    if not matches:
+        return "❌ 找不到义工<br><a href='/schedule'>返回</a>"
 
-    vol_id = str(vol.get("编号") or vol.get("id") or "").strip()
-    name = str(vol.get("姓名") or vol.get("name") or "").strip()
+    # 🧠 如果找到多个 → 让用户选（重点：保留原数据）
+    if len(matches) > 1:
+        return render_template_string("""
+        <h3>找到多个义工，请选择：</h3>
+        {% for v in matches %}
+            <form method="post" action="/schedule/add">
+                <input type="hidden" name="vol_id" value="{{ v.id }}">
+                <input type="hidden" name="mode" value="{{ mode }}">
 
+                {% for r in roles %}
+                    <input type="hidden" name="roles" value="{{ r }}">
+                {% endfor %}
+
+                <input type="hidden" name="start_time" value="{{ start_time }}">
+                <input type="hidden" name="end_time" value="{{ end_time }}">
+
+                {% if mode == "day" %}
+                    <input type="hidden" name="single_date" value="{{ single_date }}">
+                {% else %}
+                    <input type="hidden" name="year" value="{{ year }}">
+                    <input type="hidden" name="month" value="{{ month }}">
+                    {% for d in days %}
+                        <input type="hidden" name="days" value="{{ d }}">
+                    {% endfor %}
+                {% endif %}
+
+                <button type="submit">
+                    {{ v.name }} ({{ v.id }})
+                </button>
+            </form>
+        {% endfor %}
+        """,
+        matches=matches,
+        mode=mode,
+        roles=roles,
+        start_time=start_time,
+        end_time=end_time,
+        single_date=request.form.get("single_date", ""),
+        year=request.form.get("year", ""),
+        month=request.form.get("month", ""),
+        days=request.form.getlist("days")
+        )
+
+    # ✅ 只有一个结果 → 正常继续
+    vol = matches[0]
+    vol_id = str(vol["id"])
+    name = str(vol["name"])
+
+    # 📅 日期逻辑
     if mode == "day":
         single_date = request.form.get("single_date", "").strip()
         if not single_date:
@@ -398,6 +446,7 @@ def schedule_add():
         month_full = f"{int(year)}-{int(month):02d}"
         date_list = [f"{month_full}-{int(day):02d}" for day in days]
 
+    # 💾 写入记录
     for date_text in date_list:
         for role in roles:
             job_start, job_end = get_default_time_by_role(role, start_time, end_time)
