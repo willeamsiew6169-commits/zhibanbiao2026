@@ -2,8 +2,12 @@
 
 import os
 import psycopg2
+from opencc import OpenCC
 from psycopg2.extras import RealDictCursor
 from flask import Blueprint, request, render_template_string, redirect, url_for, flash
+
+
+cc = OpenCC('t2s')  # 繁 → 简
 
 member_bp = Blueprint("member", __name__, url_prefix="/member")
 
@@ -14,6 +18,52 @@ MEMBER_ADMIN_PIN = os.environ.get("MEMBER_ADMIN_PIN", "1234")
 PAYMENT_YEAR = 2026
 MONTHS = [f"{PAYMENT_YEAR}-{m:02d}" for m in range(1, 13)]
 
+def to_simple(text):
+    if not text:
+        return ""
+    return cc.convert(str(text).strip())
+
+
+def search_volunteer_names(keyword, volunteers):
+    keyword_simple = to_simple(keyword)
+
+    if not keyword_simple:
+        return []
+
+    results = []
+
+    for v in volunteers:
+        name = str(v.get("name") or v.get("姓名") or "").strip()
+        phone = str(v.get("phone") or v.get("电话") or v.get("电话号码") or "").strip()
+
+        name_simple = to_simple(name)
+
+        if keyword_simple in name_simple or keyword_simple in phone:
+            results.append(v)
+
+    return results
+
+def check_missing_months(paid_months):
+    if not paid_months:
+        return []
+
+    paid_set = set(paid_months)
+    sorted_months = sorted(paid_months)
+
+    first = sorted_months[0]
+    last = sorted_months[-1]
+
+    expected = []
+    start_m = int(first.split("-")[1])
+    end_m = int(last.split("-")[1])
+    year = first.split("-")[0]
+
+    for m in range(start_m, end_m + 1):
+        month = f"{year}-{m:02d}"
+        if month not in paid_set:
+            expected.append(month)
+
+    return expected
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
@@ -159,13 +209,26 @@ def member_admin():
                 with get_conn() as conn:
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
+                        keyword = raw_member_id.strip()
+                        member_id = normalize_member_id(keyword)
+
                         cur.execute("""
                             select *
                             from members
                             where member_id = %s
+                            or name ilike %s
+                            or english_name ilike %s
+                            or phone ilike %s
                             limit 1
-                        """, (member_id,))
+                        """, (
+                            member_id,
+                            f"%{keyword}%",
+                            f"%{keyword}%",
+                            f"%{keyword}%"
+                        ))
                         member = cur.fetchone()
+
+                        real_member_id = member["member_id"] if member else member_id
 
                         if not member:
                             error = "找不到这个月费编号"
@@ -178,18 +241,32 @@ def member_admin():
                                     delete from member_payments
                                     where member_id = %s
                                     and paid_month like %s
-                                """, (member_id, f"{PAYMENT_YEAR}-%"))
+                                """, (real_member_id, f"{PAYMENT_YEAR}-%"))
 
                                 for month in selected_months:
                                     cur.execute("""
                                         insert into member_payments
                                         (member_id, paid_month, remark)
                                         values (%s, %s, %s)
-                                    """, (member_id, month, remark))
+                                    """, (real_member_id, month, remark))
 
                                 conn.commit()
                                 paid_months = selected_months
-                                flash("已保存月费记录", "ok")
+
+                                if paid_months:
+                                    latest = max(paid_months)
+                                    y, m = latest.split("-")
+                                    paid_until = f"{y}年{int(m)}月"
+                                else:
+                                    paid_until = "暂无记录"
+
+                                missing_months = check_missing_months(paid_months)
+
+                                if missing_months:
+                                    missing_text = "、".join([f"{int(m.split('-')[1])}月" for m in missing_months])
+                                    flash(f"已保存，但注意：中间漏了 {missing_text}", "error")
+                                else:
+                                    flash(f"已保存月费记录，已供养至：{paid_until}", "ok")
 
                             else:
                                 cur.execute("""
@@ -198,7 +275,7 @@ def member_admin():
                                     where member_id = %s
                                     and paid_month like %s
                                     order by paid_month
-                                """, (member_id, f"{PAYMENT_YEAR}-%"))
+                                """, (real_member_id, f"{PAYMENT_YEAR}-%"))
 
                                 paid_months = [r["paid_month"] for r in cur.fetchall()]
 
@@ -548,8 +625,8 @@ button{
         <label>管理员 PIN</label>
         <input name="admin_pin" type="password" value="{{ admin_pin }}" required>
 
-        <label>月费编号</label>
-        <input name="member_id" value="{{ raw_member_id }}" placeholder="例如：208 / CHE-208 / 0208" required>
+        <label>月费编号 / 姓名 / 电话</label>
+        <input name="member_id" value="{{ raw_member_id }}" placeholder="例如：编号 / 姓名 / 电话" required>
 
         <button type="submit">查找会员</button>
     </form>

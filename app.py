@@ -2220,13 +2220,18 @@ def member_page():
             error = "❌ PIN 不正确"
         else:
             months, latest = get_member_payment(member_id)
+            if latest:
+                y, m = latest.split("-")
+                latest_display = f"{y}年{int(m)}月"
+            else:
+                latest_display = "暂无记录"
             result = {
                 "member_id": member_id,
                 "name": member.get("name") or "",
                 "english_name": member.get("english_name") or "",
                 "phone": member.get("phone") or "",
                 "months": months,
-                "latest": latest,
+                "latest": latest_display,
             }
 
     return render_template_string("""

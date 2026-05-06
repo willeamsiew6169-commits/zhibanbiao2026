@@ -2,6 +2,9 @@
 
 import os
 import pandas as pd
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from opencc import OpenCC
 from openpyxl import load_workbook
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
@@ -10,10 +13,17 @@ from monthly_prebook_message import generate_monthly_prebook_message
 from flask import Blueprint, request, session, redirect, url_for, render_template_string
 
 
+cc = OpenCC('t2s')  # 繁 → 简
+
 schedule_bp = Blueprint("schedule", __name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True) if DATABASE_URL else None
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL) 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PREBOOK_FILE = os.path.join(BASE_DIR, "prebook_schedule.xlsx")
@@ -33,6 +43,31 @@ ROLE_OPTIONS = ["值班", "卫生"]
 
 schedule_records = []
 
+
+def to_simple(text):
+    if not text:
+        return ""
+    return cc.convert(str(text).strip())
+
+
+def search_volunteer_names(keyword, volunteers):
+    keyword_simple = to_simple(keyword)
+
+    if not keyword_simple:
+        return []
+
+    results = []
+
+    for v in volunteers:
+        name = str(v.get("name") or v.get("姓名") or "").strip()
+        phone = str(v.get("phone") or v.get("电话") or v.get("电话号码") or "").strip()
+
+        name_simple = to_simple(name)
+
+        if keyword_simple in name_simple or keyword_simple in phone:
+            results.append(v)
+
+    return results
 
 def find_name_by_id(vol_id):
     raw_id = str(vol_id or "").strip()
@@ -82,6 +117,48 @@ def find_name_by_id(vol_id):
     except Exception as e:
         print("find_name_by_id error:", e)
         return raw_id
+    
+from opencc import OpenCC
+cc = OpenCC("t2s")
+
+def to_simple(text):
+    if not text:
+        return ""
+    return cc.convert(str(text).strip())
+
+
+def find_volunteer_by_keyword(keyword):
+    keyword = str(keyword or "").strip()
+    if not keyword:
+        return None
+
+    key_simple = to_simple(keyword)
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select id, name, phone
+                from volunteers
+                where status = '在册'
+            """)
+            volunteers = cur.fetchall()
+
+    # 1. 编号
+    for v in volunteers:
+        if str(v["id"]).strip() == keyword:
+            return v
+
+    # 2. 名字（简繁）
+    for v in volunteers:
+        if key_simple in to_simple(v["name"]):
+            return v
+
+    # 3. 电话
+    for v in volunteers:
+        if keyword in str(v["phone"] or ""):
+            return v
+
+    return None
     
 def load_buddha_name_options():
     file = os.path.join(BASE_DIR, "fixed_schedule.xlsx")
@@ -274,18 +351,24 @@ def schedule_add():
 
     mode = request.form.get("mode", "").strip()
 
-    vol_id = request.form.get("vol_id", "").strip()
+    vol_keyword = request.form.get("vol_id", "").strip()
     roles = request.form.getlist("roles")
     start_time = request.form.get("start_time", "").strip()
     end_time = request.form.get("end_time", "").strip()
 
-    if not vol_id:
+    if not vol_keyword:
         return "❌ 请填写义工编号<br><a href='/schedule'>返回</a>"
 
     if not roles:
         return "❌ 请至少选择一个岗位<br><a href='/schedule'>返回</a>"
 
-    name = find_name_by_id(vol_id)
+    vol = find_volunteer_by_keyword(vol_keyword)
+
+    if not vol:
+        return "❌ 找不到这个义工<br><a href='/schedule'>返回</a>"
+
+    vol_id = str(vol.get("编号") or vol.get("id") or "").strip()
+    name = str(vol.get("姓名") or vol.get("name") or "").strip()
 
     if mode == "day":
         single_date = request.form.get("single_date", "").strip()
@@ -618,8 +701,8 @@ th {
         </select>
     </div>
 
-    <h3>1. 输入义工编号</h3>
-    <input name="vol_id" placeholder="例如 208 / 0160 / 803" required>
+    <h3>1. 输入义工编号 / 姓名 / 电话</h3>
+    <input name="vol_id" placeholder="输入编号 / 姓名 / 电话" required>
 
     <h3>2. 多选日期</h3>
     <div class="day-box">
