@@ -26,6 +26,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
+from member_web import member_bp
 from pypinyin import lazy_pinyin
 from schedule_web import schedule_bp
 from id_utils import normalize_member_id
@@ -376,6 +377,7 @@ TEXT = {
 app = Flask(__name__)
 app.secret_key = "change-this-simple-secret"
 app.register_blueprint(schedule_bp)
+app.register_blueprint(member_bp)
 
 READING_FILE = "reading.xlsx"
 
