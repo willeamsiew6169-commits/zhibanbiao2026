@@ -566,17 +566,13 @@ th {
 
 <h2>🙏 佛台请假 / 换人</h2>
 
-<form method="get" action="/schedule">
-    <input type="hidden" name="mode" value="day">
-    日期：
-    <input type="date" name="override_date" value="{{ override_date }}" required>
-    <button type="submit">查看当天佛台</button>
-</form>
+日期：
+<input type="date" name="date" value="{{ override_date }}" readonly>
+
+<h3>原本佛台：</h3>
 
 <form method="post" action="/schedule/override">
     <input type="hidden" name="date" value="{{ override_date }}">
-
-    <h3>原本佛台：</h3>
 
     {% if fixed_buddha_today %}
         {% for old_name in fixed_buddha_today %}
@@ -596,7 +592,7 @@ th {
 
         <button type="submit">💾 保存佛台请假 / 换人</button>
     {% else %}
-        <p style="font-size:22px;">这一天没有找到固定佛台名单。</p>
+        <p>这一天没有固定佛台。</p>
     {% endif %}
 </form>
 
