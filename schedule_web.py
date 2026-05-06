@@ -636,7 +636,6 @@ th {
 <h2>📋 当天排班模式</h2>
 
 <form method="post" action="/schedule/add">
-    <input type="hidden" name="mode" value="prebook">
     <h3>1. 选择日期</h3>
     <input type="date" name="single_date" value="{{ tomorrow }}" required>
 
