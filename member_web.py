@@ -218,7 +218,6 @@ def member_admin():
                             where member_id = %s
                             or name ilike %s
                             or english_name ilike %s
-                            or phone ilike %s
                             limit 1
                         """, (
                             member_id,
@@ -626,7 +625,7 @@ button{
         <input name="admin_pin" type="password" value="{{ admin_pin }}" required>
 
         <label>月费编号 / 姓名 / 电话</label>
-        <input name="member_id" value="{{ raw_member_id }}" placeholder="例如：编号 / 姓名 / 电话" required>
+        <input name="member_id" value="{{ raw_member_id }}" placeholder="例如：输入编号 / 姓名" required>
 
         <button type="submit">查找会员</button>
     </form>
