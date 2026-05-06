@@ -143,21 +143,18 @@ def find_volunteer_by_keyword(keyword):
             """)
             volunteers = cur.fetchall()
 
+    # 1. 编号优先
+    for v in volunteers:
+        if str(v["id"]).strip() == keyword:
+            return [v]
+
+    # 2. 姓名简繁体模糊查全部
     matches = []
 
     for v in volunteers:
-        if key_simple in to_simple(v["name"]):
+        name = str(v["name"] or "").strip()
+        if key_simple in to_simple(name):
             matches.append(v)
-
-    # 编号优先
-    for v in volunteers:
-        if str(v["id"]) == keyword:
-            return [v]
-
-    # 电话优先
-    for v in volunteers:
-        if keyword in str(v["phone"] or ""):
-            return [v]
 
     return matches
     
@@ -689,8 +686,9 @@ th {
 
 <form method="post" action="/schedule/generate_day">
     <h3>5. 输出 WhatsApp 值班表</h3>
-    日期：
-    <input type="date" name="date" value="{{ tomorrow }}" required>
+
+    <input type="hidden" name="date" id="generate_date">
+
     <button type="submit">⚡ 生成 WhatsApp 值班表</button>
 </form>
 
@@ -750,8 +748,8 @@ th {
         </select>
     </div>
 
-    <h3>1. 输入义工编号 / 姓名 / 电话</h3>
-    <input name="vol_id" placeholder="输入编号 / 姓名 / 电话" required>
+    <h3>1. 输入义工编号 / 姓名 </h3>
+    <input name="vol_id" placeholder="输入编号 / 姓名 /" required>
 
     <h3>2. 多选日期</h3>
     <div class="day-box">
@@ -905,6 +903,20 @@ function copyText() {
     document.execCommand("copy");
     alert("✅ 已复制，可以直接贴去 WhatsApp");
 }
+</script>
+
+<script>
+document.querySelector("form[action='/schedule/generate_day']").addEventListener("submit", function(e) {
+    var selectedDate = document.querySelector("input[name='single_date']").value;
+
+    if (!selectedDate) {
+        alert("请先选择日期");
+        e.preventDefault();
+        return;
+    }
+
+    document.getElementById("generate_date").value = selectedDate;
+});
 </script>
 
 </body>
