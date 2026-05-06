@@ -222,7 +222,6 @@ def member_admin():
                         """, (
                             member_id,
                             f"%{keyword}%",
-                            f"%{keyword}%",
                             f"%{keyword}%"
                         ))
                         member = cur.fetchone()
