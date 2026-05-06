@@ -388,6 +388,10 @@ hr{
         <button type="submit">查询</button>
     </form>
 
+    <a href="/member/change-pin" class="change-pin-btn">
+            🔒 更改月费密码
+        </a>
+
     {% if member %}
     <div class="result">
         <div class="name">{{ member.name }}</div>
@@ -403,9 +407,7 @@ hr{
 
         <div class="paid-title">已供养至</div>
         <div class="paid-month">{{ paid_until or "暂无记录" }}</div>
-        <a href="/member/change-pin" class="change-pin-btn">
-            🔒 更改月费密码
-        </a>
+        
     </div>
     {% endif %}
 </div>
