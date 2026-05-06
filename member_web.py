@@ -9,6 +9,11 @@ member_bp = Blueprint("member", __name__, url_prefix="/member")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+MEMBER_ADMIN_PIN = os.environ.get("MEMBER_ADMIN_PIN", "1234")
+
+PAYMENT_YEAR = 2026
+MONTHS = [f"{PAYMENT_YEAR}-{m:02d}" for m in range(1, 13)]
+
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
@@ -35,16 +40,18 @@ def verify_member_pin(member, pin):
 
     db_pin = str(member.get("pin") or "").strip()
     phone = str(member.get("phone") or "").strip()
-
     default_pin = phone[-4:] if len(phone) >= 4 else ""
 
-    return pin and (pin == db_pin or pin == default_pin)
+    if db_pin:
+        return pin == db_pin
 
+    return pin == default_pin
 
 @member_bp.route("/", methods=["GET", "POST"])
 def member_home():
     member = None
     error = None
+    paid_until = None
 
     if request.method == "POST":
         raw_member_id = request.form.get("member_id")
@@ -72,7 +79,84 @@ def member_home():
         except Exception as e:
             error = f"系统错误：{e}"
 
-    return render_template_string(MEMBER_HTML, member=member, error=error)
+    return render_template_string(MEMBER_HTML, member=member, error=error, paid_until=paid_until)
+
+@member_bp.route("/admin", methods=["GET", "POST"])
+def member_admin():
+    error = None
+    member = None
+    paid_months = []
+
+    admin_pin = request.form.get("admin_pin", "").strip()
+    raw_member_id = request.form.get("member_id", "").strip()
+    action = request.form.get("action", "")
+
+    if request.method == "POST":
+        if admin_pin != MEMBER_ADMIN_PIN:
+            error = "管理员 PIN 不正确"
+        else:
+            member_id = normalize_member_id(raw_member_id)
+
+            try:
+                with get_conn() as conn:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+                        cur.execute("""
+                            select *
+                            from members
+                            where member_id = %s
+                            limit 1
+                        """, (member_id,))
+                        member = cur.fetchone()
+
+                        if not member:
+                            error = "找不到这个月费编号"
+                        else:
+                            if action == "save":
+                                selected_months = request.form.getlist("paid_months")
+                                remark = request.form.get("remark", "").strip()
+
+                                cur.execute("""
+                                    delete from member_payments
+                                    where member_id = %s
+                                    and paid_month like %s
+                                """, (member_id, f"{PAYMENT_YEAR}-%"))
+
+                                for month in selected_months:
+                                    cur.execute("""
+                                        insert into member_payments
+                                        (member_id, paid_month, remark)
+                                        values (%s, %s, %s)
+                                    """, (member_id, month, remark))
+
+                                conn.commit()
+                                paid_months = selected_months
+                                flash("已保存月费记录", "ok")
+
+                            else:
+                                cur.execute("""
+                                    select paid_month
+                                    from member_payments
+                                    where member_id = %s
+                                    and paid_month like %s
+                                    order by paid_month
+                                """, (member_id, f"{PAYMENT_YEAR}-%"))
+
+                                paid_months = [r["paid_month"] for r in cur.fetchall()]
+
+            except Exception as e:
+                error = f"系统错误：{e}"
+
+    return render_template_string(
+        MEMBER_ADMIN_HTML,
+        error=error,
+        member=member,
+        paid_months=paid_months,
+        months=MONTHS,
+        admin_pin=admin_pin,
+        raw_member_id=raw_member_id,
+        year=PAYMENT_YEAR
+    )
 
 
 MEMBER_HTML = """
@@ -151,6 +235,29 @@ button{
     color:#777;
     font-size:14px;
 }
+.name{
+    font-size:26px;
+    font-weight:bold;
+    text-align:center;
+    margin-bottom:12px;
+}
+.paid-title{
+    text-align:center;
+    color:#666;
+    font-size:16px;
+}
+.paid-month{
+    text-align:center;
+    font-size:30px;
+    font-weight:bold;
+    color:#1b7f3a;
+    margin-top:6px;
+}
+hr{
+    border:0;
+    border-top:1px solid #ddd;
+    margin:16px 0;
+}
 </style>
 </head>
 <body>
@@ -176,12 +283,181 @@ button{
 
     {% if member %}
     <div class="result">
-        <b>{{ member.name }}</b><br>
-        编号：{{ member.member_id }}<br>
-        电话：{{ member.phone or "-" }}<br>
-        状态：{{ member.status or "-" }}<br>
-        <br>
-        <span class="small">下一步这里会显示：已供养到几月</span>
+        <div class="name">{{ member.name }}</div>
+
+        {% if member.english_name %}
+        <div>英文名：{{ member.english_name }}</div>
+        {% endif %}
+
+        <div>月费编号：{{ member.member_id }}</div>
+        <div>电话：{{ member.phone or "-" }}</div>
+
+        <hr>
+
+        <div class="paid-title">已供养至</div>
+        <div class="paid-month">{{ paid_until or "暂无记录" }}</div>
+    </div>
+    {% endif %}
+</div>
+
+</body>
+</html>
+"""
+
+MEMBER_ADMIN_HTML = """
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>月费管理员</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{
+    font-family:Arial,"Microsoft YaHei",sans-serif;
+    background:#f5f5f5;
+    margin:0;
+    padding:20px;
+}
+.box{
+    max-width:620px;
+    margin:auto;
+    background:white;
+    padding:24px;
+    border-radius:16px;
+    box-shadow:0 2px 10px rgba(0,0,0,.08);
+}
+a{
+    text-decoration:none;
+    color:#555;
+}
+h1{
+    text-align:center;
+}
+label{
+    font-weight:bold;
+    display:block;
+    margin-top:14px;
+}
+input{
+    width:100%;
+    font-size:18px;
+    padding:11px;
+    box-sizing:border-box;
+    border:1px solid #ccc;
+    border-radius:10px;
+    margin-top:6px;
+}
+button{
+    width:100%;
+    margin-top:20px;
+    font-size:20px;
+    padding:13px;
+    border:0;
+    border-radius:12px;
+    background:#2d7ff9;
+    color:white;
+    font-weight:bold;
+}
+.error{
+    background:#ffe5e5;
+    color:#a10000;
+    padding:12px;
+    border-radius:10px;
+}
+.ok{
+    background:#e8f7e8;
+    color:#176b2c;
+    padding:12px;
+    border-radius:10px;
+}
+.member-card{
+    margin-top:20px;
+    padding:15px;
+    background:#f7f7f7;
+    border-radius:12px;
+}
+.month-grid{
+    display:grid;
+    grid-template-columns:repeat(3, 1fr);
+    gap:10px;
+    margin-top:15px;
+}
+.month{
+    background:white;
+    border:1px solid #ddd;
+    border-radius:10px;
+    padding:12px;
+    font-size:18px;
+}
+.month input{
+    width:auto;
+    transform:scale(1.3);
+    margin-right:8px;
+}
+</style>
+</head>
+<body>
+
+<div class="box">
+    <a href="/member">← 返回月费查询</a>
+    &nbsp; | &nbsp;
+    <a href="/">返回签到首页</a>
+
+    <h1>月费管理员</h1>
+
+    {% if error %}
+    <div class="error">{{ error }}</div>
+    {% endif %}
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="{{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+
+    <form method="post">
+        <input type="hidden" name="action" value="search">
+
+        <label>管理员 PIN</label>
+        <input name="admin_pin" type="password" value="{{ admin_pin }}" required>
+
+        <label>月费编号</label>
+        <input name="member_id" value="{{ raw_member_id }}" placeholder="例如：208 / CHE-208 / 0208" required>
+
+        <button type="submit">查找会员</button>
+    </form>
+
+    {% if member %}
+    <div class="member-card">
+        <h2>{{ member.name }}</h2>
+        {% if member.english_name %}
+        <div>英文名：{{ member.english_name }}</div>
+        {% endif %}
+        <div>电话：{{ member.phone or "-" }}</div>
+        <div>月费编号：{{ member.member_id }}</div>
+
+        <form method="post">
+            <input type="hidden" name="action" value="save">
+            <input type="hidden" name="admin_pin" value="{{ admin_pin }}">
+            <input type="hidden" name="member_id" value="{{ member.member_id }}">
+
+            <h3>{{ year }} 年供养月份</h3>
+
+            <div class="month-grid">
+            {% for m in months %}
+                <label class="month">
+                    <input type="checkbox" name="paid_months" value="{{ m }}"
+                    {% if m in paid_months %}checked{% endif %}>
+                    {{ m[5:7] }}月
+                </label>
+            {% endfor %}
+            </div>
+
+            <label>备注</label>
+            <input name="remark" placeholder="可空，例如：现金 / 转账 / 财政补录">
+
+            <button type="submit">保存月费记录</button>
+        </form>
     </div>
     {% endif %}
 </div>
