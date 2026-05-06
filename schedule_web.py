@@ -388,9 +388,7 @@ def schedule_add():
                 <input type="hidden" name="end_time" value="{{ end_time }}">
                 <input type="hidden" name="single_date" value="{{ single_date }}">
 
-                <button type="submit">
-                    {{ v.name }} ({{ v.id }})
-                </button>
+                <button type="submit">{{ v.name }} ({{ v.id }})</button>
             </form>
         {% endfor %}
         """,
@@ -399,7 +397,7 @@ def schedule_add():
         roles=roles,
         start_time=start_time,
         end_time=end_time,
-        single_date=request.form.get("single_date", "")
+        single_date=request.form.get("single_date", "").strip()
         )
 
     # ✅ 只有一个结果 → 正常继续
