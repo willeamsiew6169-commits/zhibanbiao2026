@@ -126,6 +126,18 @@ def to_simple(text):
         return ""
     return cc.convert(str(text).strip())
 
+def normalize_vol_id_for_search(s):
+    s = str(s or "").strip().upper()
+    if not s:
+        return ""
+
+    if s.isdigit():
+        if s.startswith("0"):
+            return "STW-" + s.lstrip("0")
+        return "CHE-" + s
+
+    return s
+
 
 def find_volunteer_by_keyword(keyword):
     keyword = str(keyword or "").strip()
@@ -133,6 +145,7 @@ def find_volunteer_by_keyword(keyword):
         return []
 
     key_simple = to_simple(keyword)
+    keyword_id = normalize_vol_id_for_search(keyword)
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -147,7 +160,7 @@ def find_volunteer_by_keyword(keyword):
     id_matches = []
     for v in volunteers:
         vid = str(v["id"] or "").strip()
-        if vid == keyword:
+        if vid == keyword_id or vid == keyword.upper():
             id_matches.append(v)
 
     if id_matches:
