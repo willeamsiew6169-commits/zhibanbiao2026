@@ -77,21 +77,16 @@ def find_volunteer_for_member(cur, member):
     return None
 
 
-def verify_member_pin(volunteer, pin):
+def verify_member_pin(member, pin):
     pin = str(pin or "").strip()
 
-    if not volunteer:
-        return False
-
-    db_pin = str(volunteer.get("pin") or "").strip()
-    phone = str(volunteer.get("phone") or "").strip()
+    db_pin = str(member.get("pin") or "").strip()
+    phone = str(member.get("phone") or "").strip()
     default_pin = phone[-4:] if len(phone) >= 4 else ""
 
-    # volunteers 有 pin：只认 volunteers.pin
     if db_pin:
         return pin == db_pin
 
-    # volunteers 没 pin：才用电话后4位
     return pin == default_pin
 
 @member_bp.route("/", methods=["GET", "POST"])
@@ -208,6 +203,53 @@ def member_admin():
         year=PAYMENT_YEAR
     )
 
+@member_bp.route("/change-pin", methods=["GET", "POST"])
+def member_change_pin():
+    error = None
+    ok = None
+
+    if request.method == "POST":
+        raw_member_id = request.form.get("member_id", "")
+        old_pin = request.form.get("old_pin", "")
+        new_pin = request.form.get("new_pin", "")
+        confirm_pin = request.form.get("confirm_pin", "")
+
+        member_id = normalize_member_id(raw_member_id)
+
+        if not new_pin or len(new_pin) < 4:
+            error = "新密码至少 4 位"
+        elif new_pin != confirm_pin:
+            error = "两次新密码不一样"
+        else:
+            try:
+                with get_conn() as conn:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute("""
+                            select *
+                            from members
+                            where member_id = %s
+                            limit 1
+                        """, (member_id,))
+                        member = cur.fetchone()
+
+                        if not member:
+                            error = "找不到这个月费编号"
+                        elif not verify_member_pin(member, old_pin):
+                            error = "旧密码不正确"
+                        else:
+                            cur.execute("""
+                                update members
+                                set pin = %s
+                                where member_id = %s
+                            """, (new_pin, member_id))
+                            conn.commit()
+                            ok = "月费密码已更改"
+
+            except Exception as e:
+                error = f"系统错误：{e}"
+
+    return render_template_string(CHANGE_PIN_HTML, error=error, ok=ok)
+
 
 MEMBER_HTML = """
 <!doctype html>
@@ -303,6 +345,17 @@ button{
     color:#1b7f3a;
     margin-top:6px;
 }
+.change-pin-btn{
+    display:block;
+    text-align:center;
+    margin-top:15px;
+    padding:12px;
+    background:#f0f0f0;
+    border-radius:10px;
+    color:#333;
+    text-decoration:none;
+    font-weight:bold;
+}
 hr{
     border:0;
     border-top:1px solid #ddd;
@@ -352,6 +405,9 @@ hr{
 
         <div class="paid-title">已供养至</div>
         <div class="paid-month">{{ paid_until or "暂无记录" }}</div>
+        <a href="/member/change-pin" class="change-pin-btn">
+            🔒 更改月费密码
+        </a>
     </div>
     {% endif %}
 </div>
@@ -518,6 +574,58 @@ button{
     {% endif %}
 </div>
 
+</body>
+</html>
+"""
+
+CHANGE_PIN_HTML = """
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>更改月费密码</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:Arial,"Microsoft YaHei",sans-serif;background:#f5f5f5;margin:0;padding:20px;}
+.box{max-width:480px;margin:auto;background:white;padding:24px;border-radius:16px;box-shadow:0 2px 10px rgba(0,0,0,.08);}
+a{text-decoration:none;color:#555;}
+h1{text-align:center;}
+label{font-weight:bold;display:block;margin-top:14px;}
+input{width:100%;font-size:20px;padding:12px;box-sizing:border-box;border:1px solid #ccc;border-radius:10px;margin-top:6px;}
+button{width:100%;margin-top:22px;font-size:22px;padding:14px;border:0;border-radius:12px;background:#2d7ff9;color:white;font-weight:bold;}
+.error{background:#ffe5e5;color:#a10000;padding:12px;border-radius:10px;margin-bottom:15px;}
+.ok{background:#e8f7e8;color:#176b2c;padding:12px;border-radius:10px;margin-bottom:15px;}
+</style>
+</head>
+<body>
+<div class="box">
+    <a href="/member">← 返回月费查询</a>
+    <h1>更改月费密码</h1>
+
+    {% if error %}
+    <div class="error">{{ error }}</div>
+    {% endif %}
+
+    {% if ok %}
+    <div class="ok">{{ ok }}</div>
+    {% endif %}
+
+    <form method="post">
+        <label>月费编号</label>
+        <input name="member_id" placeholder="例如：208 / CHE-208 / 0208" required>
+
+        <label>旧密码</label>
+        <input name="old_pin" type="password" required>
+
+        <label>新密码</label>
+        <input name="new_pin" type="password" required>
+
+        <label>确认新密码</label>
+        <input name="confirm_pin" type="password" required>
+
+        <button type="submit">确认更改</button>
+    </form>
+</div>
 </body>
 </html>
 """
