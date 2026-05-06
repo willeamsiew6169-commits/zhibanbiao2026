@@ -130,33 +130,35 @@ def to_simple(text):
 def find_volunteer_by_keyword(keyword):
     keyword = str(keyword or "").strip()
     if not keyword:
-        return None
+        return []
 
     key_simple = to_simple(keyword)
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                select id, name, phone
+                select id, name
                 from volunteers
                 where status = '在册'
             """)
             volunteers = cur.fetchall()
 
-    # 1. 编号优先
-    for v in volunteers:
-        if str(v["id"]).strip() == keyword:
-            return [v]
+    # 编号完全一样 → 直接认定
+    id_matches = [
+        v for v in volunteers
+        if str(v["id"]).strip() == keyword
+    ]
 
-    # 2. 姓名简繁体模糊查全部
-    matches = []
+    if id_matches:
+        return id_matches
 
-    for v in volunteers:
-        name = str(v["name"] or "").strip()
-        if key_simple in to_simple(name):
-            matches.append(v)
+    # 名字包含 → 可以多个
+    name_matches = [
+        v for v in volunteers
+        if key_simple in to_simple(v["name"])
+    ]
 
-    return matches
+    return name_matches
     
 def load_buddha_name_options():
     file = os.path.join(BASE_DIR, "fixed_schedule.xlsx")
