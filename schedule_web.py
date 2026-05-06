@@ -143,20 +143,22 @@ def find_volunteer_by_keyword(keyword):
             """)
             volunteers = cur.fetchall()
 
-    # 编号完全一样 → 直接认定
-    id_matches = [
-        v for v in volunteers
-        if str(v["id"]).strip() == keyword
-    ]
+    # 1. 编号完全符合 → 直接返回这个人
+    id_matches = []
+    for v in volunteers:
+        vid = str(v["id"] or "").strip()
+        if vid == keyword:
+            id_matches.append(v)
 
     if id_matches:
         return id_matches
 
-    # 名字包含 → 可以多个
-    name_matches = [
-        v for v in volunteers
-        if key_simple in to_simple(v["name"])
-    ]
+    # 2. 姓名简繁体模糊匹配 → 返回全部
+    name_matches = []
+    for v in volunteers:
+        name = str(v["name"] or "").strip()
+        if key_simple in to_simple(name):
+            name_matches.append(v)
 
     return name_matches
     
@@ -372,6 +374,7 @@ def schedule_add():
     if len(matches) > 1:
         return render_template_string("""
         <h3>找到多个义工，请选择：</h3>
+
         {% for v in matches %}
             <form method="post" action="/schedule/add">
                 <input type="hidden" name="vol_id" value="{{ v.id }}">
@@ -383,16 +386,7 @@ def schedule_add():
 
                 <input type="hidden" name="start_time" value="{{ start_time }}">
                 <input type="hidden" name="end_time" value="{{ end_time }}">
-
-                {% if mode == "day" %}
-                    <input type="hidden" name="single_date" value="{{ single_date }}">
-                {% else %}
-                    <input type="hidden" name="year" value="{{ year }}">
-                    <input type="hidden" name="month" value="{{ month }}">
-                    {% for d in days %}
-                        <input type="hidden" name="days" value="{{ d }}">
-                    {% endfor %}
-                {% endif %}
+                <input type="hidden" name="single_date" value="{{ single_date }}">
 
                 <button type="submit">
                     {{ v.name }} ({{ v.id }})
@@ -405,10 +399,7 @@ def schedule_add():
         roles=roles,
         start_time=start_time,
         end_time=end_time,
-        single_date=request.form.get("single_date", ""),
-        year=request.form.get("year", ""),
-        month=request.form.get("month", ""),
-        days=request.form.getlist("days")
+        single_date=request.form.get("single_date", "")
         )
 
     # ✅ 只有一个结果 → 正常继续
