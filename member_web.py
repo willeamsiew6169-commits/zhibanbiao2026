@@ -5,7 +5,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import Blueprint, request, render_template_string, redirect, url_for, flash
 
-member_bp = Blueprint("member", __name__, url_prefix="/member_new")
+member_bp = Blueprint("member", __name__, url_prefix="/member")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -382,7 +382,7 @@ hr{
     <a class="back" href="/">← 返回签到首页</a>
 
     <div style="text-align:right; margin-bottom:10px;">
-        <a href="/member_new/admin" style="font-size:12px; color:#aaa;">
+        <a href="/member/admin" style="font-size:12px; color:#aaa;">
             ⚙ 管理员入口
         </a>
     </div>
@@ -403,7 +403,7 @@ hr{
         <button type="submit">查询</button>
     </form>
 
-    <a href="/member_new/change-pin" class="change-pin-btn">
+    <a href="/member/change-pin" class="change-pin-btn">
             🔒 更改月费密码
         </a>
 
@@ -526,7 +526,7 @@ button{
 <body>
 
 <div class="box">
-    <a href="/member_new">← 返回月费查询</a>
+    <a href="/member">← 返回月费查询</a>
     &nbsp; | &nbsp;
     <a href="/">返回签到首页</a>
 
@@ -614,7 +614,7 @@ button{width:100%;margin-top:22px;font-size:22px;padding:14px;border:0;border-ra
 </head>
 <body>
 <div class="box">
-    <a href="/member_new">← 返回月费查询</a>
+    <a href="/member">← 返回月费查询</a>
     <h1>更改月费密码</h1>
 
     {% if error %}

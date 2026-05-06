@@ -2198,7 +2198,7 @@ def get_member_payment(member_id):
     return months, latest
 
 
-@app.route("/member", methods=["GET", "POST"])
+@app.route("/member_old", methods=["GET", "POST"])
 def member_page():
     result = None
     error = ""
@@ -2517,7 +2517,7 @@ def api_volunteer(volunteer_id):
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
     
-@app.route("/member", methods=["GET", "POST"])
+@app.route("/member_old", methods=["GET", "POST"])
 def member():
     if request.method == "POST":
         member_id = request.form.get("member_id")
