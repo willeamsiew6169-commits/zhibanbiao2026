@@ -118,6 +118,21 @@ def member_home():
                         if not verify_member_pin(member, pin):
                             error = "PIN 不正确"
                             member = None
+                        else:
+                            cur.execute("""
+                                select paid_month
+                                from member_payments
+                                where member_id = %s
+                                order by paid_month
+                            """, (member_id,))
+
+                            paid_rows = cur.fetchall()
+                            paid_months = [r["paid_month"] for r in paid_rows]
+
+                            if paid_months:
+                                latest = max(paid_months)
+                                y, m = latest.split("-")
+                                paid_until = f"{y}年{int(m)}月"
 
         except Exception as e:
             error = f"系统错误：{e}"
