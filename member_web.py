@@ -34,17 +34,64 @@ def normalize_member_id(raw):
 
     return s
 
+def find_volunteer_for_member(cur, member):
+    member_id = str(member.get("member_id") or "").strip()
+    name = str(member.get("name") or "").strip()
+    phone = str(member.get("phone") or "").strip()
 
-def verify_member_pin(member, pin):
+    # 1. 先用编号找
+    cur.execute("""
+        select *
+        from volunteers
+        where id = %s
+        limit 1
+    """, (member_id,))
+    vol = cur.fetchone()
+    if vol:
+        return vol
+
+    # 2. 再用电话找
+    if phone:
+        cur.execute("""
+            select *
+            from volunteers
+            where phone = %s
+            limit 1
+        """, (phone,))
+        vol = cur.fetchone()
+        if vol:
+            return vol
+
+    # 3. 最后用姓名找
+    if name:
+        cur.execute("""
+            select *
+            from volunteers
+            where name = %s
+            limit 1
+        """, (name,))
+        vol = cur.fetchone()
+        if vol:
+            return vol
+
+    return None
+
+
+def verify_member_pin(volunteer, pin):
     pin = str(pin or "").strip()
 
-    db_pin = str(member.get("pin") or "").strip()
-    phone = str(member.get("phone") or "").strip()
+    if not volunteer:
+        return False
+
+    db_pin = str(volunteer.get("pin") or "").strip()
+    phone = str(volunteer.get("phone") or "").strip()
     default_pin = phone[-4:] if len(phone) >= 4 else ""
 
+    # volunteers 有 pin：只认 volunteers.pin
     if db_pin:
         return pin == db_pin
 
+    # volunteers 没 pin：才用电话后4位
     return pin == default_pin
 
 @member_bp.route("/", methods=["GET", "POST"])
@@ -70,11 +117,14 @@ def member_home():
                     """, (member_id,))
                     member = cur.fetchone()
 
-            if not member:
-                error = "找不到这个月费编号"
-            elif not verify_member_pin(member, pin):
-                error = "PIN 不正确"
-                member = None
+                    if not member:
+                        error = "找不到这个月费编号"
+                    else:
+                        volunteer = find_volunteer_for_member(cur, member)
+
+                        if not verify_member_pin(volunteer, pin):
+                            error = "PIN 不正确"
+                            member = None
 
         except Exception as e:
             error = f"系统错误：{e}"
@@ -264,6 +314,12 @@ hr{
 
 <div class="box">
     <a class="back" href="/">← 返回签到首页</a>
+
+    <div style="text-align:right; margin-bottom:10px;">
+        <a href="/member/admin" style="font-size:12px; color:#aaa;">
+            ⚙ 管理员入口
+        </a>
+    </div>
 
     <h1>月费查询</h1>
 
