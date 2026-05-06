@@ -1,9 +1,9 @@
 # member_web.py
 
-from flask import Blueprint, request, render_template_string, redirect, url_for, flash
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from flask import Blueprint, request, render_template_string, redirect, url_for, flash
 
 member_bp = Blueprint("member", __name__, url_prefix="/member")
 
