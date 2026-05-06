@@ -115,9 +115,7 @@ def member_home():
                     if not member:
                         error = "找不到这个月费编号"
                     else:
-                        volunteer = find_volunteer_for_member(cur, member)
-
-                        if not verify_member_pin(volunteer, pin):
+                        if not verify_member_pin(member, pin):
                             error = "PIN 不正确"
                             member = None
 
