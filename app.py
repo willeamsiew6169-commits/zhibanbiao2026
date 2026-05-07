@@ -1519,19 +1519,14 @@ PAGE = """
         <div>
           <label>{{ t.pin }}</label>
 
-          <input
-              id="pin"
-              name="pin"
-              type="password"
-              inputmode="numeric"
-              pattern="[0-9]*"
-              autocomplete="new-password"
-              autocorrect="off"
-              autocapitalize="off"
-              spellcheck="false"
-              value=""
-              placeholder="{{ t.pin_placeholder }}"
-              required
+          <input id="pin"
+                 name="pin"
+                 type="password"
+                 inputmode="numeric"
+                 pattern="[0-9]*"
+                 autocomplete="new-password"
+                 placeholder="{{ t.pin_placeholder }}"
+                 required>
           >
         </div>
       </div>
@@ -1769,6 +1764,13 @@ document.getElementById('today_code').addEventListener('keydown', function(e) {
     lookupVolunteer(); // 或直接 submit 表单
   }
 });
+
+<script>
+window.onload = function() {
+    document.getElementById("pin").value = "";
+    document.getElementById("today_code").value = "";
+};
+</script>
 
 </script>
 </body>
