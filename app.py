@@ -1761,16 +1761,17 @@ document.getElementById('pin').addEventListener('keydown', function(e) {
 document.getElementById('today_code').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') {
     e.preventDefault();
-    lookupVolunteer(); // 或直接 submit 表单
+    lookupVolunteer();
   }
 });
 
-<script>
-window.onload = function() {
-    document.getElementById("pin").value = "";
-    document.getElementById("today_code").value = "";
-};
-</script>
+window.addEventListener("load", function() {
+  const pin = document.getElementById("pin");
+  const todayCode = document.getElementById("today_code");
+
+  if (pin) pin.value = "";
+  if (todayCode) todayCode.value = "";
+});
 
 </script>
 </body>
