@@ -379,6 +379,90 @@ app.secret_key = "change-this-simple-secret"
 app.register_blueprint(schedule_bp)
 app.register_blueprint(member_bp)
 
+ADMIN_HOME_HTML = """
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>观音堂管理员入口</title>
+
+<style>
+
+body{
+    margin:0;
+    padding:0;
+    background:#f5efe3;
+    font-family:"Microsoft YaHei";
+    text-align:center;
+}
+
+.container{
+    max-width:500px;
+    margin:auto;
+    padding:30px 20px;
+}
+
+h1{
+    color:#8b5a2b;
+}
+
+.card{
+    background:white;
+    border-radius:20px;
+    padding:25px;
+    margin-bottom:25px;
+    box-shadow:0 4px 12px rgba(0,0,0,0.08);
+}
+
+.btn{
+    display:block;
+    background:#b67b3d;
+    color:white;
+    text-decoration:none;
+    padding:16px;
+    border-radius:14px;
+    font-size:18px;
+    font-weight:bold;
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>🙏 观音堂管理员入口</h1>
+
+<div class="card">
+<h2>📋 值班表生成系统</h2>
+<a class="btn" href="/schedule">
+进入系统
+</a>
+</div>
+
+<div class="card">
+<h2>💰 月费管理员系统</h2>
+<a class="btn" href="/member">
+进入系统
+</a>
+</div>
+
+<div class="card">
+<h2>✅ 义工签到系统</h2>
+<a class="btn" href="/">
+进入系统
+</a>
+</div>
+
+</div>
+
+</body>
+</html>
+"""
+
 READING_FILE = "reading.xlsx"
 
 # =========================
@@ -2234,6 +2318,8 @@ def member_page():
                 "latest": latest_display,
             }
 
+
+
     return render_template_string("""
 <!doctype html>
 <html>
@@ -2587,6 +2673,10 @@ def change_pin(volunteer_id: str, old_pin: str, new_pin: str, confirm_pin: str):
     """, (new_pin, normalize_member_id(volunteer_id)))
 
     return True, "PIN 已更新"
+
+@app.route("/admin-home")
+def admin_home():
+    return ADMIN_HOME_HTML
 
 
 @app.route("/change_pin", methods=["GET", "POST"])
