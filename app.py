@@ -40,7 +40,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from flask import (
     Flask, request, redirect, url_for,
     render_template_string, flash, jsonify,
-    make_response, send_file,
+    make_response, send_file, send_from_directory,
 )
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -385,6 +385,8 @@ ADMIN_HOME_HTML = """
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+
+<link rel="manifest" href="/manifest.json">
 
 <title>观音堂管理员入口</title>
 
@@ -2691,6 +2693,24 @@ def change_pin(volunteer_id: str, old_pin: str, new_pin: str, confirm_pin: str):
 @app.route("/admin-home")
 def admin_home():
     return ADMIN_HOME_HTML
+
+@app.route('/manifest.json')
+def manifest():
+    return {
+        "name": "蕉赖观音堂管理员",
+        "short_name": "管理员",
+        "start_url": "/admin-home",
+        "display": "standalone",
+        "background_color": "#7a0000",
+        "theme_color": "#7a0000",
+        "icons": [
+            {
+                "src": "/static/icon.png",
+                "sizes": "512x512",
+                "type": "image/png"
+            }
+        ]
+    }
 
 
 @app.route("/change_pin", methods=["GET", "POST"])
