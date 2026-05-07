@@ -470,10 +470,22 @@ hr{
 
     <form method="post">
         <label>月费编号</label>
-        <input name="member_id" placeholder="例如：208 / CHE-208 / 0208" autocomplete="off" required>
+        <input name="member_id"
+            placeholder="例如：208 / CHE-208 / 0208"
+            autocomplete="off"
+            required>
 
         <label>PIN</label>
-        <input name="pin" type="password" placeholder="请输入 PIN" required>
+        <input
+            id="member_pin"
+            name="pin"
+            type="password"
+            placeholder="请输入 PIN"
+            autocomplete="new-password"
+            readonly
+            onfocus="this.removeAttribute('readonly');"
+            required
+        >
 
         <button type="submit">查询</button>
     </form>

@@ -1519,14 +1519,14 @@ PAGE = """
         <div>
           <label>{{ t.pin }}</label>
 
-          <input id="pin"
-                 name="pin"
-                 type="password"
-                 inputmode="numeric"
-                 pattern="[0-9]*"
-                 autocomplete="new-password"
-                 placeholder="{{ t.pin_placeholder }}"
-                 required>
+          <input
+              id="admin_pin"
+              name="pin"
+              type="password"
+              inputmode="numeric"
+              autocomplete="new-password"
+              value=""
+              required
           >
         </div>
       </div>
@@ -1634,7 +1634,17 @@ PAGE = """
 
     <form method="post" action="{{ url_for('admin_report') }}">
       <label>{{ t.admin_pin }}</label>
-      <input name="admin_pin" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="{{ t.admin_pin }}" required>
+      <input
+          id="admin_pin"
+          name="admin_pin"
+          type="password"
+          inputmode="numeric"
+          pattern="[0-9]*"
+          autocomplete="new-password"
+          value=""
+          placeholder="{{ t.admin_pin }}"
+          required
+      >
       <button class="btn-admin" type="submit">📊 {{ t.generate_report }}</button>
     </form>
     
@@ -1743,34 +1753,43 @@ setTimeout(() => {
   });
 }, 8000);
 
-// Enter 自动跳格
-document.getElementById('volunteer_id').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    document.getElementById('pin').focus();
-  }
-});
+const volunteerIdInput = document.getElementById('volunteer_id');
+const pinInput = document.getElementById('pin');
+const todayCodeInput = document.getElementById('today_code');
 
-document.getElementById('pin').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    document.getElementById('today_code').focus();
-  }
-});
+if (volunteerIdInput && pinInput) {
+  volunteerIdInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      pinInput.focus();
+    }
+  });
+}
 
-document.getElementById('today_code').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    lookupVolunteer();
-  }
-});
+if (pinInput && todayCodeInput) {
+  pinInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      todayCodeInput.focus();
+    }
+  });
+}
+
+if (todayCodeInput) {
+  todayCodeInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      lookupVolunteer();
+    }
+  });
+}
 
 window.addEventListener("load", function() {
-  const pin = document.getElementById("pin");
-  const todayCode = document.getElementById("today_code");
+  const adminPin = document.getElementById("admin_pin");
 
-  if (pin) pin.value = "";
-  if (todayCode) todayCode.value = "";
+  if (pinInput) pinInput.value = "";
+  if (todayCodeInput) todayCodeInput.value = "";
+  if (adminPin) adminPin.value = "";
 });
 
 </script>
@@ -2408,12 +2427,14 @@ a { font-size:20px; }
 
     <label>PIN</label>
     <input
-        id="admin_pin"
+        id="pin"
         name="pin"
         type="password"
         inputmode="numeric"
+        pattern="[0-9]*"
         autocomplete="new-password"
         value=""
+        placeholder="{{ t.pin_placeholder }}"
         required
     >
 
