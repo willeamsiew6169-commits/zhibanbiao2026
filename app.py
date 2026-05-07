@@ -1516,7 +1516,21 @@ PAGE = """
         </div>
         <div>
           <label>{{ t.pin }}</label>
-          <input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="{{ t.pin_placeholder }}" required>
+
+          <input
+              id="pin"
+              name="pin"
+              type="password"
+              inputmode="numeric"
+              pattern="[0-9]*"
+              autocomplete="new-password"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+              value=""
+              placeholder="{{ t.pin_placeholder }}"
+              required
+          >
         </div>
       </div>
 
