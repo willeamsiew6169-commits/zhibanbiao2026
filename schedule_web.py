@@ -552,11 +552,12 @@ LOGIN_HTML = """
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>负责人排班系统</title>
 <style>
-body { font-family: "Microsoft YaHei", Arial; background:#f5f5f5; padding:30px; }
+body { font-family: "Microsoft YaHei", Arial; background:#f5f5f5; padding:20px; font-size:24px; }
 .box { background:white; max-width:600px; margin:auto; padding:30px; border-radius:15px; text-align:center; }
-input, button { font-size:24px; padding:12px; margin:8px; }
+input, button { font-size:30px; padding:18px; margin:10px; width:90%; border-radius:12px; }
 </style>
 </head>
 <body>
@@ -577,6 +578,7 @@ SCHEDULE_HTML = """
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>负责人排班系统</title>
 <style>
 body {
@@ -623,6 +625,14 @@ th, td {
 }
 th {
     background: #d9ead3;
+}
+input, button {
+    font-size: 26px;
+    padding: 16px;
+    border-radius: 12px;
+}
+table {
+    font-size: 22px;
 }
 </style>
 </head>
@@ -849,6 +859,7 @@ DAY_OUTPUT_HTML = """
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>排班结果</title>
 <style>
 body {
@@ -932,6 +943,7 @@ MONTHLY_PREBOOK_HTML = """
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>月预报名表</title>
 <style>
 body { font-family: "Microsoft YaHei", Arial; background:#f5f5f5; padding:20px; }
