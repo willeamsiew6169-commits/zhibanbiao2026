@@ -2404,10 +2404,18 @@ a { font-size:20px; }
 
 <form method="post">
     <label>月费编号</label>
-    <input name="member_id" placeholder="例如：208 / CHE-208 / 0208" required>
+    <input name="member_id" placeholder="例如：108 / CHE-108 / 0108" required>
 
     <label>PIN</label>
-    <input name="pin" type="password" inputmode="numeric" required>
+    <input
+        id="admin_pin"
+        name="pin"
+        type="password"
+        inputmode="numeric"
+        autocomplete="new-password"
+        value=""
+        required
+    >
 
     <button type="submit">查询</button>
 </form>
