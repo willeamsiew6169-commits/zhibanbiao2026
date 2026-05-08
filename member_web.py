@@ -354,7 +354,7 @@ body{
     padding:20px;
 }
 .box{
-    max-width:480px;
+    max-width:950px;
     margin:auto;
     background:white;
     padding:24px;
@@ -366,21 +366,23 @@ body{
     margin-bottom:18px;
     text-decoration:none;
     color:#555;
-    font-size:16px;
+    font-size:24px;
 }
 h1{
     text-align:center;
     margin:10px 0 24px;
+    font-size:56px;
 }
 label{
     font-weight:bold;
+    font-size:30px;
     display:block;
     margin-top:14px;
 }
 input{
     width:100%;
-    font-size:20px;
-    padding:12px;
+    font-size:34px;
+    padding:20px;
     box-sizing:border-box;
     border:1px solid #ccc;
     border-radius:10px;
@@ -389,8 +391,8 @@ input{
 button{
     width:100%;
     margin-top:22px;
-    font-size:22px;
-    padding:14px;
+    font-size:38px;
+    padding:22px;
     border:0;
     border-radius:12px;
     background:#2d7ff9;
@@ -635,8 +637,17 @@ button{
         <input type="hidden" name="action" value="search">
 
         <label>管理员 PIN</label>
-        <input name="admin_pin" type="password" value="{{ admin_pin }}" required>
-
+        <input
+            id="member_admin_pin"
+            name="admin_pin"
+            type="password"
+            inputmode="numeric"
+            autocomplete="new-password"
+            value=""
+            readonly
+            onfocus="this.removeAttribute('readonly');"
+            required
+        >
         <label>月费编号 / 姓名 / 电话</label>
         <input name="member_id" value="{{ raw_member_id }}" placeholder="例如：输入编号 / 姓名" required>
 
