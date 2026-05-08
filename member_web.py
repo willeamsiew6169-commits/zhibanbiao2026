@@ -533,7 +533,7 @@ body{
     padding:20px;
 }
 .box{
-    max-width:620px;
+    max-width:950px;
     margin:auto;
     background:white;
     padding:24px;
@@ -546,16 +546,18 @@ a{
 }
 h1{
     text-align:center;
+    font-size:52px;
 }
 label{
     font-weight:bold;
+    font-size:28px;
     display:block;
     margin-top:14px;
 }
 input{
     width:100%;
-    font-size:18px;
-    padding:11px;
+    font-size:32px;
+    padding:18px;
     box-sizing:border-box;
     border:1px solid #ccc;
     border-radius:10px;
@@ -564,8 +566,8 @@ input{
 button{
     width:100%;
     margin-top:20px;
-    font-size:20px;
-    padding:13px;
+    font-size:34px;
+    padding:20px;
     border:0;
     border-radius:12px;
     background:#2d7ff9;
@@ -601,11 +603,11 @@ button{
     border:1px solid #ddd;
     border-radius:10px;
     padding:12px;
-    font-size:18px;
+    font-size:28px;
 }
 .month input{
     width:auto;
-    transform:scale(1.3);
+    transform:scale(2);
     margin-right:8px;
 }
 </style>
