@@ -1,17 +1,20 @@
 # admin_web.py
 
-from flask import Blueprint, request, redirect, url_for, render_template_string
+from flask import Blueprint, request, redirect, url_for, render_template_string, flash
 from datetime import datetime
 
 from db import db_query
+from utils import get_text
+from utils import get_display_today_code
 from utils import MY_TZ, get_today_code, now_date_str, calc_hours
+
 
 admin_bp = Blueprint("admin", __name__)
 
 # 管理员 PIN：你可以改成自己的
 ADMIN_PIN = "8888"
 
-@app.route("/admin_add_record", methods=["GET", "POST"])
+@admin_bp.route("/admin_add_record", methods=["GET", "POST"])
 def admin_add_record():
     from flask import request, redirect, url_for, render_template_string
 
@@ -93,6 +96,44 @@ def admin_add_record():
     now=datetime.now(MY_TZ).strftime("%I:%M%p").lower(),
     volunteers=db_query("select id, name from volunteers where status='在册'", fetchall=True)
     )
+
+@admin_bp.route("/admin_report", methods=["POST"])
+def admin_report():
+    pin = str(request.form.get("admin_pin", "")).strip()
+
+    t = get_text()  # ⭐ 加这一行
+
+    if pin != ADMIN_PIN:
+        flash(t["admin_pin_wrong"], "bad")
+        return redirect(url_for("index"))
+
+    code = get_display_today_code()
+
+    return f"""
+<h1>{t["admin_title"]}</h1>
+
+<h2>{t["today_code_big"]}</h2>
+<div style="font-size:60px;font-weight:bold;color:#dc3545;">
+    {code}
+</div>
+
+<p>{t["today_code_warning"]}</p>
+
+<a href="/download_data" style="display:block;margin-top:12px;font-size:24px;">
+    {t["download_data"]}
+</a>
+
+<a href="/admin_add_record?pin={pin}" style="display:block;margin-top:12px;font-size:24px;">
+  {t["admin_add_record"]}
+</a>
+
+<a href="/admin_records?pin={pin}" style="display:block;margin-top:12px;font-size:24px;">
+  {t["admin_records"]}
+</a>
+
+<br>
+<a href="/" style="font-size:20px;">⬅ {t["back_home"]}</a>
+"""
 
 ADMIN_HOME_HTML = """
 <!doctype html>
