@@ -1520,10 +1520,11 @@ PAGE = """
           <label>{{ t.pin }}</label>
 
           <input
-              id="admin_pin"
+              id="pin"
               name="pin"
               type="password"
               inputmode="numeric"
+              pattern="[0-9]*"
               autocomplete="new-password"
               value=""
               required
