@@ -91,7 +91,6 @@ def get_lang() -> str:
     lang = request.cookies.get("lang", "zh")
     return lang if lang in TEXT else "zh"
 
-
 def get_text() -> dict:
     return TEXT[get_lang()]
 

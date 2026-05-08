@@ -28,9 +28,9 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 from admin_web import admin_bp
 from db import db_query, get_db
-from reading_web import reading_bp
 from member_web import member_bp
 from pypinyin import lazy_pinyin
+from reading_web import reading_bp
 from schedule_web import schedule_bp
 from utils import get_text, get_lang
 from id_utils import normalize_member_id
@@ -888,7 +888,7 @@ PAGE = """
   <div class="card">
     <h2>🔐 {{ t.admin_tools }}</h2>
 
-    <form method="post" action="{{ url_for('admin_report') }}">
+    <form method="post" action="{{ url_for('admin.admin_report') }}">
       <label>{{ t.admin_pin }}</label>
       <input
           id="admin_pin"
