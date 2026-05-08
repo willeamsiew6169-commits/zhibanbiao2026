@@ -1181,6 +1181,8 @@ def make_qr_base64(text):
 # =========================
 @app.route("/")
 def index():
+    stats = get_today_stats()
+
     return render_template_string(
         PAGE,
         t=get_text(),
@@ -1189,7 +1191,9 @@ def index():
         open_records=get_today_open_records(),
         today_records=get_today_records(limit=20),
         today_code_enabled=TODAY_CODE_ENABLED,
-        stats=get_today_stats(),
+        today_count=stats["total"],
+        not_out=stats["open"],
+        done_out=stats["finished"],
     )
 
 
