@@ -26,11 +26,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
-
 from admin_web import admin_bp
 from reading_web import reading_bp
-
-
 from member_web import member_bp
 from pypinyin import lazy_pinyin
 from schedule_web import schedule_bp
