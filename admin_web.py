@@ -46,7 +46,7 @@ def admin_add_record():
             values (%s,%s,%s,%s,%s,%s,%s,%s)
         """, (date, vid, name, role, start, end, hours, remark))
 
-        return redirect(url_for("admin_add_record", pin=pin))
+        return redirect(url_for("admin.admin_add_record", pin=pin))
 
     return render_template_string("""
     <h1>🛠 补录签到</h1>
@@ -202,7 +202,7 @@ def admin_edit_record(record_id):
             where id = %s
         """, (role, start_time, end_time, hours, remark, record_id))
 
-        return redirect(url_for("admin_records", pin=pin))
+        return redirect(url_for("admin.admin_records", pin=pin))
 
     return render_template_string("""
 <h1>✏️ 修改记录</h1>
@@ -245,7 +245,7 @@ def admin_delete_record(record_id):
           and date = %s
     """, (record_id, now_date_str()))
 
-    return redirect(url_for("admin_records", pin=pin))
+    return redirect(url_for("admin.admin_records", pin=pin))
     
 @admin_bp.route("/admin_records")
 def admin_records():

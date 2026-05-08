@@ -416,7 +416,7 @@ def reading_edit(record_id):
             where id = %s
         """, (new_topic, new_session, record_id))
 
-        return redirect(url_for("reading"))
+        return redirect(url_for("reading.reading"))
 
     html = """
     <h2>修改白话佛法记录</h2>
