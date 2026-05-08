@@ -83,8 +83,14 @@ def get_display_today_code():
     return get_today_code()
 
 def get_today_code():
-    today = datetime.now(MY_TZ)
-    day_index = today.toordinal() % len(TODAY_CODE_LIST)
+    now = datetime.now(MY_TZ)
+
+    # ✅ 晚上7点后，算明天
+    if now.hour >= 19:
+        now = now + timedelta(days=1)
+
+    day_index = now.toordinal() % len(TODAY_CODE_LIST)
+
     return TODAY_CODE_LIST[day_index]
 
 def get_lang() -> str:
