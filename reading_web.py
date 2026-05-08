@@ -1,5 +1,12 @@
 # reading_web.py
 
+import os
+import pandas as pd
+
+from db import db_query
+from openpyxl import load_workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+
 from flask import (
     Blueprint,
     request,
@@ -9,11 +16,74 @@ from flask import (
 )
 
 from datetime import datetime
-
-from db import db_query
 from utils import get_text, now_date_str, MY_TZ
 
 reading_bp = Blueprint("reading", __name__)
+READING_FILE = "reading.xlsx"
+
+def ensure_reading_file():
+    required_cols = ["日期", "姓名", "主题", "场次", "时间"]
+
+    if not os.path.exists(READING_FILE):
+        df = pd.DataFrame(columns=required_cols)
+        df.to_excel(READING_FILE, index=False)
+        return
+
+    df = pd.read_excel(READING_FILE)
+
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = ""
+
+    df = df[required_cols]
+    df.to_excel(READING_FILE, index=False)
+    beautify_reading_excel()
+
+def beautify_reading_excel():
+    if not os.path.exists(READING_FILE):
+        return
+    
+    print("🔥 正在执行 beautify")
+
+    wb = load_workbook(READING_FILE)
+    ws = wb.active
+
+    header_fill = PatternFill("solid", fgColor="D9EAD3")
+    header_font = Font(name="Microsoft YaHei", size=16, bold=True)
+    body_font = Font(name="Microsoft YaHei", size=15)
+
+    thin = Side(style="thin", color="999999")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    for row in ws.iter_rows():
+        for cell in row:
+            cell.font = header_font if cell.row == 1 else body_font
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True
+            )
+            cell.border = border
+            if cell.row == 1:
+                cell.fill = header_fill
+
+    # ✅ 行高：重点
+    ws.row_dimensions[1].height = 32
+
+    for r in range(2, ws.max_row + 1):
+        ws.row_dimensions[r].height = 30
+
+    # ✅ 列宽：放大
+    ws.column_dimensions["A"].width = 20
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 45
+    ws.column_dimensions["D"].width = 22
+    ws.column_dimensions["E"].width = 18
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:E{ws.max_row}"
+
+    wb.save(READING_FILE)
 
 def get_today_reading_rows():
     rows = db_query("""
@@ -24,6 +94,8 @@ def get_today_reading_rows():
     """, (now_date_str(),), fetchall=True)
 
     return rows or []
+
+
 
 def add_reading_record(name, identity, topic, session, time_text):
     db_query("""
@@ -311,4 +383,64 @@ def reading():
         today_records=today_records,
         today_summary=today_summary_records,
         topic_options=topic_options
+    )
+
+@reading_bp.route("/reading_delete/<int:record_id>")
+def reading_delete(record_id):
+    db_query("""
+        delete from reading
+        where id = %s
+    """, (record_id,))
+
+    return redirect(url_for("reading.reading"))
+
+@reading_bp.route("/reading_edit/<int:record_id>", methods=["GET", "POST"])
+def reading_edit(record_id):
+    row = db_query("""
+        select *
+        from reading
+        where id = %s
+    """, (record_id,), fetchone=True)
+
+    if not row:
+        return "找不到这笔记录<br><a href='/reading'>返回</a>"
+
+    if request.method == "POST":
+        new_topic = request.form.get("topic", "").strip()
+        new_session = request.form.get("session", "").strip()
+
+        db_query("""
+            update reading
+            set topic = %s,
+                session = %s
+            where id = %s
+        """, (new_topic, new_session, record_id))
+
+        return redirect(url_for("reading"))
+
+    html = """
+    <h2>修改白话佛法记录</h2>
+    <form method="post">
+        <p>姓名：{{ name }}</p>
+        <p>身份：{{ identity }}</p>
+
+        <p>主题：</p>
+        <input name="topic" value="{{ topic }}" style="font-size:22px;width:320px;">
+
+        <p>场次 / 备注：</p>
+        <input name="session" value="{{ session }}" style="font-size:22px;width:320px;">
+
+        <br><br>
+        <button type="submit" style="font-size:22px;">保存修改</button>
+    </form>
+    <br>
+    <a href="/reading">返回</a>
+    """
+
+    return render_template_string(
+        html,
+        name=row.get("name"),
+        identity=row.get("identity"),
+        topic=row.get("topic") or "",
+        session=row.get("session") or ""
     )

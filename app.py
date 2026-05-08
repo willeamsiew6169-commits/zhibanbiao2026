@@ -27,11 +27,12 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 from admin_web import admin_bp
+from db import db_query, get_db
 from reading_web import reading_bp
 from member_web import member_bp
 from pypinyin import lazy_pinyin
 from schedule_web import schedule_bp
-from utils import get_text, get_lang, TEXT
+from utils import get_text, get_lang
 from id_utils import normalize_member_id
 from sqlalchemy import create_engine, text
 from psycopg2.extras import RealDictCursor
@@ -39,69 +40,31 @@ from openpyxl import Workbook, load_workbook
 from psycopg2.pool import SimpleConnectionPool
 from datetime import datetime, date, time, timedelta
 from excel_style_utils import beautify_attendance_file
-from utils import get_today_code, MY_TZ, TODAY_CODE_LIST
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from flask import (
     Flask, request, redirect, url_for,
     render_template_string, flash, jsonify,
     make_response, send_file, send_from_directory,
 )
-
-DATABASE_URL = os.environ.get("DATABASE_URL")
-MY_TZ = ZoneInfo("Asia/Kuala_Lumpur")
-today = datetime.now(MY_TZ).strftime("%Y-%m-%d")
-
-def get_db():
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL 没有设置")
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-
-pool = SimpleConnectionPool(
-    1,
-    20,
-    dsn=DATABASE_URL,
-    cursor_factory=RealDictCursor
+from utils import (
+    MY_TZ,
+    TODAY_CODE_ENABLED,
+    TODAY_CODE_LIST,
+    now_date_str,
+    now_time_str,
+    get_today_code,
+    get_display_today_code,
+    verify_today_code,
+    parse_time,
+    parse_time_to_datetime,
+    calc_hours,
+    get_text,
+    get_lang,
+    TEXT,
 )
 
-def db_query(sql, params=None, fetchone=False, fetchall=False):
-    import psycopg2
-
-    conn = pool.getconn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, params or ())
-            
-            if fetchone:
-                result = cur.fetchone()
-            elif fetchall:
-                result = cur.fetchall()
-            else:
-                result = None
-
-            conn.commit()
-            return result
-
-    except psycopg2.OperationalError:
-        # 🔥 连接坏了 → 重试一次
-        conn = pool.getconn()
-        with conn.cursor() as cur:
-            cur.execute(sql, params or ())
-            
-            if fetchone:
-                result = cur.fetchone()
-            elif fetchall:
-                result = cur.fetchall()
-            else:
-                result = None
-
-            conn.commit()
-            return result
-
-    finally:
-        pool.putconn(conn)
-
-
-
+MY_TZ = ZoneInfo("Asia/Kuala_Lumpur")
+today = datetime.now(MY_TZ).strftime("%Y-%m-%d")
 
 # =========================
 # 1) 基本设定
@@ -126,7 +89,7 @@ ATTENDANCE_HEADERS = [
     "开始时间", "结束时间", "时数", "备注"
 ]
 
-TODAY_CODE_ENABLED = True
+
 
 TODAY_CODE_LIST = [
     "2580", "7312", "4901", "8625", "1047",
@@ -261,110 +224,6 @@ h1{
 </html>
 """
 
-READING_FILE = "reading.xlsx"
-
-# =========================
-# 工具函数
-# =========================
-def get_today_code():
-    today = datetime.now(MY_TZ)
-    day_index = today.toordinal() % len(TODAY_CODE_LIST)
-    return TODAY_CODE_LIST[day_index]
-
-
-def get_display_today_code():
-    """管理员页面显示用：晚上7点后显示明天的现场码。"""
-    now = datetime.now(MY_TZ)
-
-    if now.hour >= 19:
-        tomorrow = now + timedelta(days=1)
-        day_index = tomorrow.toordinal() % len(TODAY_CODE_LIST)
-        return TODAY_CODE_LIST[day_index]
-
-    return get_today_code()
-
-def beautify_reading_excel():
-    if not os.path.exists(READING_FILE):
-        return
-    
-    print("🔥 正在执行 beautify")
-
-    wb = load_workbook(READING_FILE)
-    ws = wb.active
-
-    header_fill = PatternFill("solid", fgColor="D9EAD3")
-    header_font = Font(name="Microsoft YaHei", size=16, bold=True)
-    body_font = Font(name="Microsoft YaHei", size=15)
-
-    thin = Side(style="thin", color="999999")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    for row in ws.iter_rows():
-        for cell in row:
-            cell.font = header_font if cell.row == 1 else body_font
-            cell.alignment = Alignment(
-                horizontal="center",
-                vertical="center",
-                wrap_text=True
-            )
-            cell.border = border
-            if cell.row == 1:
-                cell.fill = header_fill
-
-    # ✅ 行高：重点
-    ws.row_dimensions[1].height = 32
-
-    for r in range(2, ws.max_row + 1):
-        ws.row_dimensions[r].height = 30
-
-    # ✅ 列宽：放大
-    ws.column_dimensions["A"].width = 20
-    ws.column_dimensions["B"].width = 24
-    ws.column_dimensions["C"].width = 45
-    ws.column_dimensions["D"].width = 22
-    ws.column_dimensions["E"].width = 18
-
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:E{ws.max_row}"
-
-    wb.save(READING_FILE)
-
-
-def parse_time_to_datetime(t):
-    today = datetime.now(MY_TZ)
-    s = str(t).strip().lower()
-
-    for fmt in ["%H:%M", "%I:%M%p", "%I:%M %p"]:
-        try:
-            parsed = datetime.strptime(s, fmt)
-            return today.replace(hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
-        except ValueError:
-            pass
-
-    raise ValueError(f"不能解析时间：{t}")
-
-def ensure_reading_file():
-    required_cols = ["日期", "姓名", "主题", "场次", "时间"]
-
-    if not os.path.exists(READING_FILE):
-        df = pd.DataFrame(columns=required_cols)
-        df.to_excel(READING_FILE, index=False)
-        return
-
-    df = pd.read_excel(READING_FILE)
-
-    for col in required_cols:
-        if col not in df.columns:
-            df[col] = ""
-
-    df = df[required_cols]
-    df.to_excel(READING_FILE, index=False)
-    beautify_reading_excel()
-
-
-def get_today():
-    return datetime.now(MY_TZ).strftime("%Y-%m-%d")
-
 def get_today_stats():
     rows = db_query("""
         select *
@@ -381,72 +240,6 @@ def get_today_stats():
         "open": open_count,
         "finished": finished,
     }
-
-# =========================
-# 页面：共修记录
-# =========================
-
-
-@app.route("/reading_delete/<int:record_id>")
-def reading_delete(record_id):
-    db_query("""
-        delete from reading
-        where id = %s
-    """, (record_id,))
-
-    return redirect(url_for("reading"))
-
-
-@app.route("/reading_edit/<int:record_id>", methods=["GET", "POST"])
-def reading_edit(record_id):
-    row = db_query("""
-        select *
-        from reading
-        where id = %s
-    """, (record_id,), fetchone=True)
-
-    if not row:
-        return "找不到这笔记录<br><a href='/reading'>返回</a>"
-
-    if request.method == "POST":
-        new_topic = request.form.get("topic", "").strip()
-        new_session = request.form.get("session", "").strip()
-
-        db_query("""
-            update reading
-            set topic = %s,
-                session = %s
-            where id = %s
-        """, (new_topic, new_session, record_id))
-
-        return redirect(url_for("reading"))
-
-    html = """
-    <h2>修改白话佛法记录</h2>
-    <form method="post">
-        <p>姓名：{{ name }}</p>
-        <p>身份：{{ identity }}</p>
-
-        <p>主题：</p>
-        <input name="topic" value="{{ topic }}" style="font-size:22px;width:320px;">
-
-        <p>场次 / 备注：</p>
-        <input name="session" value="{{ session }}" style="font-size:22px;width:320px;">
-
-        <br><br>
-        <button type="submit" style="font-size:22px;">保存修改</button>
-    </form>
-    <br>
-    <a href="/reading">返回</a>
-    """
-
-    return render_template_string(
-        html,
-        name=row.get("name"),
-        identity=row.get("identity"),
-        topic=row.get("topic") or "",
-        session=row.get("session") or ""
-    )
 
 # =========================
 # 已弃用（改用 Supabase）
@@ -478,39 +271,8 @@ def set_lang(lang):
 # =========================
 # 3) 工具函数
 # =========================
-def now_date_str() -> str:
-    return datetime.now(MY_TZ).strftime("%Y-%m-%d")
-
-
-def now_time_str() -> str:
-    return datetime.now(MY_TZ).strftime("%I:%M%p").lstrip("0").lower()
-
-
 def only_digits(value) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
-
-
-def parse_time(value: str) -> Optional[datetime]:
-    s = str(value or "").strip().lower().replace(" ", "")
-    if not s:
-        return None
-    for fmt in ["%I:%M%p", "%I%p", "%H:%M"]:
-        try:
-            return datetime.strptime(s, fmt)
-        except Exception:
-            pass
-    return None
-
-
-def calc_hours(start_time: str, end_time: str) -> float:
-    st = parse_time(start_time)
-    et = parse_time(end_time)
-    if not st or not et:
-        return 0.0
-    diff = (et - st).total_seconds() / 3600
-    if diff < 0:
-        return 0.0
-    return round(diff, 2)
 
 
 def backup_attendance() -> None:
@@ -528,7 +290,6 @@ def safe_save_workbook(wb, path: Path) -> None:
 
 def reload_attendance_cache() -> None:
     return
-
 
 # =========================
 # 4) Excel 读取 / 建立
@@ -551,20 +312,6 @@ def load_volunteers() -> list[dict]:
     """, fetchall=True)
 
     return rows or []
-
-def verify_today_code(input_code):
-    now = datetime.now(MY_TZ)
-
-    # 1️⃣ 当前有效码
-    today_code = get_today_code()
-
-    # 2️⃣ 如果超过晚上7点 → 用“明天的码”
-    if now.hour >= 19:
-        tomorrow = now + timedelta(days=1)
-        day_index = tomorrow.toordinal() % len(TODAY_CODE_LIST)
-        today_code = TODAY_CODE_LIST[day_index]
-
-    return str(input_code).strip() == str(today_code)
 
 
 def find_volunteer(volunteer_id: str):

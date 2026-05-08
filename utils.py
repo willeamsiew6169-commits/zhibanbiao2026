@@ -6,6 +6,8 @@ from flask import request
 
 MY_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
+TODAY_CODE_ENABLED = True
+
 TODAY_CODE_LIST = [
     "2580", "7312", "4901", "8625", "1047",
     "3698", "5206", "9174", "6842", "0359",
@@ -13,14 +15,11 @@ TODAY_CODE_LIST = [
     "7788", "9090", "3145", "6721", "4826",
 ]
 
-def get_today_code():
-    today = datetime.now(MY_TZ)
-    day_index = today.toordinal() % len(TODAY_CODE_LIST)
-    return TODAY_CODE_LIST[day_index]
-
-
-def now_date_str():
+def now_date_str() -> str:
     return datetime.now(MY_TZ).strftime("%Y-%m-%d")
+
+def now_time_str() -> str:
+    return datetime.now(MY_TZ).strftime("%I:%M%p").lstrip("0").lower()
 
 def parse_time(value):
     s = str(value or "").strip().lower().replace(" ", "")
@@ -35,19 +34,58 @@ def parse_time(value):
 
     return None
 
-def calc_hours(start_time, end_time):
+def calc_hours(start_time: str, end_time: str) -> float:
     st = parse_time(start_time)
     et = parse_time(end_time)
-
     if not st or not et:
         return 0.0
-
     diff = (et - st).total_seconds() / 3600
-
     if diff < 0:
         return 0.0
-
     return round(diff, 2)
+
+def parse_time_to_datetime(t):
+    today = datetime.now(MY_TZ)
+    s = str(t).strip().lower()
+
+    for fmt in ["%H:%M", "%I:%M%p", "%I:%M %p"]:
+        try:
+            parsed = datetime.strptime(s, fmt)
+            return today.replace(hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
+        except ValueError:
+            pass
+
+    raise ValueError(f"不能解析时间：{t}")
+
+def verify_today_code(input_code):
+    now = datetime.now(MY_TZ)
+
+    # 1️⃣ 当前有效码
+    today_code = get_today_code()
+
+    # 2️⃣ 如果超过晚上7点 → 用“明天的码”
+    if now.hour >= 19:
+        tomorrow = now + timedelta(days=1)
+        day_index = tomorrow.toordinal() % len(TODAY_CODE_LIST)
+        today_code = TODAY_CODE_LIST[day_index]
+
+    return str(input_code).strip() == str(today_code)
+    
+def get_display_today_code():
+    """管理员页面显示用：晚上7点后显示明天的现场码。"""
+    now = datetime.now(MY_TZ)
+
+    if now.hour >= 19:
+        tomorrow = now + timedelta(days=1)
+        day_index = tomorrow.toordinal() % len(TODAY_CODE_LIST)
+        return TODAY_CODE_LIST[day_index]
+
+    return get_today_code()
+
+def get_today_code():
+    today = datetime.now(MY_TZ)
+    day_index = today.toordinal() % len(TODAY_CODE_LIST)
+    return TODAY_CODE_LIST[day_index]
 
 def get_lang() -> str:
     lang = request.cookies.get("lang", "zh")
