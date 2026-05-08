@@ -63,9 +63,6 @@ from utils import (
     TEXT,
 )
 
-MY_TZ = ZoneInfo("Asia/Kuala_Lumpur")
-today = datetime.now(MY_TZ).strftime("%Y-%m-%d")
-
 # =========================
 # 1) 基本设定
 # =========================
@@ -78,7 +75,7 @@ VOLUNTEERS_SHEET = "volunteers"
 ATTENDANCE_SHEET = "records"
 
 # 管理员 PIN：你可以改成自己的
-ADMIN_PIN = "8888"
+
 
 # 你的月报/年报脚本名称
 REPORT_SCRIPT = BASE_DIR / "zhibanbiao2026.py"
@@ -87,15 +84,6 @@ REPORT_SCRIPT = BASE_DIR / "zhibanbiao2026.py"
 ATTENDANCE_HEADERS = [
     "日期", "姓名", "报名", "签到", "岗位",
     "开始时间", "结束时间", "时数", "备注"
-]
-
-
-
-TODAY_CODE_LIST = [
-    "2580", "7312", "4901", "8625", "1047",
-    "3698", "5206", "9174", "6842", "0359",
-    "2468", "1357", "8080", "1122", "5566",
-    "7788", "9090", "3145", "6721", "4826",
 ]
 
 # 系统内部岗位永远用中文；英文只用于网页显示
@@ -111,9 +99,6 @@ ROLE_TEXT = {
     "膳食": {"zh": "膳食", "en": "Meal"},
     "佛学班": {"zh": "佛学班", "en": "Buddhist Class"},
 }
-
-
-
 
 app = Flask(__name__)
 app.secret_key = "change-this-simple-secret"
@@ -1190,6 +1175,7 @@ def make_qr_base64(text):
     buffer = BytesIO()
     img.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode()
+
 # =========================
 # 7) 路由
 # =========================
@@ -1205,7 +1191,6 @@ def index():
         today_code_enabled=TODAY_CODE_ENABLED,
         stats=get_today_stats(),
     )
-
 
 
 @app.route("/qr")
@@ -1358,7 +1343,6 @@ def delete_edit():
     return redirect(url_for("index"))
 
 
-
 @app.route("/download_reading")
 def download_reading():
     
@@ -1399,6 +1383,7 @@ def download_reading():
         download_name="reading_report.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
 
 def normalize_member_query_id(value: str) -> str:
     s = str(value or "").strip().upper()
@@ -1482,7 +1467,6 @@ def member_page():
                 "months": months,
                 "latest": latest_display,
             }
-
 
 
     return render_template_string("""
@@ -1586,12 +1570,6 @@ a { font-size:20px; }
 </body>
 </html>
 """, result=result, error=error)
-
-
-
-
-
-
 
 @app.route("/api/volunteer/<volunteer_id>", methods=["POST"])
 def api_volunteer(volunteer_id):
@@ -1721,7 +1699,6 @@ def change_pin_page():
 if __name__ == "__main__":
     print("====================================")
     print("义工签到系统已启动")
-    print(f"管理员 PIN：{ADMIN_PIN}")
     print("====================================")
 
     port = int(os.environ.get("PORT", 5000))
