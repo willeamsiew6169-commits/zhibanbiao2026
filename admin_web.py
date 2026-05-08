@@ -429,7 +429,12 @@ h1{
 </a>
 </div>
 
-<a class="btn" href="/admin/download_data">📥 下载签到数据 Excel</a>
+<div class="card">
+<h2>📥 数据下载</h2>
+<a class="btn" href="/admin/download_data">
+下载签到数据 Excel
+</a>
+</div>
 
 </div>
 
