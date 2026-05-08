@@ -4,7 +4,7 @@ import os
 import psycopg2
 from opencc import OpenCC
 from psycopg2.extras import RealDictCursor
-from flask import Blueprint, request, render_template_string, redirect, url_for, flash
+from flask import Blueprint, request, render_template_string, redirect, url_for, flash, session
 
 
 cc = OpenCC('t2s')  # 繁 → 简
@@ -200,9 +200,14 @@ def member_admin():
     action = request.form.get("action", "")
 
     if request.method == "POST":
-        if admin_pin != MEMBER_ADMIN_PIN:
-            error = "管理员 PIN 不正确"
-        else:
+
+        if not session.get("member_admin"):
+            if admin_pin != MEMBER_ADMIN_PIN:
+                error = "管理员 PIN 不正确"
+            else:
+                session["member_admin"] = True
+
+        if not error:
             member_id = normalize_member_id(raw_member_id)
 
             try:
@@ -338,6 +343,10 @@ def member_change_pin():
 
     return render_template_string(CHANGE_PIN_HTML, error=error, ok=ok)
 
+@member_bp.route("/admin/logout")
+def member_admin_logout():
+    session.pop("member_admin", None)
+    return redirect(url_for("member.member_admin"))
 
 MEMBER_HTML = """
 <!doctype html>
@@ -622,6 +631,13 @@ button{
     <a href="/">返回签到首页</a>
 
     <h1>月费管理员</h1>
+
+    <div style="margin-bottom:15px;">
+        <a href="/member/admin/logout"
+        style="color:red;font-size:18px;text-decoration:none;">
+        🚪 退出管理员
+        </a>
+    </div>
 
     {% if error %}
     <div class="error">{{ error }}</div>
