@@ -782,6 +782,7 @@ PAGE = """
               pattern="[0-9]*"
               autocomplete="new-password"
               value=""
+              placeholder="{{ t.pin_placeholder }}"
               required
           >
         </div>

@@ -102,7 +102,7 @@ TEXT = {
         "enter_id": "输入编号",
         "id_placeholder": "例如：123",
         "pin": "PIN",
-        "pin_placeholder": "输入PIN",
+        "pin_placeholder": "请输入 PIN",
         "find_volunteer": "查找义工",
         "name": "姓名",
         "phone": "电话",
