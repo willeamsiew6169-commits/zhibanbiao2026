@@ -103,10 +103,7 @@ def admin_add_record():
 
 @admin_bp.route("/download_data")
 def download_data():
-    from flask import send_file
-    import pandas as pd
-    import io
-
+    
     try:
         att_rows = db_query("""
             select
@@ -396,6 +393,22 @@ h1{
 <h1>🙏 观音堂管理员入口</h1>
 
 <div class="card">
+    <h2>📅 今日签到码</h2>
+
+    <div style="
+        font-size:48px;
+        font-weight:bold;
+        text-align:center;
+        padding:20px;
+        background:#fff3cd;
+        border-radius:16px;
+        color:#856404;
+    ">
+        {{ today_code }}
+    </div>
+</div>
+
+<div class="card">
 <h2>📋 值班表生成系统</h2>
 <a class="btn" href="/schedule">
 进入系统
@@ -416,21 +429,7 @@ h1{
 </a>
 </div>
 
-<div class="card">
-    <h2>📅 今日签到码</h2>
-
-    <div style="
-        font-size:48px;
-        font-weight:bold;
-        text-align:center;
-        padding:20px;
-        background:#fff3cd;
-        border-radius:16px;
-        color:#856404;
-    ">
-        {{ today_code }}
-    </div>
-</div>
+<a class="btn" href="/admin/download_data">📥 下载签到数据 Excel</a>
 
 </div>
 
