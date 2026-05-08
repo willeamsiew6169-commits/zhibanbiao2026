@@ -16,3 +16,34 @@ def get_today_code():
     today = datetime.now(MY_TZ)
     day_index = today.toordinal() % len(TODAY_CODE_LIST)
     return TODAY_CODE_LIST[day_index]
+
+
+def now_date_str():
+    return datetime.now(MY_TZ).strftime("%Y-%m-%d")
+
+def parse_time(value):
+    s = str(value or "").strip().lower().replace(" ", "")
+    if not s:
+        return None
+
+    for fmt in ["%I:%M%p", "%I%p", "%H:%M"]:
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            pass
+
+    return None
+
+def calc_hours(start_time, end_time):
+    st = parse_time(start_time)
+    et = parse_time(end_time)
+
+    if not st or not et:
+        return 0.0
+
+    diff = (et - st).total_seconds() / 3600
+
+    if diff < 0:
+        return 0.0
+
+    return round(diff, 2)
