@@ -26,6 +26,10 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+from admin_web import admin_bp
+
+
 from member_web import member_bp
 from pypinyin import lazy_pinyin
 from schedule_web import schedule_bp
@@ -36,6 +40,7 @@ from openpyxl import Workbook, load_workbook
 from psycopg2.pool import SimpleConnectionPool
 from datetime import datetime, date, time, timedelta
 from excel_style_utils import beautify_attendance_file
+from utils import get_today_code, MY_TZ, TODAY_CODE_LIST
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from flask import (
     Flask, request, redirect, url_for,
@@ -378,6 +383,7 @@ app = Flask(__name__)
 app.secret_key = "change-this-simple-secret"
 app.register_blueprint(schedule_bp)
 app.register_blueprint(member_bp)
+app.register_blueprint(admin_bp)
 
 ADMIN_HOME_HTML = """
 <!doctype html>
@@ -2739,12 +2745,6 @@ def change_pin(volunteer_id: str, old_pin: str, new_pin: str, confirm_pin: str):
 
     return True, "PIN 已更新"
 
-@app.route("/admin-home")
-def admin_home():
-    return render_template_string(
-        ADMIN_HOME_HTML,
-        today_code=get_today_code()
-    )
 
 @app.route('/manifest.json')
 def manifest():
