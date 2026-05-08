@@ -459,6 +459,22 @@ h1{
 </a>
 </div>
 
+<div class="card">
+    <h2>📅 今日签到码</h2>
+
+    <div style="
+        font-size:48px;
+        font-weight:bold;
+        text-align:center;
+        padding:20px;
+        background:#fff3cd;
+        border-radius:16px;
+        color:#856404;
+    ">
+        {{ today_code }}
+    </div>
+</div>
+
 </div>
 
 </body>
@@ -2725,7 +2741,10 @@ def change_pin(volunteer_id: str, old_pin: str, new_pin: str, confirm_pin: str):
 
 @app.route("/admin-home")
 def admin_home():
-    return ADMIN_HOME_HTML
+    return render_template_string(
+        ADMIN_HOME_HTML,
+        today_code=get_today_code()
+    )
 
 @app.route('/manifest.json')
 def manifest():
