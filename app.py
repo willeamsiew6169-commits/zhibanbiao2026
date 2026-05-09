@@ -502,6 +502,7 @@ def get_today_records(limit: int | None = None) -> list[dict]:
 def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
     volunteer_id = normalize_member_id(volunteer_id)
     role = str(role or "").strip()
+    card_no = str(card_no or "").strip()
 
     if not volunteer_id:
         return False, "请输入编号。"
@@ -519,7 +520,7 @@ def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
 
     if not verify_pin_for_volunteer(volunteer, pin):
         return False, "PIN 不正确。"
-
+    
     opened = db_query("""
         select id
         from attendance
@@ -535,8 +536,8 @@ def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
 
     db_query("""
         insert into attendance
-        (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, remark)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         now_date_str(),
         volunteer["编号"],
@@ -547,6 +548,7 @@ def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
         now_time_str(),
         "",
         None,
+        card_no,
         "iPad签到"
     ))
 
@@ -815,6 +817,17 @@ PAGE = """
           <option value="{{ role }}">{{ role_label(role) }}</option>
         {% endfor %}
       </select>
+
+      <label style="margin-top:16px;">
+        义工卡号（值班义工填写）
+      </label>
+
+      <input
+        type="text"
+        id="card_no"
+        name="card_no"
+        placeholder="例如：1 / 2 / 3"
+      />
 
       <button id="signInBtn" class="btn-in" type="submit" disabled>✅ {{ t.check_in }}</button>
     </form>
@@ -1096,6 +1109,13 @@ EDIT_PAGE = """
         {% endfor %}
       </select>
 
+      <label>义工卡号（值班义工填写）</label>
+      <input
+        type="text"
+        name="card_no"
+        placeholder="例如：1 / 2 / 3"
+      />
+
       <label>{{ t.start_time }}</label>
       <input name="start_time" value="{{ record.get('开始时间','') }}" placeholder="10:00am">
 
@@ -1274,11 +1294,15 @@ def do_sign_in():
             flash("今日签到码错误，请看现场公布的号码", "bad")
             return redirect(url_for("index"))
 
+    card_no = request.form.get("card_no", "").strip()
+
     ok, msg = sign_in(
         request.form.get("volunteer_id", ""),
         request.form.get("pin", ""),
         request.form.get("role", ""),
+        request.form.get("card_no", ""),
     )
+
     flash(msg, "ok" if ok else "bad")
     return redirect(url_for("index"))
 
