@@ -662,7 +662,7 @@ table {
     <h3>1. 选择日期</h3>
     <input type="date" name="single_date" value="{{ tomorrow }}" required>
 
-    <h3>2. 输入义工编号</h3>
+    <h3>2. 输入义工编号 / 姓名</h3>
     <input name="vol_id" placeholder="例如 208 / 0160 / 803" required>
 
     <h3>3. 选择岗位</h3>
