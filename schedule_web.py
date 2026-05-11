@@ -509,15 +509,23 @@ def schedule_clear():
 
 @schedule_bp.route("/schedule/delete/<int:index>", methods=["POST"])
 def schedule_delete(index):
-    if not session.get("schedule_login"):
-        return redirect(url_for("schedule.schedule"))
 
-    mode = request.form.get("mode", "")
+    mode = request.form.get("mode", "day")
 
-    if 0 <= index < len(schedule_records):
-        record = schedule_records[index]
-        delete_prebook_record(record)
-        schedule_records.pop(index)
+    if not os.path.exists(PREBOOK_FILE):
+        return redirect(url_for("schedule.schedule", mode=mode))
+
+    try:
+        df = pd.read_excel(PREBOOK_FILE, sheet_name="预报名")
+
+        if index < len(df):
+            df = df.drop(index=index).reset_index(drop=True)
+
+        with pd.ExcelWriter(PREBOOK_FILE, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name="预报名", index=False)
+
+    except Exception as e:
+        print("schedule_delete error:", e)
 
     return redirect(url_for("schedule.schedule", mode=mode))
 
