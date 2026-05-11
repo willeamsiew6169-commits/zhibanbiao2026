@@ -716,7 +716,8 @@ table {
 <form method="post" action="/schedule/generate_day">
     <h3>5. 输出 WhatsApp 值班表</h3>
 
-    <input type="hidden" name="date" id="generate_date">
+    日期：
+    <input type="date" name="date" value="{{ tomorrow }}" required>
 
     <button type="submit">⚡ 生成 WhatsApp 值班表</button>
 </form>
