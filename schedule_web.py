@@ -676,7 +676,7 @@ table {
 
 <form method="post" action="/schedule/add">
     <h3>1. 选择日期</h3>
-    <input type="date" name="single_date" value="{{ tomorrow }}" required>
+    <input type="date" id="main_date" name="single_date" value="{{ tomorrow }}" required>
 
     <h3>2. 输入义工编号 / 姓名</h3>
     <input name="vol_id" placeholder="输入义工编号 / 姓名" required>
@@ -714,12 +714,11 @@ table {
 <hr>
 
 <form method="post" action="/schedule/generate_day">
-    <h3>5. 输出 WhatsApp 值班表</h3>
 
-    日期：
-    <input type="date" name="date" value="{{ tomorrow }}" required>
+    <input type="hidden" name="date" id="generate_day_date">
 
     <button type="submit">⚡ 生成 WhatsApp 值班表</button>
+
 </form>
 
 <hr>
@@ -936,24 +935,9 @@ function copyText() {
 }
 </script>
 
-<script>
-document.querySelector("form[action='/schedule/generate_day']").addEventListener("submit", function(e) {
-    var selectedDate = document.querySelector("input[name='single_date']").value;
-
-    if (!selectedDate) {
-        alert("请先选择日期");
-        e.preventDefault();
-        return;
-    }
-
-    document.getElementById("generate_date").value = selectedDate;
-});
-</script>
-
 </body>
 </html>
 """
-
 
 MONTHLY_PREBOOK_HTML = """
 <!doctype html>
