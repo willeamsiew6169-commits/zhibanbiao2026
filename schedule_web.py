@@ -343,7 +343,7 @@ def schedule():
 
     buddha_names = load_buddha_name_options()
 
-    override_date = request.args.get("override_date", tomorrow)
+    override_date = request.args.get("override_date") or tomorrow
     fixed_buddha_today = get_fixed_buddha_for_date(override_date)
 
     return render_template_string(
