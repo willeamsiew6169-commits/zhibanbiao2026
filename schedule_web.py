@@ -473,7 +473,15 @@ def schedule_generate_day():
     if not session.get("schedule_login"):
         return redirect(url_for("schedule.schedule"))
 
-    date = request.form.get("date", "").strip()
+    date = (
+        request.form.get("date")
+        or request.form.get("single_date")
+        or request.args.get("date")
+        or ""
+    ).strip()
+
+    if not date:
+        return "❌ 没有收到日期，请返回选择日期<br><a href='/schedule?mode=day'>返回</a>"
 
     try:
         output = run_schedule_for_date(date)
