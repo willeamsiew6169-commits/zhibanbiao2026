@@ -82,6 +82,37 @@ def get_display_today_code():
 
     return get_today_code()
 
+def normalize_member_id(raw_id, default_branch="CHE"):
+    if raw_id is None:
+        return ""
+
+    # 1️⃣ 转字符串 + 清理
+    raw = str(raw_id).strip()
+
+    # 👉 处理 Excel 160.0
+    if raw.endswith(".0"):
+        raw = raw[:-2]
+
+    raw = raw.upper()
+
+    if not raw:
+        return ""
+
+    # 2️⃣ 已经是 CHE-160 / STW-160
+    if "-" in raw:
+        return raw
+
+    # 3️⃣ 0160 → STW
+    if raw.startswith("0") and raw.isdigit():
+        return f"STW-{int(raw)}"
+
+    # 4️⃣ 160 → CHE
+    if raw.isdigit():
+        return f"{default_branch}-{int(raw)}"
+
+    return raw
+
+
 def get_today_code():
     now = datetime.now(MY_TZ)
 
@@ -195,6 +226,9 @@ TEXT = {
         "phone": "电话",
         "not_registered": "未登记",
         "no_contribution": "暂无月费记录",
+        "admin_pin_wrong": "管理员 PIN 不正确",
+        "card_no_label": "义工卡号（值班义工填写）",
+        "card_no_placeholder": "例如：1 / 2 / 3"
 
 
     },
@@ -292,6 +326,9 @@ TEXT = {
         "phone": "Phone",
         "not_registered": "Not Registered",
         "no_contribution": "No Contribution Record",
+        "admin_pin_wrong": "Admin PIN is incorrect",
+        "card_no_label": "Volunteer Card No. (Duty Volunteers Only)",
+        "card_no_placeholder": "e.g. 1 / 2 / 3",
 
     }
 }

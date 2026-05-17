@@ -295,11 +295,18 @@ def admin_records():
 """, rows=rows, pin=pin)
 
 
-@admin_bp.route("/admin_report", methods=["POST"])
+@admin_bp.route("/admin_report", methods=["GET", "POST"])
 def admin_report():
-    pin = str(request.form.get("admin_pin", "")).strip()
+    pin = (
+        request.form.get("admin_pin")
+        or request.args.get("pin")
+        or ""
+    ).strip()
 
-    t = get_text()  # ⭐ 加这一行
+    print("输入 pin =", repr(pin))
+    print("系统 ADMIN_PIN =", repr(ADMIN_PIN))
+
+    t = get_text()
 
     if pin != ADMIN_PIN:
         flash(t["admin_pin_wrong"], "bad")
@@ -431,7 +438,7 @@ h1{
 
 <div class="card">
 <h2>📥 数据下载</h2>
-<a class="btn" href="/admin/download_data">
+<a class="btn" href="{{ url_for('admin.download_data') }}">
 下载签到数据 Excel
 </a>
 </div>

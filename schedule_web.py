@@ -8,7 +8,7 @@ from opencc import OpenCC
 from openpyxl import load_workbook
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
-from schedule_builder import run_schedule_for_date
+from schedule_builder import run_schedule_for_date, parse_signup_line_multi, normalize_time_text
 from monthly_prebook_message import generate_monthly_prebook_message
 from flask import Blueprint, request, session, redirect, url_for, render_template_string
 
@@ -370,6 +370,52 @@ def schedule_add():
     roles = request.form.getlist("roles")
     start_time = request.form.get("start_time", "").strip()
     end_time = request.form.get("end_time", "").strip()
+    action = request.form.get("action", "add")
+
+    if mode == "day" and action == "parse_raw":
+
+        single_date = request.form.get("single_date", "").strip()
+        if not single_date:
+            single_date = request.form.get("date", "").strip()
+
+        if not single_date:
+            return "❌ 请先选择日期<br><a href='/schedule?mode=day'>返回</a>"
+
+        raw_signup = request.form.get("raw_signup", "").strip()
+
+        if not raw_signup:
+            return "❌ 请先贴上 WhatsApp 报名内容<br><a href='/schedule?mode=day'>返回</a>"
+
+        lines = raw_signup.splitlines()
+
+        for line in lines:
+            line = normalize_time_text(line.strip())
+            if not line:
+                continue
+
+            parsed_list = parse_signup_line_multi(line)
+
+            for p in parsed_list:
+                name = str(p.get("姓名", "")).strip()
+                role = str(p.get("岗位", "值班")).strip()
+
+                job_start = p.get("开始时间") or "10:00am"
+                job_end = p.get("结束时间") or "2:00pm"
+
+                record = {
+                    "日期": single_date,
+                    "编号": "",
+                    "姓名": name,
+                    "岗位": role,
+                    "开始时间": job_start,
+                    "结束时间": job_end,
+                    "备注": "WhatsApp解析",
+                }
+
+                schedule_records.append(record)
+                save_prebook_record(record)
+
+        return redirect(url_for("schedule.schedule", mode="day"))
 
     if not vol_keyword:
         return "❌ 请填写义工编号<br><a href='/schedule'>返回</a>"
@@ -420,11 +466,15 @@ def schedule_add():
 
     # 📅 日期逻辑
     if mode == "day":
+
         single_date = request.form.get("single_date", "").strip()
+
         if not single_date:
-            return "❌ 请选择日期<br><a href='/schedule?mode=day'>返回</a>"
-        date_list = [single_date]
-    else:
+            single_date = request.form.get("date", "").strip()
+
+        date_text = single_date
+
+    elif mode == "prebook":
         action = request.form.get("action", "add")
 
         year = request.form.get("year", "").strip()
@@ -447,7 +497,12 @@ def schedule_add():
         month_full = f"{int(year)}-{int(month):02d}"
         date_list = [f"{month_full}-{int(day):02d}" for day in days]
 
-    # 💾 写入记录
+    else:
+        return "❌ 模式错误<br><a href='/schedule'>返回</a>"
+
+    if mode == "day":
+        date_list = [date_text]
+
     for date_text in date_list:
         for role in roles:
             job_start, job_end = get_default_time_by_role(role, start_time, end_time)
@@ -466,8 +521,8 @@ def schedule_add():
             save_prebook_record(record)
 
     return redirect(url_for("schedule.schedule", mode=mode))
-
-
+        
+    
 @schedule_bp.route("/schedule/generate_day", methods=["POST"])
 def schedule_generate_day():
     if not session.get("schedule_login"):
@@ -517,25 +572,93 @@ def schedule_clear():
 
 @schedule_bp.route("/schedule/delete/<int:index>", methods=["POST"])
 def schedule_delete(index):
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule"))
 
     mode = request.form.get("mode", "day")
 
-    if not os.path.exists(PREBOOK_FILE):
-        return redirect(url_for("schedule.schedule", mode=mode))
-
-    try:
-        df = pd.read_excel(PREBOOK_FILE, sheet_name="预报名")
-
-        if index < len(df):
-            df = df.drop(index=index).reset_index(drop=True)
-
-        with pd.ExcelWriter(PREBOOK_FILE, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="预报名", index=False)
-
-    except Exception as e:
-        print("schedule_delete error:", e)
+    if 0 <= index < len(schedule_records):
+        record = schedule_records[index]
+        delete_prebook_record(record)
+        schedule_records.pop(index)
 
     return redirect(url_for("schedule.schedule", mode=mode))
+
+@schedule_bp.route("/schedule/parse_raw", methods=["POST"])
+def schedule_parse_raw():
+
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule"))
+
+    single_date = request.form.get("single_date", "").strip()
+    raw_signup = request.form.get("raw_signup", "").strip()
+
+    if not single_date:
+        return "❌ 没有日期"
+
+    if not raw_signup:
+        return "❌ 没有报名内容"
+
+    lines = raw_signup.splitlines()
+
+    added = 0
+
+    for line in lines:
+
+        line = line.strip()
+
+        if not line:
+            continue
+
+        parts = line.split()
+
+        if len(parts) < 2:
+            continue
+
+        name = parts[0]
+
+        time_text = parts[-1]
+
+        start_time = "3:00pm"
+        end_time = "6:00pm"
+
+        if "-" in time_text:
+            try:
+                s, e = time_text.split("-", 1)
+
+                start_time = s.strip()
+
+                if "pm" not in e.lower() and "am" not in e.lower():
+                    if "pm" in s.lower():
+                        e += "pm"
+                    elif "am" in s.lower():
+                        e += "am"
+
+                end_time = e.strip()
+
+            except:
+                pass
+
+        record = {
+            "日期": single_date,
+            "编号": "",
+            "姓名": name,
+            "岗位": "值班",
+            "开始时间": start_time,
+            "结束时间": end_time,
+            "备注": "WhatsApp",
+        }
+
+        schedule_records.append(record)
+
+        save_prebook_record(record)
+
+        added += 1
+
+    print("🔥 parse_raw route 有进来")
+
+    return redirect(url_for("schedule.schedule", mode="day"))
+
 
 @schedule_bp.route("/schedule/override", methods=["POST"])
 def schedule_override():
@@ -580,7 +703,18 @@ input, button { font-size:30px; padding:18px; margin:10px; width:90%; border-rad
 <div class="box">
 <h1>📅 负责人排班系统</h1>
 <form method="post">
-    <input type="password" name="pin" placeholder="请输入负责人PIN">
+    <input
+        type="password"
+        name="pin"
+        placeholder="请输入负责人PIN"
+        inputmode="numeric"
+        autocomplete="new-password"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        readonly
+        onfocus="this.removeAttribute('readonly');"
+    >
     <button type="submit">进入</button>
 </form>
 </div>
@@ -597,74 +731,110 @@ SCHEDULE_HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>负责人排班系统</title>
 <style>
+
 body {
     font-family: "Microsoft YaHei", Arial;
     background: #f5f5f5;
     padding: 20px;
 }
+
 .box {
     background: white;
-    max-width: 950px;
+    max-width: 1100px;
     margin: auto;
     padding: 25px;
     border-radius: 15px;
 }
-input, select, button {
-    font-size: 22px;
-    padding: 10px;
-    margin: 6px;
-}
+
 .big-btn {
     font-size: 28px;
-    padding: 18px 28px;
-    margin: 12px;
-    border-radius: 12px;
+    padding: 16px 30px;
+    margin: 10px;
 }
-.day-box label, .role-box label {
-    display: inline-block;
+
+input,
+select,
+textarea,
+button {
     font-size: 22px;
-    padding: 8px 12px;
-    margin: 5px;
-    background: #eee;
-    border-radius: 8px;
+    padding: 10px;
+    margin: 6px 0;
 }
+
+.role-box label,
+.day-box label {
+    display: inline-block;
+    margin: 8px;
+    font-size: 22px;
+}
+
 table {
     width: 100%;
     border-collapse: collapse;
-    margin-top: 20px;
-    font-size: 20px;
-}
-th, td {
-    border: 1px solid #aaa;
-    padding: 8px;
-    text-align: center;
-}
-th {
-    background: #d9ead3;
-}
-input, button {
-    font-size: 26px;
-    padding: 16px;
-    border-radius: 12px;
-}
-table {
+    margin-top: 15px;
     font-size: 22px;
 }
+
+th,
+td {
+    border: 1px solid #999;
+    padding: 10px;
+    text-align: center;
+}
+
 </style>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+
+    function syncDates() {
+
+        const mainDate = document.getElementById("main_date");
+        const rawDate = document.getElementById("raw_single_date");
+        const genDate = document.getElementById("generate_day_date");
+
+        if (mainDate && rawDate) {
+            rawDate.value = mainDate.value;
+        }
+
+        if (mainDate && genDate) {
+            genDate.value = mainDate.value;
+        }
+    }
+
+    syncDates();
+
+    const mainDate = document.getElementById("main_date");
+
+    if (mainDate) {
+        mainDate.addEventListener("change", syncDates);
+    }
+
+});
+</script>
+
 </head>
+
 <body>
+
 <div class="box">
 
 <h1>📅 负责人排班系统</h1>
 
 <div style="text-align:center;">
+
     <a href="/schedule?mode=day">
-        <button type="button" class="big-btn">📋 生成当天排班</button>
+        <button type="button" class="big-btn">
+            📋 生成当天排班
+        </button>
     </a>
 
     <a href="/schedule?mode=prebook">
-        <button type="button" class="big-btn">📢 生成月预报名表</button>
+        <button type="button" class="big-btn">
+            📢 生成月预报名表
+        </button>
     </a>
+
 </div>
 
 <hr>
@@ -710,15 +880,27 @@ table {
     <br><br>
     <button type="submit">➕ 加入当天名单</button>
 </form>
+<hr>
+
+<form method="post" action="/schedule/parse_raw">
+    <input type="hidden" name="single_date" id="raw_single_date">
+
+    <h3>📋 贴上 WhatsApp 报名</h3>
+
+    <textarea name="raw_signup" rows="8" style="width:100%; font-size:22px;"
+placeholder="
+输入姓名 / 时间"></textarea>
+
+    <br><br>
+
+    <button type="submit">📥 解析加入名单</button>
+</form>
 
 <hr>
 
 <form method="post" action="/schedule/generate_day">
-
     <input type="hidden" name="date" id="generate_day_date">
-
     <button type="submit">⚡ 生成 WhatsApp 值班表</button>
-
 </form>
 
 <hr>

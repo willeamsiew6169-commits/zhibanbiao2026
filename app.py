@@ -33,7 +33,6 @@ from pypinyin import lazy_pinyin
 from reading_web import reading_bp
 from schedule_web import schedule_bp
 from utils import get_text, get_lang
-from id_utils import normalize_member_id
 from sqlalchemy import create_engine, text
 from psycopg2.extras import RealDictCursor
 from openpyxl import Workbook, load_workbook
@@ -60,6 +59,7 @@ from utils import (
     calc_hours,
     get_text,
     get_lang,
+    normalize_member_id,
     TEXT,
 )
 
@@ -260,6 +260,7 @@ def only_digits(value) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
 
 
+
 def backup_attendance() -> None:
     if ATTENDANCE_FILE.exists():
         BACKUP_DIR.mkdir(exist_ok=True)
@@ -414,6 +415,7 @@ def load_attendance_rows() -> list[dict]:
             "报名": r.get("signup"),
             "签到": r.get("signin"),
             "岗位": r.get("role"),
+            "card_no": r.get("card_no", ""),
             "开始时间": r.get("start_time"),
             "结束时间": r.get("end_time") or "",
             "时数": r.get("hours") or "",
@@ -499,7 +501,13 @@ def get_today_records(limit: int | None = None) -> list[dict]:
 # =========================
 # 5) 签到 / 签退 / 修改
 # =========================
-def sign_in(volunteer_id: str, pin: str, role: str) -> tuple[bool, str]:
+def sign_in(
+    volunteer_id: str,
+    pin: str,
+    role: str,
+    card_no: str = ""
+) -> tuple[bool, str]:
+
     volunteer_id = normalize_member_id(volunteer_id)
     role = str(role or "").strip()
     card_no = str(card_no or "").strip()
@@ -618,7 +626,7 @@ def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
     return True, f"{volunteer['姓名']} 已签退。"
 
 
-def update_record(row_number: int, role: str, start_time: str, end_time: str, remark: str) -> tuple[bool, str]:
+def update_record(row_number: int, role: str, card_no: str, start_time: str, end_time: str, remark: str) -> tuple[bool, str]:
     if role not in ROLES:
         return False, "请选择正确岗位。"
 
@@ -634,6 +642,7 @@ def update_record(row_number: int, role: str, start_time: str, end_time: str, re
     if row.get("date") != now_date_str():
         return False, "为了安全，页面只允许修改今天的记录。"
 
+    card_no = str(card_no or "").strip()
     start_time = str(start_time or "").strip()
     end_time = str(end_time or "").strip()
     remark = str(remark or "").strip()
@@ -649,6 +658,7 @@ def update_record(row_number: int, role: str, start_time: str, end_time: str, re
     db_query("""
         update attendance
         set role = %s,
+            card_no = %s,
             start_time = %s,
             end_time = %s,
             hours = %s,
@@ -656,6 +666,7 @@ def update_record(row_number: int, role: str, start_time: str, end_time: str, re
         where id = %s
     """, (
         role,
+        card_no,
         start_time,
         end_time,
         hours,
@@ -783,8 +794,13 @@ PAGE = """
               inputmode="numeric"
               pattern="[0-9]*"
               autocomplete="new-password"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
               value=""
               placeholder="{{ t.pin_placeholder }}"
+              readonly
+              onfocus="this.removeAttribute('readonly');"
               required
           >
         </div>
@@ -826,10 +842,12 @@ PAGE = """
         type="text"
         id="card_no"
         name="card_no"
-        placeholder="例如：1 / 2 / 3"
+        placeholder="{{ t.card_no_placeholder }}"
       />
 
-      <button id="signInBtn" class="btn-in" type="submit" disabled>✅ {{ t.check_in }}</button>
+      <button id="signInBtn" class="btn-in" type="submit">
+          ✅ {{ t.check_in }}
+      </button>
     </form>
   </div>
 
@@ -841,7 +859,23 @@ PAGE = """
         <tbody>
         {% for r in open_records %}
           <tr>
-            <td><b>{{ r.get('姓名','') }}</b>{% if r.get('编号') %}<br><span class="muted">{{ t.row_id }}：{{ r.get('编号','') }}</span>{% endif %}</td>
+            <td>
+              <b>{{ r.get('姓名','') }}</b>
+
+              {% if r.get('card_no') %}
+                  <br>
+                  <span style="color:#0d6efd;font-weight:bold;">
+                  🎫 卡号：{{ r.get('card_no') }}
+                  </span>
+              {% endif %}
+
+              {% if r.get('编号') %}
+                  <br>
+                  <span class="muted">
+                  {{ t.row_id }}：{{ r.get('编号','') }}
+                  </span>
+              {% endif %}
+            </td>
             <td><span class="pill">{{ role_label(r.get('岗位','')) }}</span></td>
             <td>{{ r.get('开始时间','') }}</td>
             <td>
@@ -871,7 +905,16 @@ PAGE = """
           <tbody>
           {% for r in today_records %}
             <tr>
-              <td>{{ r.get('姓名','') }}</td>
+              <td>
+                {{ r.get('姓名','') }}
+
+                {% if r.get('card_no') %}
+                    <br>
+                    <span style="color:#0d6efd;font-weight:bold;">
+                    🎫 {{ r.get('card_no') }}
+                    </span>
+                {% endif %}
+              </td>
               <td>{{ role_label(r.get('岗位','')) }}</td>
               <td>{{ r.get('开始时间','') }} ~ {{ r.get('结束时间','') }}</td>
               <td>{{ r.get('时数','') }}<br><a href="{{ url_for('edit_page', row_number=r.get('_row')) }}" style="font-size:18px;">{{ t.edit }}</a></td>
@@ -911,8 +954,13 @@ PAGE = """
           inputmode="numeric"
           pattern="[0-9]*"
           autocomplete="new-password"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
           value=""
-          placeholder="{{ t.admin_pin }}"
+          placeholder="{{ t.pin_placeholder }}"
+          readonly
+          onfocus="this.removeAttribute('readonly');"
           required
       >
       <button class="btn-admin" type="submit">📊 {{ t.generate_report }}</button>
@@ -921,7 +969,6 @@ PAGE = """
   </div>
 
 <script>
-let currentVolunteerName = '';
 const TXT = {
   enter_id_first: {{ t.enter_id_first|tojson }},
   not_found_id: {{ t.not_found_id|tojson }},
@@ -940,9 +987,6 @@ async function lookupVolunteer() {
   const id = document.getElementById('volunteer_id').value.trim();
   const box = document.getElementById('personBox');
   const btn = document.getElementById('signInBtn');
-
-  currentVolunteerName = '';
-  btn.disabled = true;
 
   if (!id) {
     box.style.display = 'block';
@@ -964,8 +1008,7 @@ async function lookupVolunteer() {
   box.style.display = 'block';
 
   if (data.ok) {
-    currentVolunteerName = data.volunteer.姓名;
-
+    
     let html =
       `${TXT.name}：<b>${data.volunteer.姓名}</b><br>` +
       `${TXT.status}：${data.volunteer.状态 || '-'}`;
@@ -995,14 +1038,12 @@ async function lookupVolunteer() {
 
 function quickSignIn() {
   const pin = document.getElementById('pin').value.trim();
-  if (!currentVolunteerName) {
-    alert(TXT.lookup_first);
-    return false;
-  }
+
   if (!pin) {
     alert(TXT.enter_pin);
     return false;
   }
+
   return true;
 }
 
@@ -1111,10 +1152,11 @@ EDIT_PAGE = """
 
       <label>义工卡号（值班义工填写）</label>
       <input
-        type="text"
-        name="card_no"
-        placeholder="例如：1 / 2 / 3"
-      />
+          type="text"
+          name="card_no"
+          value="{{ record.get('card_no','') }}"
+          placeholder="{{ t.card_no_placeholder }}"
+      >
 
       <label>{{ t.start_time }}</label>
       <input name="start_time" value="{{ record.get('开始时间','') }}" placeholder="10:00am">
@@ -1353,6 +1395,7 @@ def save_edit():
     ok, msg = update_record(
         row_number=row_number,
         role=request.form.get("role", ""),
+        card_no=request.form.get("card_no", ""),
         start_time=request.form.get("start_time", ""),
         end_time=request.form.get("end_time", ""),
         remark=request.form.get("remark", ""),
@@ -1573,8 +1616,13 @@ a { font-size:20px; }
         inputmode="numeric"
         pattern="[0-9]*"
         autocomplete="new-password"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
         value=""
         placeholder="{{ t.pin_placeholder }}"
+        readonly
+        onfocus="this.removeAttribute('readonly');"
         required
     >
 

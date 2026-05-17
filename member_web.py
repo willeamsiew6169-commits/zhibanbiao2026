@@ -482,7 +482,7 @@ hr{
     <form method="post">
         <label>月费编号</label>
         <input name="member_id"
-            placeholder="例如：208 / CHE-208 / 0208"
+            placeholder="例如：108 / CHE-108 / 0108"
             autocomplete="off"
             required>
 
@@ -493,6 +493,9 @@ hr{
             type="password"
             placeholder="请输入 PIN"
             autocomplete="new-password"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
             readonly
             onfocus="this.removeAttribute('readonly');"
             required
@@ -659,6 +662,9 @@ button{
             type="password"
             inputmode="numeric"
             autocomplete="new-password"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
             value=""
             readonly
             onfocus="this.removeAttribute('readonly');"
@@ -742,20 +748,60 @@ button{width:100%;margin-top:22px;font-size:22px;padding:14px;border:0;border-ra
     {% endif %}
 
     <form method="post">
-        <label>月费编号</label>
-        <input name="member_id" placeholder="例如：208 / CHE-208 / 0208" required>
 
-        <label>旧密码</label>
-        <input name="old_pin" type="password" required>
+    <label>月费编号</label>
+    <input
+        name="member_id"
+        placeholder="例如：108 / CHE-108 / 0108"
+        autocomplete="off"
+        required
+    >
 
-        <label>新密码</label>
-        <input name="new_pin" type="password" required>
+    <label>旧密码</label>
+    <input
+        name="old_pin"
+        type="password"
+        inputmode="numeric"
+        autocomplete="new-password"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        readonly
+        onfocus="this.removeAttribute('readonly');"
+        required
+    >
 
-        <label>确认新密码</label>
-        <input name="confirm_pin" type="password" required>
+    <label>新密码</label>
+    <input
+        name="new_pin"
+        type="password"
+        inputmode="numeric"
+        autocomplete="new-password"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        readonly
+        onfocus="this.removeAttribute('readonly');"
+        required
+    >
 
-        <button type="submit">确认更改</button>
-    </form>
+    <label>确认新密码</label>
+    <input
+        name="confirm_pin"
+        type="password"
+        inputmode="numeric"
+        autocomplete="new-password"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        readonly
+        onfocus="this.removeAttribute('readonly');"
+        required
+    >
+
+    <button type="submit">确认更改</button>
+
+</form>
 </div>
 </body>
 </html>
