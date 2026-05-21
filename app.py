@@ -677,7 +677,9 @@ def update_record(row_number: int, role: str, card_no: str, start_time: str, end
     return True, "记录已修改。"
 
 
-def delete_record(row_number: int) -> tuple[bool, str]:
+def delete_record(row_number: int, pin: str) -> tuple[bool, str]:
+    pin = (pin or "").strip()
+
     row = db_query("""
         select *
         from attendance
@@ -690,7 +692,32 @@ def delete_record(row_number: int) -> tuple[bool, str]:
     if row.get("date") != now_date_str():
         return False, "为了安全，页面只允许删除今天的记录。"
 
+    volunteer_id = (row.get("volunteer_id") or "").strip()
     name = row.get("name") or ""
+
+    if not volunteer_id:
+        return False, "这笔记录没有义工编号，不能用本人 PIN 删除。"
+
+    vol = db_query("""
+        select pin, phone
+        from volunteers
+        where id = %s
+    """, (volunteer_id,), fetchone=True)
+
+    if not vol:
+        return False, "找不到这位义工资料，不能删除。"
+
+    correct_pin = (vol.get("pin") or "").strip()
+
+    if not correct_pin:
+        phone = (vol.get("phone") or "").strip()
+        correct_pin = phone[-4:] if len(phone) >= 4 else ""
+
+    if not correct_pin:
+        return False, "这位义工没有 PIN，也没有电话号码后4位，不能删除。"
+
+    if pin != correct_pin:
+        return False, "PIN 不正确，不能删除。"
 
     db_query("""
         delete from attendance
@@ -1170,9 +1197,29 @@ EDIT_PAGE = """
       <button class="save" type="submit">{{ t.save_edit }}</button>
     </form>
 
-    <form method="post" action="{{ url_for('delete_edit') }}" onsubmit="return confirm({{ t.delete_confirm|tojson }});">
-      <input type="hidden" name="row_number" value="{{ row_number }}">
-      <button class="delete" type="submit">{{ t.delete_record }}</button>
+    <form method="post"
+      action="{{ url_for('delete_edit') }}"
+      onsubmit="return confirm({{ t.delete_confirm|tojson }});">
+
+    <input type="hidden" name="row_number" value="{{ row_number }}">
+
+    <input
+        type="password"
+        name="pin"
+        placeholder="请输入本人 PIN"
+        required
+        style="
+            font-size:24px;
+            padding:12px;
+            width:100%;
+            margin-bottom:12px;
+        "
+    >
+
+    <button class="delete" type="submit">
+        {{ t.delete_record }}
+    </button>
+
     </form>
   </div>
 </div>
@@ -1410,7 +1457,8 @@ def delete_edit():
         row_number = int(request.form.get("row_number", "0"))
     except Exception:
         row_number = 0
-    ok, msg = delete_record(row_number)
+    pin = request.form.get("pin", "")
+    ok, msg = delete_record(row_number, pin)
     flash(msg, "ok" if ok else "bad")
     return redirect(url_for("index"))
 

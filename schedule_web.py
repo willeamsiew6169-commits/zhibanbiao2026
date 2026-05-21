@@ -1,12 +1,13 @@
 # schedule_web.py
 
 import os
-import pandas as pd
 import psycopg2
-from psycopg2.extras import RealDictCursor
+import pandas as pd
+
 from opencc import OpenCC
 from openpyxl import load_workbook
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
+from psycopg2.extras import RealDictCursor
 from sqlalchemy import create_engine, text
 from schedule_builder import run_schedule_for_date, parse_signup_line_multi, normalize_time_text
 from monthly_prebook_message import generate_monthly_prebook_message
@@ -346,6 +347,15 @@ def schedule():
     override_date = request.args.get("override_date") or tomorrow
     fixed_buddha_today = get_fixed_buddha_for_date(override_date)
 
+    today = date.today()
+
+    if today.month == 12:
+        next_year = today.year + 1
+        next_month = 1
+    else:
+        next_year = today.year
+        next_month = today.month + 1
+
     return render_template_string(
         SCHEDULE_HTML,
         mode=mode,
@@ -356,6 +366,8 @@ def schedule():
         buddha_names=buddha_names,
         override_date=override_date,
         fixed_buddha_today=fixed_buddha_today,
+        default_year=next_year,
+        default_month=next_month,
     )
 
 
@@ -370,11 +382,14 @@ def schedule_add():
     roles = request.form.getlist("roles")
     start_time = request.form.get("start_time", "").strip()
     end_time = request.form.get("end_time", "").strip()
+
     action = request.form.get("action", "add")
+    single_date = request.form.get("single_date", "").strip()
+    year = request.form.get("year", "").strip()
+    month = request.form.get("month", "").strip()
+    days = request.form.getlist("days")
 
     if mode == "day" and action == "parse_raw":
-
-        single_date = request.form.get("single_date", "").strip()
         if not single_date:
             single_date = request.form.get("date", "").strip()
 
@@ -423,13 +438,11 @@ def schedule_add():
     if not roles:
         return "❌ 请至少选择一个岗位<br><a href='/schedule'>返回</a>"
 
-    # 🔍 查找义工（支持编号 / 姓名 / 电话 / 简繁体）
     matches = find_volunteer_by_keyword(vol_keyword)
 
     if not matches:
         return "❌ 找不到义工<br><a href='/schedule'>返回</a>"
 
-    # 🧠 如果找到多个 → 让用户选（重点：保留原数据）
     if len(matches) > 1:
         return render_template_string("""
         <h3>找到多个义工，请选择：</h3>
@@ -438,6 +451,14 @@ def schedule_add():
             <form method="post" action="/schedule/add">
                 <input type="hidden" name="vol_id" value="{{ v.id }}">
                 <input type="hidden" name="mode" value="{{ mode }}">
+                <input type="hidden" name="action" value="{{ action }}">
+
+                <input type="hidden" name="year" value="{{ year }}">
+                <input type="hidden" name="month" value="{{ month }}">
+
+                {% for d in days %}
+                    <input type="hidden" name="days" value="{{ d }}">
+                {% endfor %}
 
                 {% for r in roles %}
                     <input type="hidden" name="roles" value="{{ r }}">
@@ -453,55 +474,58 @@ def schedule_add():
         """,
         matches=matches,
         mode=mode,
+        action=action,
         roles=roles,
         start_time=start_time,
         end_time=end_time,
-        single_date=request.form.get("single_date", "").strip()
+        single_date=single_date,
+        year=year,
+        month=month,
+        days=days
         )
 
-    # ✅ 只有一个结果 → 正常继续
     vol = matches[0]
     vol_id = str(vol["id"])
     name = str(vol["name"])
 
-    # 📅 日期逻辑
     if mode == "day":
-
-        single_date = request.form.get("single_date", "").strip()
-
         if not single_date:
             single_date = request.form.get("date", "").strip()
 
-        date_text = single_date
+        if not single_date:
+            return "❌ 请先选择日期<br><a href='/schedule?mode=day'>返回</a>"
+
+        date_list = [single_date]
 
     elif mode == "prebook":
-        action = request.form.get("action", "add")
-
-        year = request.form.get("year", "").strip()
-        month = request.form.get("month", "").strip()
-        days = request.form.getlist("days")
+        if not year or not month:
+            return "❌ 请选择年份和月份<br><a href='/schedule?mode=prebook'>返回</a>"
 
         if action == "generate_monthly":
             try:
-                output = generate_monthly_prebook_message(int(year), int(month))
+                output = generate_monthly_prebook_message(
+                    int(year),
+                    int(month)
+                )
             except Exception as e:
                 output = f"❌ 生成失败：{e}"
-            return render_template_string(MONTHLY_PREBOOK_HTML, output=output)
 
-        if not year or not month:
-            return "❌ 请选择年份和月份<br><a href='/schedule?mode=prebook'>返回</a>"
+            return render_template_string(
+                MONTHLY_PREBOOK_HTML,
+                output=output
+            )
 
         if not days:
             return "❌ 请至少选择一天<br><a href='/schedule?mode=prebook'>返回</a>"
 
         month_full = f"{int(year)}-{int(month):02d}"
-        date_list = [f"{month_full}-{int(day):02d}" for day in days]
+        date_list = [
+            f"{month_full}-{int(day):02d}"
+            for day in days
+        ]
 
     else:
         return "❌ 模式错误<br><a href='/schedule'>返回</a>"
-
-    if mode == "day":
-        date_list = [date_text]
 
     for date_text in date_list:
         for role in roles:
@@ -949,12 +973,14 @@ placeholder="
         <h3>📅 选择月份</h3>
 
         年份：
-        <input name="year" value="2026" style="width:120px;" required>
+        <input name="year" value="{{ default_year }}" style="width:120px;" required>
 
         月份：
         <select name="month">
             {% for m in range(1, 13) %}
-            <option value="{{ m }}">{{ m }}月</option>
+            <option value="{{ m }}" {% if m == default_month %}selected{% endif %}>
+                {{ m }}月
+            </option>
             {% endfor %}
         </select>
     </div>
