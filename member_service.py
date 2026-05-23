@@ -3,7 +3,7 @@
 import pandas as pd
 
 from pathlib import Path
-from id_utils import normalize_member_id
+from utils import normalize_member_id
 
 
 BASE = Path(__file__).parent
@@ -212,26 +212,6 @@ def run_cli():
                     print("❌ 选择无效")
             else:
                 print("❌ 请输入数字")
-
-def normalize_member_id(raw_id, default_branch="CHE"):
-    raw = str(raw_id).strip().upper()
-
-    if not raw:
-        return ""
-
-    # 已经是 CHE-160 / STW-160
-    if "-" in raw:
-        return raw
-
-    # 纯数字（160）
-    if raw.isdigit():
-        return f"{default_branch}-{int(raw)}"
-
-    # 带前导0（0160）
-    if raw.startswith("0") and raw.isdigit():
-        return f"STW-{int(raw)}"
-
-    return raw
 
 
 # =========================
