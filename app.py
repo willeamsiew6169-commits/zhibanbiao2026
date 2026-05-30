@@ -862,7 +862,7 @@ PAGE = """
       </select>
 
       <label style="margin-top:16px;">
-        义工卡号（值班义工填写）
+        {{ t.card_no_label }}
       </label>
 
       <input
@@ -1159,7 +1159,7 @@ EDIT_PAGE = """
 </head>
 <body>
 <div class="wrap">
-  <a class="back" href="{{ url_for('index') }}">← {{ t.back_home }}</a>
+  <a class="back" href="{{ url_for('index', lang=lang) }}">← {{ t.back_home }}</a>
   <div class="card">
     <h1>{{ t.edit_title }}</h1>
     <div class="info">
@@ -1167,7 +1167,7 @@ EDIT_PAGE = """
       {{ t.date }}：{{ record.get('日期','') }}
     </div>
 
-    <form method="post" action="{{ url_for('save_edit') }}">
+    <form method="post" action="{{ url_for('save_edit', lang=lang) }}">
       <input type="hidden" name="row_number" value="{{ row_number }}">
 
       <label>{{ t.role }}</label>
@@ -1177,7 +1177,7 @@ EDIT_PAGE = """
         {% endfor %}
       </select>
 
-      <label>义工卡号（值班义工填写）</label>
+      <label>{{ t.card_no_label }}</label>
       <input
           type="text"
           name="card_no"
@@ -1198,7 +1198,7 @@ EDIT_PAGE = """
     </form>
 
     <form method="post"
-      action="{{ url_for('delete_edit') }}"
+      action="{{ url_for('delete_edit', lang=lang) }}"
       onsubmit="return confirm({{ t.delete_confirm|tojson }});">
 
     <input type="hidden" name="row_number" value="{{ row_number }}">
@@ -1206,7 +1206,7 @@ EDIT_PAGE = """
     <input
         type="password"
         name="pin"
-        placeholder="请输入本人 PIN"
+        placeholder="{{ t.pin_placeholder }}"
         required
         style="
             font-size:24px;
@@ -1415,17 +1415,23 @@ def do_sign_out():
 
 @app.route("/edit/<int:row_number>")
 def edit_page(row_number):
+    lang = request.args.get("lang", "zh")
+    t = TEXT.get(lang, TEXT["zh"])
+
     record = None
     for r in get_today_records():
         if int(r.get("_row", 0)) == row_number:
             record = r
             break
+
     if not record:
-        flash("找不到今天这笔记录。", "bad")
-        return redirect(url_for("index"))
+        flash(t["record_not_found"], "bad")
+        return redirect(url_for("index", lang=lang))
+
     return render_template_string(
         EDIT_PAGE,
-        t=get_text(),
+        t=t,
+        lang=lang,
         record=record,
         row_number=row_number,
         roles=ROLES,
@@ -1554,6 +1560,9 @@ def get_member_payment(member_id):
 
 @app.route("/member_old", methods=["GET", "POST"])
 def member_page():
+    lang = request.args.get("lang", "zh")
+    t = TEXT.get(lang, TEXT["zh"])
+
     result = None
     error = ""
 
@@ -1569,7 +1578,7 @@ def member_page():
         """, (member_id,), fetchone=True)
 
         if not member:
-            error = "❌ 找不到月费编号"
+            error = t["member_not_found"]
         elif not verify_member_pin(member, pin):
             error = "❌ PIN 不正确"
         else:
