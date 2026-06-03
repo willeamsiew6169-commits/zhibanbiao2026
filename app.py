@@ -31,6 +31,7 @@ from db import db_query, get_db
 from member_web import member_bp
 from pypinyin import lazy_pinyin
 from reading_web import reading_bp
+from finance_web import finance_bp
 from schedule_web import schedule_bp
 from utils import get_text, get_lang
 from sqlalchemy import create_engine, text
@@ -104,6 +105,7 @@ app = Flask(__name__)
 app.secret_key = "change-this-simple-secret"
 app.register_blueprint(schedule_bp)
 app.register_blueprint(reading_bp)
+app.register_blueprint(finance_bp)
 app.register_blueprint(member_bp)
 app.register_blueprint(admin_bp)
 
@@ -349,16 +351,8 @@ def find_volunteer(volunteer_id: str):
     return result
 
 def to_member_id(volunteer):
-    branch = str(volunteer.get("分会") or "CHE").strip()
     vol_id = str(volunteer.get("编号") or "").strip()
-
-    if not vol_id:
-        return ""
-
-    if "-" in vol_id:
-        return vol_id
-
-    return f"{branch}-{vol_id}"
+    return vol_id
 
 def verify_pin_for_volunteer(volunteer, pin):
     input_pin = str(pin).strip()
@@ -379,16 +373,7 @@ def verify_pin_for_volunteer(volunteer, pin):
 
 def get_member_paid_until(member_id):
     row = db_query("""
-        select max(paid_month) as paid_until
-        from member_payments
-        where member_id = %s
-    """, (member_id,), fetchone=True)
-
-    return row.get("paid_until") if row else ""
-
-def get_member_paid_until(member_id):
-    row = db_query("""
-        select max(paid_month) as paid_until
+        select max(end_month) as paid_until
         from member_payments
         where member_id = %s
     """, (member_id,), fetchone=True)
@@ -501,27 +486,22 @@ def get_today_records(limit: int | None = None) -> list[dict]:
 # =========================
 # 5) 签到 / 签退 / 修改
 # =========================
-def sign_in(
-    volunteer_id: str,
-    pin: str,
-    role: str,
-    card_no: str = ""
-) -> tuple[bool, str]:
+def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "") -> tuple[bool, str]:
 
-    volunteer_id = normalize_member_id(volunteer_id)
+    raw_id = str(volunteer_id or "").strip()
     role = str(role or "").strip()
     card_no = str(card_no or "").strip()
 
-    if not volunteer_id:
+    if not raw_id:
         return False, "请输入编号。"
     if not pin:
         return False, "请输入 PIN。"
     if role not in ROLES:
         return False, "请选择正确岗位。"
 
-    volunteer = find_volunteer(volunteer_id)
+    volunteer = find_volunteer(raw_id)
     if not volunteer:
-        return False, f"找不到编号：{volunteer_id}"
+        return False, f"找不到编号：{raw_id}"
 
     if volunteer.get("状态") not in ["在册", "", None]:
         return False, f"此义工状态不是在册：{volunteer.get('状态')}"
@@ -563,7 +543,6 @@ def sign_in(
     phone = volunteer.get("电话号码") or ""
     paid_until = get_member_paid_until(to_member_id(volunteer))
 
-    # 电话显示
     if phone:
         phone_text = phone
     else:
@@ -571,23 +550,27 @@ def sign_in(
 
     extra = f"\n电话：{phone_text}"
 
-    # 月费显示（只在有记录时才显示）
     if paid_until:
-        extra += f"\n月费已供养至：{paid_until}"
+        try:
+            paid_until_text = paid_until.strftime("%Y-%m")
+        except Exception:
+            paid_until_text = str(paid_until)
+
+        extra += f"\n月费已供养至：{paid_until_text}"
 
     return True, f"{volunteer['姓名']} 已签到：{role}{extra}"
 
 def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
-    volunteer_id = normalize_member_id(volunteer_id)
+    raw_id = str(volunteer_id or "").strip()
 
-    if not volunteer_id:
+    if not raw_id:
         return False, "请输入编号。"
     if not pin:
         return False, "请输入 PIN。"
 
-    volunteer = find_volunteer(volunteer_id)
+    volunteer = find_volunteer(raw_id)
     if not volunteer:
-        return False, f"找不到编号：{volunteer_id}"
+        return False, f"找不到编号：{raw_id}"
 
     if not verify_pin_for_volunteer(volunteer, pin):
         return False, "PIN 不正确。"
@@ -1708,9 +1691,13 @@ a { font-size:20px; }
 @app.route("/api/volunteer/<volunteer_id>", methods=["POST"])
 def api_volunteer(volunteer_id):
     try:
+        print("API volunteer_id =", volunteer_id)
+
         v = find_volunteer(volunteer_id)
+        print("API result =", v)
+
         if not v:
-            return jsonify({"ok": False})
+            return jsonify({"ok": False, "error": "find_volunteer returned None"})
 
         pin = request.form.get("pin", "").strip()
         pin_ok = verify_pin_for_volunteer(v, pin) if pin else False
@@ -1724,11 +1711,21 @@ def api_volunteer(volunteer_id):
 
         if pin_ok:
             safe_v["电话号码"] = v.get("电话号码", "")
-            safe_v["月费已供养至"] = get_member_paid_until(v.get("编号"))
+
+            paid_until = get_member_paid_until(v.get("编号"))
+
+            if paid_until:
+                try:
+                    paid_until = f"{paid_until.year}年{paid_until.month}月"
+                except Exception:
+                    paid_until = str(paid_until)
+
+            safe_v["月费已供养至"] = paid_until
 
         return jsonify({"ok": True, "volunteer": safe_v})
 
     except Exception as e:
+        print("API ERROR =", e)
         return jsonify({"ok": False, "error": str(e)})
     
 @app.route("/member_old", methods=["GET", "POST"])

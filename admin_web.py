@@ -430,6 +430,13 @@ h1{
 </div>
 
 <div class="card">
+<h2>💰 财政系统</h2>
+<a class="btn" href="/finance">
+进入系统
+</a>
+</div>
+
+<div class="card">
 <h2>✅ 义工签到系统</h2>
 <a class="btn" href="/">
 进入系统

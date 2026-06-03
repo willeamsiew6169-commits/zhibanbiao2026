@@ -404,8 +404,8 @@ def finance_upload():
                         "Total Amt"
                     ]]
 
+                    # 只要求会员编号不为空；收据编号可以为空
                     df = df.dropna(subset=[
-                        "收据编号 \nOfficial Receipt No",
                         "编号 No/"
                     ])
 
@@ -414,7 +414,15 @@ def finance_upload():
 
                     for _, row in df.iterrows():
                         try:
-                            receipt_no = str(row["收据编号 \nOfficial Receipt No"]).strip().replace(" ", "")
+                            receipt_raw = row["收据编号 \nOfficial Receipt No"]
+
+                            if pd.isna(receipt_raw):
+                                receipt_no = None
+                            else:
+                                receipt_no = str(receipt_raw).strip().replace(" ", "")
+                                if receipt_no == "":
+                                    receipt_no = None
+
                             member_no = int(row["编号 No/"])
                             member_id = f"CHE-{member_no}"
 
@@ -429,8 +437,21 @@ def finance_upload():
 
                             result = db_query("""
                                 insert into member_payments
-                                (receipt_no, member_id, name, payment_date, start_month, end_month, month_count, amount)
-                                values (%s, %s, %s, %s, %s, %s, %s, %s)
+                                (
+                                    receipt_no,
+                                    member_id,
+                                    name,
+                                    payment_date,
+                                    start_month,
+                                    end_month,
+                                    month_count,
+                                    amount
+                                )
+                                values
+                                (
+                                    %s, %s, %s, %s,
+                                    %s, %s, %s, %s
+                                )
                                 on conflict (receipt_no) do nothing
                                 returning id
                             """, (
@@ -598,7 +619,7 @@ button{
     </form>
 
     <div class="note">
-        上传后系统会自动导入收据记录；重复的收据编号会自动跳过，不会重复计算。
+        上传后系统会自动导入月费记录；收据编号空白的记录也会导入，重复收据编号会自动跳过。
     </div>
 
 </div>
@@ -811,7 +832,7 @@ button{
     {% endif %}
 
     <form method="post">
-        <label>月费编号 / 姓名 / 英文名 /电话</label>
+        <label>月费编号 / 姓名 / 英文名 / 电话</label>
         <input name="member_id"
             placeholder="例如：CHE-108 / 0108 / 张三 / 0123456789"
             autocomplete="off"
