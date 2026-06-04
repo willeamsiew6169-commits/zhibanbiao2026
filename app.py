@@ -556,7 +556,7 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "") -> tuple[
         except Exception:
             paid_until_text = str(paid_until)
 
-        extra += f"\n月费已供养至：{paid_until_text}"
+        extra += f"\n月费已缴费至：{paid_until_text}"
 
     return True, f"{volunteer['姓名']} 已签到：{role}{extra}"
 
@@ -1026,7 +1026,7 @@ async function lookupVolunteer() {
     if (data.volunteer.pin_ok) {
       html += `<br>${TXT.phone}：${data.volunteer.电话号码 || TXT.not_registered}`;
 
-      const paidUntil = data.volunteer["月费已供养至"];
+      const paidUntil = data.volunteer["月费已缴费至"];
 
       if (paidUntil && paidUntil !== "-") {
         html += `<br>${TXT.paid_until}：${paidUntil}`;
@@ -1679,8 +1679,8 @@ a { font-size:20px; }
     英文名：{{ result.english_name or "-" }}<br>
     电话：{{ result.phone or "-" }}<br>
     月费编号：{{ result.member_id }}<br>
-    已供养月份：{{ ", ".join(result.months) if result.months else "暂无记录" }}<br>
-    已供养至：<b>{{ result.latest or "暂无记录" }}</b>
+    已缴费月份：{{ ", ".join(result.months) if result.months else "暂无记录" }}<br>
+    已缴费至：<b>{{ result.latest or "暂无记录" }}</b>
 </div>
 {% endif %}
 </div>
@@ -1720,7 +1720,7 @@ def api_volunteer(volunteer_id):
                 except Exception:
                     paid_until = str(paid_until)
 
-            safe_v["月费已供养至"] = paid_until
+            safe_v["月费已缴费至"] = paid_until
 
         return jsonify({"ok": True, "volunteer": safe_v})
 
@@ -1751,8 +1751,8 @@ def member():
 
         return f"""
         姓名：{m['name']}<br>
-        已供养月份：{', '.join(months)}<br>
-        已供养至：{latest}
+        已缴费月份：{', '.join(months)}<br>
+        已缴费至：{latest}
         """
 
     return """

@@ -203,7 +203,7 @@ TEXT = {
         "today_checkout_done": "已完成签退",
         "people_count": "人次",
         "people": "人",
-        "paid_until": "月费已供养至",
+        "paid_until": "月费已缴费至",
         "pin_wrong": "PIN 不正确，无法显示个人资料",
         "today_topic": "今日主题",
         "topic_placeholder": "例如：佛陀的大智慧",

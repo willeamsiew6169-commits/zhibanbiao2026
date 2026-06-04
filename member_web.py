@@ -873,19 +873,19 @@ button{
         </div>
 
         <div class="big-status">
-            <div class="status-title">✅ 已供养至</div>
+            <div class="status-title">✅ 月费已缴至</div>
             <div class="status-month">{{ paid_until or "暂无记录" }}</div>
         </div>
 
         {% if summary %}
         <div class="summary-grid">
             <div class="summary-box">
-                <div class="summary-title">总供养金额</div>
+                <div class="summary-title">总缴费金额</div>
                 <div class="summary-value">RM {{ "%.2f"|format(summary.total_payment or 0) }}</div>
             </div>
 
             <div class="summary-box">
-                <div class="summary-title">总供养月数</div>
+                <div class="summary-title">总缴费月数</div>
                 <div class="summary-value">{{ summary.total_months or 0 }} 个月</div>
             </div>
 
@@ -902,7 +902,7 @@ button{
         </div>
         {% endif %}
 
-        <div class="record-title">最近付款记录</div>
+        <div class="record-title">最近缴费记录</div>
 
         {% if payments %}
             {% for p in payments[:5] %}
@@ -911,7 +911,7 @@ button{
                     {{ p.payment_date.strftime("%Y-%m-%d") if p.payment_date else "-" }}
                 </div>
                 <div>
-                    供养月份：
+                    缴费月份：
                     {{ p.start_month.strftime("%Y-%m") if p.start_month else "-" }}
                     ~
                     {{ p.end_month.strftime("%Y-%m") if p.end_month else "-" }}
@@ -922,7 +922,7 @@ button{
             </div>
             {% endfor %}
         {% else %}
-            <div class="no-record">暂无付款记录。</div>
+            <div class="no-record">暂无缴费记录。</div>
         {% endif %}
     </div>
     {% endif %}
@@ -1110,17 +1110,17 @@ th{
         {% if summary %}
         <div class="summary-grid">
             <div class="summary-box">
-                <div class="summary-title">总供养金额</div>
+                <div class="summary-title">总缴费金额</div>
                 <div class="summary-value">RM {{ "%.2f"|format(summary.total_payment or 0) }}</div>
             </div>
 
             <div class="summary-box">
-                <div class="summary-title">总供养月数</div>
+                <div class="summary-title">总缴费月数</div>
                 <div class="summary-value">{{ summary.total_months or 0 }} 个月</div>
             </div>
 
             <div class="summary-box">
-                <div class="summary-title">已供养至</div>
+                <div class="summary-title">月费已缴至</div>
                 <div class="summary-value">
                     {% if summary.paid_until %}
                         {{ summary.paid_until.strftime("%Y-%m") }}
@@ -1144,7 +1144,7 @@ th{
         {% endif %}
 
         {% if payments %}
-        <h3>付款记录</h3>
+        <h3>缴费记录</h3>
         <table>
             <tr>
                 <th>付款日期</th>
@@ -1168,7 +1168,7 @@ th{
         </table>
         {% else %}
         <div class="no-record">
-            这个会员目前没有财政 Excel 付款记录。
+            这个会员目前没有财政 Excel 缴费记录。
         </div>
         {% endif %}
     </div>

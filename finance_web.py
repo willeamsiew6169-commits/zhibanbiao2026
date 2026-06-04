@@ -238,7 +238,7 @@ def late_members():
         <th>会员编号</th>
         <th>姓名</th>
         <th>电话</th>
-        <th>已供养至</th>
+        <th>已缴费至</th>
     </tr>
 
     {% for r in rows %}
@@ -400,7 +400,7 @@ def finance_home():
         <div class="grid">
             <a class="card card-warning" href="{{ url_for('finance.late_members') }}">
                 <h2>⚠️ 月费迟付名单</h2>
-                <p>查看已过期供养会员</p>
+                <p>查看已过期缴费会员</p>
             </a>
         </div>
     </div>
@@ -522,9 +522,12 @@ def monthly_fee(branch):
     if request.method == "POST":
 
         action = request.form.get("action", "save")
-        raw_member_id = request.form.get("member_id", "")
+        raw_member_id = request.form.get("member_id", "").strip()
 
-        member_id = normalize_member_id(raw_member_id, default_branch=branch)
+        if raw_member_id.isdigit():
+            member_id = f"{branch}-{int(raw_member_id)}"
+        else:
+            member_id = normalize_member_id(raw_member_id, default_branch=branch)
 
         member = db_query("""
             select *
@@ -672,7 +675,7 @@ def monthly_fee(branch):
         <p>编号：{{ member.member_id }}</p>
         <p>姓名：{{ member.get("姓名") or member.get("name") }}</p>
         <p>电话：{{ member.get("电话号码") or member.get("phone") }}</p>
-        <p>目前已供养至：{{ paid_until or "没有记录" }}</p>
+        <p>目前已缴费至：{{ paid_until or "没有记录" }}</p>
 
         <hr>
 
@@ -697,7 +700,7 @@ def monthly_fee(branch):
             </p>
 
             <p>
-                供养至：
+                缴费至：
                 <input id="month_to" name="month_to" value="{{ default_month_to }}" required>
             </p>
 
