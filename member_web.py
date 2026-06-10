@@ -1,14 +1,19 @@
 # member_web.py
 
 import os
+import json
 import psycopg2
 import pandas as pd
 
+from io import BytesIO
 from db import db_query
 from opencc import OpenCC
-from datetime import datetime
+from flask import send_file
 from psycopg2.extras import RealDictCursor
-from flask import Blueprint, request, render_template_string, redirect, url_for, flash, session
+from openpyxl.utils import get_column_letter
+from datetime import datetime, date, timedelta
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from flask import Blueprint, request, render_template_string, redirect, url_for, flash, session, send_file
 
 
 cc = OpenCC('t2s')  # 繁 → 简
@@ -151,19 +156,202 @@ def member_home():
     paid_until = None
     summary = None
     payments = []
+    candidates = []
+
+    def load_member_payment_data(cur, real_member_id):
+        cur.execute("""
+            select
+                coalesce(sum(amount), 0) as total_payment,
+                coalesce(sum(month_count), 0) as total_months,
+                max(end_month) as paid_until,
+                max(payment_date) as last_payment_date
+            from member_payments
+            where member_id = %s
+        """, (real_member_id,))
+        summary_data = cur.fetchone()
+
+        paid_until_text = None
+        if summary_data and summary_data["paid_until"]:
+            paid_until_text = summary_data["paid_until"].strftime("%Y年%m月")
+
+        cur.execute("""
+            select amount
+            from member_payments
+            where member_id = %s
+            order by payment_date desc, id desc
+            limit 1
+        """, (real_member_id,))
+        last_payment = cur.fetchone()
+
+        if summary_data:
+            summary_data["last_payment_amount"] = (
+                last_payment["amount"] if last_payment else 0
+            )
+
+        cur.execute("""
+            select
+                payment_date,
+                receipt_no,
+                start_month,
+                end_month,
+                month_count,
+                amount
+            from member_payments
+            where member_id = %s
+            order by payment_date desc, receipt_no desc
+        """, (real_member_id,))
+        payment_rows = cur.fetchall()
+
+        return summary_data, paid_until_text, payment_rows
 
     if request.method == "POST":
         raw_member_id = request.form.get("member_id", "").strip()
-        pin = request.form.get("pin", "").strip()
-
-        member_id = normalize_member_id(raw_member_id)
+        selected_member_id = request.form.get("selected_member_id", "").strip()
+        
 
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    keyword = raw_member_id.strip()
-                    member_id = normalize_member_id(keyword)
 
+                    # 第二次提交：用户已经从候选名单选择会员
+                    if selected_member_id:
+                        cur.execute("""
+                            select *
+                            from members
+                            where member_id = %s
+                            limit 1
+                        """, (selected_member_id,))
+                        member = cur.fetchone()
+
+                    else:
+                        keyword = raw_member_id.strip()
+                        digits_only = "".join(ch for ch in keyword if ch.isdigit())
+
+                        # 情况 1：纯数字，而且 6 位或以下，当会员编号
+                        if keyword.isdigit() and len(keyword) <= 6:
+                            member_id = normalize_member_id(keyword)
+
+                            cur.execute("""
+                                select *
+                                from members
+                                where member_id = %s
+                                limit 1
+                            """, (member_id,))
+                            member = cur.fetchone()
+
+                        # 情况 2：纯数字，而且超过 6 位，当电话号码
+                        elif keyword.isdigit() and len(keyword) > 6:
+                            cur.execute("""
+                                select *
+                                from members
+                                where replace(replace(coalesce(phone,''), '-', ''), ' ', '') = %s
+                                order by member_id
+                            """, (digits_only,))
+                            candidates = cur.fetchall()
+
+                            if len(candidates) == 1:
+                                member = candidates[0]
+                                candidates = []
+
+                            elif len(candidates) > 1:
+                                member = None
+
+                            else:
+                                member = None
+
+                        # 情况 3：非纯数字，当会员编号 / 中文名 / 英文名 搜索
+                        else:
+                            member_id = normalize_member_id(keyword)
+
+                            cur.execute("""
+                                select *
+                                from members
+                                where member_id = %s
+                                   or name ilike %s
+                                   or english_name ilike %s
+                                order by member_id
+                            """, (
+                                member_id,
+                                f"%{keyword}%",
+                                f"%{keyword}%"
+                            ))
+                            candidates = cur.fetchall()
+
+                            if len(candidates) == 1:
+                                member = candidates[0]
+                                candidates = []
+
+                            elif len(candidates) > 1:
+                                member = None
+
+                            else:
+                                member = None
+
+                    if candidates:
+                        error = None
+
+                    elif not member:
+                        error = "找不到这个会员，请检查编号 / 姓名 / 电话"
+
+                    else:
+                        real_member_id = member["member_id"]
+
+                        summary, paid_until, payments = load_member_payment_data(
+                            cur,
+                            real_member_id
+                        )
+
+        except Exception as e:
+            error = f"系统错误：{e}"
+
+    return render_template_string(
+        MEMBER_HTML,
+        member=member,
+        error=error,
+        paid_until=paid_until,
+        summary=summary,
+        payments=payments,
+        candidates=candidates
+    )
+
+@member_bp.route("/admin", methods=["GET", "POST"])
+def member_admin():
+    error = None
+    member = None
+    payments = []
+    summary = None
+    warnings = []
+
+    page = int(request.args.get("page", 1) or 1)
+    per_page = 15
+    offset = (page - 1) * per_page
+    total_pages = 0
+
+    admin_pin = request.form.get("admin_pin", "").strip()
+    raw_member_id = request.values.get("member_id", "").strip()
+
+    if request.method == "POST":
+
+        if not session.get("member_admin"):
+
+            admin_pin = request.form.get("admin_pin", "")
+
+            if admin_pin == MEMBER_ADMIN_PIN:
+                session["member_admin"] = True
+                return redirect("/member/admin")
+
+            error = "管理员 PIN 不正确"
+            
+
+    if raw_member_id and not error:
+        keyword = raw_member_id.strip()
+        member_id = normalize_member_id(keyword)
+
+        try:
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+                    # ✅ 数字只查编号，避免 208 查到电话 0123992081
                     if keyword.isdigit():
                         cur.execute("""
                             select *
@@ -176,141 +364,196 @@ def member_home():
                             select *
                             from members
                             where member_id = %s
-                            or name ilike %s
-                            or english_name ilike %s
+                               or name ilike %s
+                               or english_name ilike %s
+                               or phone ilike %s
                             limit 1
                         """, (
                             member_id,
+                            f"%{keyword}%",
                             f"%{keyword}%",
                             f"%{keyword}%"
                         ))
 
                     member = cur.fetchone()
 
-                    print("找到会员:", member)
-
                     if not member:
-                        error = "找不到这个会员，请检查编号 / 姓名 / 电话"
+                        error = "找不到这个月费编号"
                     else:
-                        if not verify_member_pin(member, pin):
-                            error = "PIN 不正确"
-                            member = None
-                        else:
-                            real_member_id = member["member_id"]
+                        real_member_id = member["member_id"]
 
-                            cur.execute("""
-                                select
-                                    coalesce(sum(amount), 0) as total_payment,
-                                    coalesce(sum(month_count), 0) as total_months,
-                                    max(end_month) as paid_until,
-                                    max(payment_date) as last_payment_date
-                                from member_payments
-                                where member_id = %s
-                            """, (real_member_id,))
-                            summary = cur.fetchone()
+                        # ✅ 汇总
+                        cur.execute("""
+                            select
+                                coalesce(sum(amount), 0) as total_payment,
+                                coalesce(sum(month_count), 0) as total_months,
+                                max(end_month) as paid_until,
+                                max(payment_date) as last_payment_date
+                            from member_payments
+                            where member_id = %s
+                        """, (real_member_id,))
+                        summary = cur.fetchone()
 
-                            if summary and summary["paid_until"]:
-                                paid_until = summary["paid_until"].strftime("%Y年%m月")
+                        # ✅ 最后付款金额
+                        if summary:
+                            summary["last_payment_amount"] = None
 
-                            cur.execute("""
-                                select
-                                    payment_date,
-                                    receipt_no,
-                                    start_month,
-                                    end_month,
-                                    month_count,
-                                    amount
-                                from member_payments
-                                where member_id = %s
-                                order by payment_date desc, receipt_no desc
-                            """, (real_member_id,))
-                            payments = cur.fetchall()
+                            if summary.get("last_payment_date"):
+                                cur.execute("""
+                                    select amount
+                                    from member_payments
+                                    where member_id = %s
+                                      and payment_date = %s
+                                    order by id desc
+                                    limit 1
+                                """, (
+                                    real_member_id,
+                                    summary["last_payment_date"]
+                                ))
+                                last_row = cur.fetchone()
+
+                                if last_row:
+                                    summary["last_payment_amount"] = last_row["amount"]
+
+                        # ✅ 总页数
+                        cur.execute("""
+                            select count(*) as cnt
+                            from member_payments
+                            where member_id = %s
+                        """, (real_member_id,))
+                        total_rows = cur.fetchone()["cnt"] or 0
+                        total_pages = (total_rows + per_page - 1) // per_page
+
+                        # ✅ 当前页，只显示 15 行
+                        cur.execute("""
+                            select
+                                id,
+                                payment_date,
+                                receipt_no,
+                                member_id,
+                                start_month,
+                                end_month,
+                                month_count,
+                                amount,
+                                name
+                            from member_payments
+                            where member_id = %s
+                            order by payment_date desc, id desc
+                            limit %s offset %s
+                        """, (
+                            real_member_id,
+                            per_page,
+                            offset
+                        ))
+                        payments = cur.fetchall()
+
+                        # ✅ 另外查全部记录，用来检查错误
+                        cur.execute("""
+                            select
+                                id,
+                                payment_date,
+                                receipt_no,
+                                start_month,
+                                end_month,
+                                month_count,
+                                amount,
+                                name
+                            from member_payments
+                            where member_id = %s
+                            order by payment_date asc, id asc
+                        """, (real_member_id,))
+                        all_payments = cur.fetchall()
+
+                        seen_months = {}
+                        seen_receipts = {}
+
+                        for r in all_payments:
+                            receipt_no = r.get("receipt_no") or "-"
+                            amount = float(r.get("amount") or 0)
+                            month_count = int(r.get("month_count") or 0)
+
+                            start_month = r.get("start_month")
+                            end_month = r.get("end_month")
+                            payment_date = r.get("payment_date")
+
+                            # 1. 收据重复
+                            if receipt_no != "-":
+                                if receipt_no in seen_receipts:
+                                    warnings.append(
+                                        f"收据 {receipt_no}：收据编号重复，之前已经出现过"
+                                    )
+                                else:
+                                    seen_receipts[receipt_no] = True
+
+                            # 2. 金额不是 RM50 倍数
+                            if amount % 50 != 0:
+                                warnings.append(
+                                    f"收据 {receipt_no}：金额 RM {amount:.2f} 不是 RM50 的倍数"
+                                )
+
+                            # 3. 月数不正确
+                            if month_count <= 0:
+                                warnings.append(
+                                    f"收据 {receipt_no}：月数不正确"
+                                )
+
+                            # 4. 金额和月数不符合
+                            if amount > 0 and month_count > 0:
+                                expected_amount = month_count * 50
+                                if amount != expected_amount:
+                                    warnings.append(
+                                        f"收据 {receipt_no}：金额 RM {amount:.2f} 和月数 {month_count} 不符合，正常应是 RM {expected_amount:.2f}"
+                                    )
+
+                            # 5. 付款日期未来
+                            if payment_date and payment_date > date.today():
+                                warnings.append(
+                                    f"收据 {receipt_no}：付款日期是未来日期"
+                                )
+
+                            # 6. 开始结束月份检查
+                            if start_month and end_month:
+                                if start_month > end_month:
+                                    warnings.append(
+                                        f"收据 {receipt_no}：开始月份大过结束月份"
+                                    )
+                                else:
+                                    real_month_count = (
+                                        (end_month.year - start_month.year) * 12
+                                        + (end_month.month - start_month.month)
+                                        + 1
+                                    )
+
+                                    if real_month_count != month_count:
+                                        warnings.append(
+                                            f"收据 {receipt_no}：开始月份到结束月份是 {real_month_count} 个月，但记录写 {month_count} 个月"
+                                        )
+
+                                    # 7. 重复月份检查
+                                    current = start_month
+
+                                    for i in range(real_month_count):
+                                        ym = current.strftime("%Y-%m")
+
+                                        if ym in seen_months:
+                                            warnings.append(
+                                                f"月份重复：{ym} 已在收据 {seen_months[ym]} 记录过，现在又出现在收据 {receipt_no}"
+                                            )
+                                        else:
+                                            seen_months[ym] = receipt_no
+
+                                        if current.month == 12:
+                                            current = current.replace(
+                                                year=current.year + 1,
+                                                month=1
+                                            )
+                                        else:
+                                            current = current.replace(
+                                                month=current.month + 1
+                                            )
 
         except Exception as e:
             error = f"系统错误：{e}"
-
-    return render_template_string(
-        MEMBER_HTML,
-        member=member,
-        error=error,
-        paid_until=paid_until,
-        summary=summary,
-        payments=payments
-    )
-
-@member_bp.route("/admin", methods=["GET", "POST"])
-def member_admin():
-    error = None
-    member = None
-    payments = []
-    summary = None
-
-    admin_pin = request.form.get("admin_pin", "").strip()
-    raw_member_id = request.form.get("member_id", "").strip()
-
-    if request.method == "POST":
-
-        if not session.get("member_admin"):
-            if admin_pin != MEMBER_ADMIN_PIN:
-                error = "管理员 PIN 不正确"
-            else:
-                session["member_admin"] = True
-
-        if not error:
-            keyword = raw_member_id.strip()
-            member_id = normalize_member_id(keyword)
-
-            try:
-                with get_conn() as conn:
-                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-
-                        cur.execute("""
-                            select *
-                            from members
-                            where member_id = %s
-                            or name ilike %s
-                            or english_name ilike %s
-                            limit 1
-                        """, (
-                            member_id,
-                            f"%{keyword}%",
-                            f"%{keyword}%"
-                        ))
-                        member = cur.fetchone()
-
-                        if not member:
-                            error = "找不到这个月费编号"
-                        else:
-                            real_member_id = member["member_id"]
-
-                            cur.execute("""
-                                select
-                                    coalesce(sum(amount), 0) as total_payment,
-                                    coalesce(sum(month_count), 0) as total_months,
-                                    max(end_month) as paid_until,
-                                    max(payment_date) as last_payment_date
-                                from member_payments
-                                where member_id = %s
-                            """, (real_member_id,))
-                            summary = cur.fetchone()
-
-                            cur.execute("""
-                                select
-                                    payment_date,
-                                    receipt_no,
-                                    start_month,
-                                    end_month,
-                                    month_count,
-                                    amount,
-                                    name
-                                from member_payments
-                                where member_id = %s
-                                order by payment_date desc, receipt_no desc
-                            """, (real_member_id,))
-                            payments = cur.fetchall()
-
-            except Exception as e:
-                error = f"系统错误：{e}"
 
     return render_template_string(
         MEMBER_ADMIN_HTML,
@@ -318,9 +561,302 @@ def member_admin():
         member=member,
         payments=payments,
         summary=summary,
-        admin_pin=admin_pin,
-        raw_member_id=raw_member_id
+        warnings=warnings,
+        raw_member_id=raw_member_id,
+        page=page,
+        total_pages=total_pages
     )
+
+@member_bp.route("/admin/late_members")
+def admin_late_members():
+
+    if not session.get("member_admin"):
+        return redirect(url_for("member_bp.member_admin"))
+
+    rows = db_query("""
+        select
+            m.member_id,
+            m.name,
+            m.phone,
+            m.remark,
+            max(p.end_month) as paid_until,
+            max(p.payment_date) as last_payment_date
+        from members m
+        left join member_payments p
+            on p.member_id = m.member_id
+        where coalesce(m.member_status, m.status, '') not in ('停供', '往生', '已往生')
+        group by
+            m.member_id,
+            m.name,
+            m.phone,
+            m.remark
+        having
+            max(p.end_month) is not null
+            and max(p.end_month) < date_trunc('month', current_date)
+        order by
+            paid_until asc,
+            m.member_id
+    """, fetchall=True)
+
+    today = date.today()
+    current_month_index = today.year * 12 + today.month
+
+    for r in rows:
+        paid_until = r["paid_until"]
+        paid_index = paid_until.year * 12 + paid_until.month
+        late_months = current_month_index - paid_index
+
+        r["late_months"] = late_months
+        r["reference_amount"] = late_months * 50
+
+        if late_months <= 2:
+            r["level"] = "green"
+        elif late_months <= 6:
+            r["level"] = "yellow"
+        else:
+            r["level"] = "red"
+
+        phone = (r["phone"] or "").strip()
+        phone_digits = "".join(ch for ch in phone if ch.isdigit())
+
+        if phone_digits.startswith("0"):
+            phone_digits = "6" + phone_digits
+
+        r["wa_link"] = "https://wa.me/" + phone_digits if phone_digits else ""
+
+    green_count = sum(1 for r in rows if r["level"] == "green")
+    yellow_count = sum(1 for r in rows if r["level"] == "yellow")
+    red_count = sum(1 for r in rows if r["level"] == "red")
+    total_amount = sum(r["reference_amount"] for r in rows)
+
+    return render_template_string("""
+<h1>🌿 月费迟付名单</h1>
+
+<div style="display:flex; gap:20px; flex-wrap:wrap; margin-bottom:25px;">
+    <div style="padding:15px; border:1px solid #ddd; border-radius:8px; background:#f8f9fa;">
+        <b>总人数</b><br>
+        {{ rows|length }} 人
+    </div>
+
+    <div style="padding:15px; border:1px solid #ddd; border-radius:8px; background:#f8f9fa;">
+        <b>参考金额</b><br>
+        RM {{ "{:,.2f}".format(total_amount) }}
+    </div>
+
+    <div style="padding:15px; border-radius:8px; background:#e8f5e9;">
+        🟢 最近缴费<br>
+        {{ green_count }} 人
+    </div>
+
+    <div style="padding:15px; border-radius:8px; background:#fff8e1;">
+        🟡 一段时间未缴费<br>
+        {{ yellow_count }} 人
+    </div>
+
+    <div style="padding:15px; border-radius:8px; background:#ffebee;">
+        🔴 较久未缴费<br>
+        {{ red_count }} 人
+    </div>
+</div>
+
+<table border="1" cellpadding="8">
+    <tr>
+        <th>会员编号</th>
+        <th>姓名</th>
+        <th>电话</th>
+        <th>WhatsApp</th>
+        <th>已缴至</th>
+        <th>缴费间隔</th>
+        <th>参考金额</th>
+        <th>状态</th>
+        <th>最后付款日期</th>
+        <th>备注</th>
+    </tr>
+
+    {% for r in rows %}
+    <tr
+    {% if r.level == "green" %}
+        style="background:#e8f5e9;"
+    {% elif r.level == "yellow" %}
+        style="background:#fff8e1;"
+    {% elif r.level == "red" %}
+        style="background:#ffebee;"
+    {% endif %}
+    >
+        <td>{{ r.member_id }}</td>
+        <td>{{ r.name }}</td>
+        <td>{{ r.phone or "-" }}</td>
+        <td>
+            {% if r.wa_link %}
+                <a href="{{ r.wa_link }}" target="_blank">打开</a>
+            {% else %}
+                -
+            {% endif %}
+        </td>
+        <td>{{ r.paid_until.strftime("%Y-%m") }}</td>
+        <td>{{ r.late_months }} 个月</td>
+        <td>RM {{ "%.2f"|format(r.reference_amount) }}</td>
+        <td>
+            {% if r.level == "green" %}
+                🟢 最近缴费
+            {% elif r.level == "yellow" %}
+                🟡 一段时间未缴费
+            {% else %}
+                🔴 较久未缴费
+            {% endif %}
+        </td>
+        <td>{{ r.last_payment_date or "-" }}</td>
+        <td>{{ r.remark or "-" }}</td>
+    </tr>
+    {% endfor %}
+</table>
+
+<p>
+    <a href="{{ url_for('member.member_admin') }}">
+        返回月费管理员
+    </a>
+</p>
+""",
+rows=rows,
+green_count=green_count,
+yellow_count=yellow_count,
+red_count=red_count,
+total_amount=total_amount
+)
+
+@member_bp.route("/payment/edit/<int:payment_id>", methods=["GET", "POST"])
+def edit_member_payment(payment_id):
+    if not session.get("member_admin"):
+        return redirect("/member/admin")
+
+    error = None
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+                cur.execute("""
+                    select *
+                    from member_payments
+                    where id = %s
+                """, (payment_id,))
+                payment = cur.fetchone()
+
+                if not payment:
+                    return "找不到这笔缴费记录", 404
+
+                if request.method == "POST":
+                    payment_date = request.form.get("payment_date")
+                    receipt_no = request.form.get("receipt_no", "").strip()
+                    name = request.form.get("name", "").strip()
+                    start_month = request.form.get("start_month")
+                    end_month = request.form.get("end_month")
+                    month_count = int(request.form.get("month_count") or 0)
+                    amount = float(request.form.get("amount") or 0)
+
+                    if month_count <= 0:
+                        error = "月数不能小过 1"
+                    elif amount <= 0:
+                        error = "金额不能小过 0"
+                    else:
+                        old_data = dict(payment)
+
+                        new_data = {
+                            "payment_date": payment_date,
+                            "receipt_no": receipt_no,
+                            "name": name,
+                            "start_month": start_month + "-01",
+                            "end_month": end_month + "-01",
+                            "month_count": month_count,
+                            "amount": amount
+                        }
+
+                        cur.execute("""
+                            update member_payments
+                            set
+                                payment_date = %s,
+                                receipt_no = %s,
+                                name = %s,
+                                start_month = %s,
+                                end_month = %s,
+                                month_count = %s,
+                                amount = %s
+                            where id = %s
+                        """, (
+                            payment_date,
+                            receipt_no,
+                            name,
+                            start_month + "-01",
+                            end_month + "-01",
+                            month_count,
+                            amount,
+                            payment_id
+                        ))
+
+                        cur.execute("""
+                            insert into member_payment_history
+                            (
+                                payment_id,
+                                member_id,
+                                receipt_no,
+                                action,
+                                old_data,
+                                new_data,
+                                changed_by
+                            )
+                            values (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                        """, (
+                            payment_id,
+                            payment["member_id"],
+                            receipt_no,
+                            "edit",
+                            json.dumps(old_data, default=str),
+                            json.dumps(new_data, default=str),
+                            "member_admin"
+                        ))
+
+                        conn.commit()
+
+                        return redirect(f"/member/admin?member_id={payment['member_id']}")
+
+        return render_template_string(
+            PAYMENT_EDIT_HTML,
+            payment=payment,
+            error=error
+        )
+
+    except Exception as e:
+        return f"系统错误：{e}", 500
+    
+@member_bp.route("/payment/history/<int:history_id>")
+def member_payment_history_detail(history_id):
+    if not session.get("member_admin"):
+        return redirect("/member/admin")
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    select *
+                    from member_payment_history
+                    where id = %s
+                """, (history_id,))
+                h = cur.fetchone()
+
+                if not h:
+                    return "找不到这笔修改历史", 404
+
+        changes = format_history_changes(h.get("old_data"), h.get("new_data"))
+
+        return render_template_string(
+            PAYMENT_HISTORY_DETAIL_HTML,
+            h=h,
+            changes=changes,
+            timedelta=timedelta
+        )
+
+    except Exception as e:
+        return f"系统错误：{e}", 500
 
 @member_bp.route("/change-pin", methods=["GET", "POST"])
 def member_change_pin():
@@ -374,87 +910,1164 @@ def member_admin_logout():
     session.pop("member_admin", None)
     return redirect(url_for("member.member_admin"))
 
-@member_bp.route("/finance-upload", methods=["GET", "POST"])
-def finance_upload():
-    error = None
+@member_bp.route("/member-management")
+def member_management():
+
+    if not session.get("member_admin"):
+        return redirect("/member/admin")
+
+    return render_template_string("""
+    <div style="
+        max-width:1000px;
+        margin:auto;
+        padding:20px;
+    ">
+
+        <h1 style="
+            text-align:center;
+            font-size:42px;
+            margin-bottom:30px;
+        ">
+            👤 会员资料管理
+        </h1>
+
+        <div style="
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+            gap:20px;
+        ">
+
+            <a href="/member/member-management/search"
+            style="
+                text-decoration:none;
+                background:#e8f0fe;
+                padding:25px;
+                border-radius:15px;
+                color:#111;
+                font-size:24px;
+                font-weight:bold;
+                display:block;
+            ">
+                🔍 查找 / 编辑会员
+                <br>
+                <small style="font-size:16px;">
+                    修改电话、PIN、备注等资料
+                </small>
+            </a>
+
+            <a href="/member/download-members"
+            style="
+                text-decoration:none;
+                background:#e8f5e9;
+                padding:25px;
+                border-radius:15px;
+                color:#111;
+                font-size:24px;
+                font-weight:bold;
+                display:block;
+            ">
+                📥 下载会员资料 Excel
+                <br>
+                <small style="font-size:16px;">
+                    下载最新 members 主档
+                </small>
+            </a>
+
+            <a href="/member/admin/late_members"
+            style="
+                text-decoration:none;
+                background:#fff8e1;
+                padding:25px;
+                border-radius:15px;
+                color:#111;
+                font-size:24px;
+                font-weight:bold;
+                display:block;
+            ">
+                ⚠️ 月费迟付名单
+                <br>
+                <small style="font-size:16px;">
+                    查看过期会员
+                </small>
+            </a>
+
+            <a href="/member/member-management/add"
+                style="
+                    text-decoration:none;
+                    background:#f3f4f6;
+                    padding:25px;
+                    border-radius:15px;
+                    color:#111;
+                    font-size:24px;
+                    font-weight:bold;
+                    display:block;
+                ">
+                    ➕ 新增会员
+                    <br>
+                    <small style="font-size:16px;">
+                        新增 CHE / STW 月费会员
+                    </small>
+                </a>
+
+        </div>
+
+        <p style="margin-top:30px;">
+            <a href="/member/admin">
+                ← 返回月费管理员
+            </a>
+        </p>
+
+    </div>
+    """)
+
+@member_bp.route("/download-members")
+def download_members():
+
+    if not session.get("member_admin"):
+        return redirect(url_for("member.member_admin"))
+
+    df = pd.read_sql_query("""
+        select
+            member_id,
+            branch,
+            name,
+            english_name,
+            ic_number,
+            phone,
+            pin,
+            status,
+            member_status,
+            remark
+        from members
+        order by branch, member_id
+    """, get_conn())
+
+    df.columns = [
+        "会员编号",
+        "分会",
+        "姓名",
+        "英文名",
+        "身份证号码",
+        "电话",
+        "PIN",
+        "状态",
+        "月费状态",
+        "备注"
+    ]
+
+    output = BytesIO()
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+
+        df.to_excel(
+            writer,
+            index=False,
+            sheet_name="会员总表",
+            startrow=2
+        )
+
+        ws = writer.sheets["会员总表"]
+
+        ws.merge_cells("A1:J1")
+        ws["A1"] = "观音堂会员资料总表"
+        ws["A1"].font = Font(size=18, bold=True, color="FFFFFF")
+        ws["A1"].fill = PatternFill("solid", fgColor="4472C4")
+        ws["A1"].alignment = Alignment(horizontal="center")
+
+        header_fill = PatternFill("solid", fgColor="1F4E78")
+        header_font = Font(color="FFFFFF", bold=True)
+        blue_fill = PatternFill("solid", fgColor="DDEBF7")
+        white_fill = PatternFill("solid", fgColor="FFFFFF")
+
+        thin = Side(style="thin", color="CCCCCC")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        for cell in ws[3]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = border
+
+        for row_num in range(4, ws.max_row + 1):
+            fill = blue_fill if row_num % 2 == 0 else white_fill
+
+            for col in range(1, 11):
+                cell = ws.cell(row=row_num, column=col)
+                cell.fill = fill
+                cell.border = border
+                cell.alignment = Alignment(vertical="center")
+
+        ws.freeze_panes = "A4"
+        ws.auto_filter.ref = f"A3:J{ws.max_row}"
+
+        widths = {
+            "A": 14,
+            "B": 10,
+            "C": 18,
+            "D": 22,
+            "E": 20,
+            "F": 18,
+            "G": 10,
+            "H": 12,
+            "I": 12,
+            "J": 28,
+        }
+
+        for col, width in widths.items():
+            ws.column_dimensions[col].width = width
+
+        ws.row_dimensions[1].height = 30
+        ws.row_dimensions[3].height = 24
+
+    output.seek(0)
+
+    filename = f"members_{date.today().strftime('%Y-%m-%d')}.xlsx"
+
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+@member_bp.route("/member-management/search")
+def member_management_search():
+
+    if not session.get("member_admin"):
+        return redirect(url_for("member.member_admin"))
+
+    q = request.args.get("q", "").strip()
+    rows = []
+
+    if q:
+        keyword = q
+        member_id = normalize_member_id(keyword)
+
+        if keyword.isdigit():
+            rows = db_query("""
+                select
+                    member_id,
+                    name,
+                    english_name,
+                    phone,
+                    pin,
+                    branch,
+                    status,
+                    remark,
+                    member_status
+                from members
+                where member_id = %s
+                order by member_id
+                limit 50
+            """, (member_id,), fetchall=True)
+
+        else:
+            rows = db_query("""
+                select
+                    member_id,
+                    name,
+                    english_name,
+                    phone,
+                    pin,
+                    branch,
+                    status,
+                    remark,
+                    member_status
+                from members
+                where member_id = %s
+                or name ilike %s
+                or english_name ilike %s
+                or phone ilike %s
+                order by member_id
+                limit 50
+            """, (
+                member_id,
+                f"%{keyword}%",
+                f"%{keyword}%",
+                f"%{keyword}%"
+            ), fetchall=True)
+
+    return render_template_string("""
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>查找 / 编辑会员</title>
+<style>
+body{
+    font-family:Arial,"Microsoft YaHei",sans-serif;
+    background:#f3f4f6;
+    padding:20px;
+}
+.box{
+    max-width:1000px;
+    margin:auto;
+    background:white;
+    padding:24px;
+    border-radius:18px;
+    box-shadow:0 3px 12px rgba(0,0,0,.08);
+}
+h1{
+    text-align:center;
+    font-size:36px;
+}
+input{
+    width:100%;
+    font-size:22px;
+    padding:12px;
+    border:1px solid #ccc;
+    border-radius:10px;
+}
+button,.btn{
+    display:inline-block;
+    background:#2d7ff9;
+    color:white;
+    padding:12px 18px;
+    border-radius:10px;
+    border:0;
+    font-size:20px;
+    font-weight:bold;
+    text-decoration:none;
+    margin-top:12px;
+}
+table{
+    width:100%;
+    border-collapse:collapse;
+    margin-top:20px;
+}
+th,td{
+    border:1px solid #ddd;
+    padding:10px;
+    text-align:center;
+}
+th{
+    background:#eaf2ff;
+}
+.edit{
+    background:#16a34a;
+    color:white;
+    padding:7px 12px;
+    border-radius:8px;
+    text-decoration:none;
+}
+</style>
+</head>
+<body>
+<div class="box">
+
+    <a href="/member/member-management">← 返回会员资料管理</a>
+
+    <h1>🔍 查找 / 编辑会员</h1>
+
+    <form method="get">
+        <input name="q" value="{{ q }}" placeholder="输入编号 / 姓名 / 英文名 / 电话">
+        <button type="submit">查找会员</button>
+    </form>
+
+    {% if q %}
+        <h3>搜索结果：{{ rows|length }} 位</h3>
+
+        {% if rows %}
+        <table>
+            <tr>
+                <th>编号</th>
+                <th>姓名</th>
+                <th>英文名</th>
+                <th>电话</th>
+                <th>PIN</th>
+                <th>分会</th>
+                <th>状态</th>
+                <th>备注</th>
+                <th>操作</th>
+            </tr>
+
+            {% for r in rows %}
+            <tr>
+                <td>{{ r.member_id }}</td>
+                <td>{{ r.name }}</td>
+                <td>{{ r.english_name or "-" }}</td>
+                <td>{{ r.phone or "-" }}</td>
+                <td>{{ r.pin or "-" }}</td>
+                <td>{{ r.branch or "-" }}</td>
+                <td>{{ r.member_status or r.status or "-" }}</td>
+                <td>{{ r.remark or "-" }}</td>
+                <td>
+                    <a class="edit" href="/member/member-management/edit/{{ r.member_id }}">
+                        ✏ 编辑
+                    </a>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+            <p>找不到会员。</p>
+        {% endif %}
+    {% endif %}
+
+</div>
+</body>
+</html>
+""", q=q, rows=rows)
+
+@member_bp.route("/member-management/edit/<member_id>", methods=["GET", "POST"])
+def edit_member(member_id):
+
+    if not session.get("member_admin"):
+        return redirect(url_for("member.member_admin"))
+
+    member = db_query("""
+        select *
+        from members
+        where member_id = %s
+    """, (member_id,), fetchone=True)
+
+    if not member:
+        return "会员不存在"
+
     msg = None
+    error = None
 
     if request.method == "POST":
+
+        old_data = dict(member)
+
+        name = request.form.get("name", "").strip()
+        english_name = request.form.get("english_name", "").strip()
+        ic_number = request.form.get("ic_number", "").strip()
+        phone = request.form.get("phone", "").strip()
         pin = request.form.get("pin", "").strip()
+        branch = request.form.get("branch", "").strip().upper()
+        member_status = request.form.get("member_status", "").strip()
+        remark = request.form.get("remark", "").strip()
 
-        if pin != FINANCE_PIN:
-            error = "财政 PIN 不正确"
-        else:
-            file = request.files.get("file")
+        if not name:
+            error = "姓名不能为空"
 
-            if not file or file.filename == "":
-                error = "请选择 Excel 文件"
+        if not error and branch not in ["CHE", "STW"]:
+            error = "分会只能是 CHE 或 STW"
+
+        if not error and ic_number:
+            exist = db_query("""
+                select member_id, name
+                from members
+                where ic_number = %s
+                  and member_id <> %s
+                limit 1
+            """, (ic_number, member_id), fetchone=True)
+
+            if exist:
+                error = f"身份证号码已存在：{exist['member_id']} / {exist['name']}"
+
+        if not error:
+            db_query("""
+                update members
+                set
+                    name = %s,
+                    english_name = %s,
+                    ic_number = %s,
+                    phone = %s,
+                    pin = %s,
+                    branch = %s,
+                    status = %s,
+                    member_status = %s,
+                    remark = %s
+                where member_id = %s
+            """, (
+                name,
+                english_name,
+                ic_number,
+                phone,
+                pin,
+                branch,
+                member_status,
+                member_status,
+                remark or member_status,
+                member_id
+            ))
+
+            new_member = db_query("""
+                select *
+                from members
+                where member_id = %s
+            """, (member_id,), fetchone=True)
+
+            new_data = dict(new_member)
+
+            if json.dumps(old_data, default=str, sort_keys=True) != json.dumps(new_data, default=str, sort_keys=True):
+                db_query("""
+                    insert into member_profile_history
+                    (
+                        member_id,
+                        action,
+                        old_data,
+                        new_data,
+                        changed_by
+                    )
+                    values (%s,%s,%s,%s,%s)
+                """, (
+                    member_id,
+                    "edit",
+                    json.dumps(old_data, default=str),
+                    json.dumps(new_data, default=str),
+                    "member_admin"
+                ))
+
+                msg = "保存成功，已记录修改历史"
             else:
-                try:
-                    df = pd.read_excel(file)
+                msg = "没有实际修改"
 
-                    df = df[[
-                        "日期\nDate",
-                        "收据编号 \nOfficial Receipt No",
-                        "编号 No/",
-                        "捐款人\n姓名\nName",
-                        "START MONTH",
-                        "END MONTH",
-                        "No/ of Mth",
-                        "Total Amt"
-                    ]]
+            member = new_member
 
-                    # 只要求会员编号不为空；收据编号可以为空
-                    df = df.dropna(subset=[
-                        "编号 No/"
-                    ])
+    history_rows = db_query("""
+        select *
+        from member_profile_history
+        where member_id = %s
+        order by changed_at desc
+        limit 10
+    """, (member_id,), fetchall=True)
 
-                    inserted = 0
-                    skipped = 0
+    return render_template_string("""
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>编辑会员</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{
+    font-family:Arial,"Microsoft YaHei",sans-serif;
+    background:#f3f4f6;
+    margin:0;
+    padding:20px;
+}
+.box{
+    max-width:900px;
+    margin:auto;
+    background:white;
+    padding:24px;
+    border-radius:18px;
+    box-shadow:0 3px 12px rgba(0,0,0,.08);
+}
+h1{
+    text-align:center;
+    font-size:38px;
+}
+label{
+    font-size:20px;
+    font-weight:bold;
+    display:block;
+    margin-top:16px;
+}
+input,select,textarea{
+    width:100%;
+    padding:12px;
+    font-size:20px;
+    border:1px solid #ccc;
+    border-radius:10px;
+    box-sizing:border-box;
+    margin-top:6px;
+}
+textarea{
+    height:120px;
+}
+button{
+    background:#16a34a;
+    color:white;
+    border:0;
+    padding:14px 22px;
+    border-radius:10px;
+    font-size:22px;
+    font-weight:bold;
+    margin-top:20px;
+    width:100%;
+}
+.ok{
+    background:#e8f5e9;
+    color:#176b2c;
+    padding:12px;
+    border-radius:8px;
+    margin-bottom:15px;
+}
+.error{
+    background:#ffe5e5;
+    color:#a10000;
+    padding:12px;
+    border-radius:8px;
+    margin-bottom:15px;
+}
+.member-id{
+    background:#eef2ff;
+    padding:14px;
+    border-radius:10px;
+    font-size:22px;
+    font-weight:bold;
+    margin-bottom:18px;
+}
+table{
+    width:100%;
+    border-collapse:collapse;
+    margin-top:15px;
+}
+th,td{
+    border:1px solid #ddd;
+    padding:10px;
+    text-align:center;
+}
+th{
+    background:#eeeeee;
+}
+.note{
+    background:#fff7d6;
+    padding:12px;
+    border-radius:10px;
+    margin-top:15px;
+}
+</style>
+</head>
+<body>
 
-                    for _, row in df.iterrows():
+<div class="box">
+
+    <p>
+        <a href="/member/member-management/search">← 返回搜索</a>
+        &nbsp; | &nbsp;
+        <a href="/member/member-management">返回会员资料管理</a>
+    </p>
+
+    <h1>✏ 编辑会员</h1>
+
+    {% if error %}
+    <div class="error">❌ {{ error }}</div>
+    {% endif %}
+
+    {% if msg %}
+    <div class="ok">✅ {{ msg }}</div>
+    {% endif %}
+
+    <div class="member-id">
+        会员编号：{{ member.member_id }}
+    </div>
+
+    <form method="post">
+
+        <label>姓名</label>
+        <input name="name" value="{{ member.name or '' }}" required>
+
+        <label>英文名</label>
+        <input name="english_name" value="{{ member.english_name or '' }}">
+
+        <label>身份证号码</label>
+        <input name="ic_number"
+               value="{{ member.ic_number or '' }}"
+               placeholder="例如：800101-14-1234">
+
+        <label>电话</label>
+        <input name="phone" value="{{ member.phone or '' }}">
+
+        <label>PIN</label>
+        <input name="pin" value="{{ member.pin or '' }}">
+
+        <label>分会</label>
+        <select name="branch">
+            <option value="CHE" {% if member.branch=="CHE" %}selected{% endif %}>CHE</option>
+            <option value="STW" {% if member.branch=="STW" %}selected{% endif %}>STW</option>
+        </select>
+
+        <label>状态</label>
+        <select name="member_status">
+            <option value="在供" {% if member.member_status=="在供" or member.status=="在供" %}selected{% endif %}>在供</option>
+            <option value="停供" {% if member.member_status=="停供" or member.status=="停供" %}selected{% endif %}>停供</option>
+            <option value="暂停" {% if member.member_status=="暂停" or member.status=="暂停" %}selected{% endif %}>暂停</option>
+            <option value="已往生" {% if member.member_status=="已往生" or member.status=="已往生" %}selected{% endif %}>已往生</option>
+        </select>
+
+        <label>备注</label>
+        <textarea name="remark">{{ member.remark or '' }}</textarea>
+
+        <button type="submit">
+            💾 保存修改
+        </button>
+
+    </form>
+
+    <div class="note">
+        说明：会员编号不可修改；若需要转分会，之后会另外做「转分会」功能。
+    </div>
+
+    <h2>📜 最近会员资料修改历史</h2>
+
+    {% if history_rows %}
+    <table>
+        <tr>
+            <th>时间</th>
+            <th>动作</th>
+            <th>修改者</th>
+        </tr>
+        {% for h in history_rows %}
+        <tr>
+            <td>{{ (h.changed_at + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M") if h.changed_at else "-" }}</td>
+            <td>{{ h.action }}</td>
+            <td>{{ h.changed_by }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+        <div class="note">暂时没有会员资料修改历史。</div>
+    {% endif %}
+
+</div>
+
+</body>
+</html>
+""",
+member=member,
+msg=msg,
+error=error,
+history_rows=history_rows,
+timedelta=timedelta
+)
+
+
+@member_bp.route("/member-management/add", methods=["GET", "POST"])
+def add_member():
+
+    if not session.get("member_admin"):
+        return redirect(url_for("member.member_admin"))
+
+    msg = None
+    error = None
+
+    if request.method == "POST":
+        branch = request.form.get("branch", "CHE").strip().upper()
+        name = request.form.get("name", "").strip()
+        english_name = request.form.get("english_name", "").strip()
+        phone = request.form.get("phone", "").strip()
+        remark = request.form.get("remark", "").strip()
+        ic_number = request.form.get("ic_number", "").strip()
+
+        if branch not in ["CHE", "STW"]:
+            error = "分会不正确"
+        elif not name:
+            error = "姓名不能为空"
+        else:
+            last_no = db_query("""
+                select max(
+                    cast(regexp_replace(member_id, '^(CHE-|STW-)', '') as integer)
+                ) as last_no
+                from members
+                where member_id like %s
+            """, (branch + "-%",), fetchone=True)
+
+            next_no = int(last_no["last_no"] or 0) + 1
+            member_id = f"{branch}-{next_no}"
+
+            phone_digits = "".join(ch for ch in phone if ch.isdigit())
+            pin = phone_digits[-4:] if len(phone_digits) >= 4 else "0000"
+
+            exist = db_query("""
+                select member_id,name
+                from members
+                where ic_number=%s
+            """, (ic_number,), fetchone=True)
+
+            if exist:
+                error = f"""
+                身份证号码已存在：
+                {exist['member_id']}
+                {exist['name']}
+                """
+
+            db_query("""
+                insert into members
+                (
+                    member_id,
+                    name,
+                    english_name,
+                    ic_number,
+                    phone,
+                    pin,
+                    branch,
+                    status,
+                    remark,
+                    member_status
+                )
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (
+                member_id,
+                name,
+                english_name,
+                ic_number,
+                phone,
+                pin,
+                branch,
+                "在供",
+                remark or "在供",
+                "在供"
+            ))
+
+            msg = f"新增成功：{member_id} / {name} / PIN：{pin}"
+
+    return render_template_string("""
+<div style="max-width:900px;margin:auto;padding:20px;">
+
+    <p>
+        <a href="/member/member-management">← 返回会员资料管理</a>
+    </p>
+
+    <h1>➕ 新增会员</h1>
+
+    {% if error %}
+    <div style="background:#ffe5e5;color:#a10000;padding:12px;border-radius:8px;">
+        ❌ {{ error }}
+    </div>
+    {% endif %}
+
+    {% if msg %}
+    <div style="background:#e8f5e9;color:#176b2c;padding:12px;border-radius:8px;">
+        ✅ {{ msg }}
+    </div>
+    {% endif %}
+
+    <form method="post">
+
+        <label>分会</label><br>
+        <select name="branch" style="width:100%;padding:12px;font-size:20px;">
+            <option value="CHE">CHE</option>
+            <option value="STW">STW</option>
+        </select><br><br>
+
+        <label>姓名</label><br>
+        <input name="name" required style="width:100%;padding:12px;font-size:20px;"><br><br>
+
+        <label>英文名</label><br>
+        <input name="english_name" style="width:100%;padding:12px;font-size:20px;"><br><br>
+                                  
+        <label>身份证号码</label>
+        <input
+            name="ic_number"
+            placeholder="例如：800101-14-1234"
+            style="width:100%;padding:12px;font-size:20px;">
+
+        <br><br>
+
+        <label>电话</label><br>
+        <input name="phone" style="width:100%;padding:12px;font-size:20px;"><br><br>
+
+        <label>备注</label><br>
+        <textarea name="remark" style="width:100%;height:100px;padding:12px;font-size:20px;"></textarea><br><br>
+
+        <button type="submit"
+            style="background:#2d7ff9;color:white;border:0;padding:14px 22px;border-radius:10px;font-size:22px;font-weight:bold;">
+            新增会员
+        </button>
+
+    </form>
+</div>
+""", msg=msg, error=error)
+
+
+@member_bp.route("/finance-upload", methods=["GET", "POST"])
+def finance_upload():
+
+    if not session.get("member_admin"):
+        return redirect(url_for("member.member_admin"))
+    
+    error = None
+    msg = None
+    rows = []
+    history_rows = []
+    safety_issues = []
+
+    q = request.args.get("q", "").strip()
+    year = request.args.get("year", str(date.today().year)).strip()
+    months = request.args.getlist("months")
+    
+    # 下载 Excel
+    if request.args.get("download") == "1":
+        try:
+            params = []
+            where = "where 1=1"
+
+            if year:
+                where += " and to_char(payment_date, 'YYYY') = %s"
+                params.append(year)
+
+            if months:
+                where += " and to_char(payment_date, 'MM') = any(%s)"
+                params.append(months)
+
+            df = pd.read_sql_query(f"""
+                select
+                    payment_date as "日期\nDate",
+                    receipt_no as "收据编号 \nOfficial Receipt No",
+                    regexp_replace(member_id, '^(CHE-|STW-)', '') as "编号 No/",
+                    name as "捐款人\n姓名\nName",
+                    start_month as "START MONTH",
+                    end_month as "END MONTH",
+                    month_count as "No/ of Mth",
+                    amount as "Total Amt"
+                from member_payments
+                {where}
+                order by payment_date asc, id asc
+            """, get_conn(), params=params)
+
+            output = BytesIO()
+
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+
+                df.to_excel(
+                    writer,
+                    index=False,
+                    sheet_name="月费记录",
+                    startrow=5
+                )
+
+                ws = writer.book["月费记录"]
+
+                # ======================
+                # 标题
+                # ======================
+
+                title = f"{year}年{'全部月份' if months == 'all' else '、'.join(months) + '月'}月费记录"
+
+                ws.merge_cells("A1:H1")
+                ws["A1"] = title
+
+                ws["A1"].font = Font(
+                    size=18,
+                    bold=True,
+                    color="FFFFFF"
+                )
+
+                ws["A1"].fill = PatternFill(
+                    "solid",
+                    fgColor="4472C4"
+                )
+
+                ws["A1"].alignment = Alignment(horizontal="center")
+
+                # ======================
+                # 摘要
+                # ======================
+
+                total_people = len(df)
+                total_months = int(df["No/ of Mth"].sum())
+                total_amount = float(df["Total Amt"].sum())
+
+                # ======================
+                # 摘要卡片
+                # ======================
+
+                summary_fill = PatternFill("solid", fgColor="EAF4FF")
+                summary_border = Border(
+                    left=Side(style="thin", color="9EADCC"),
+                    right=Side(style="thin", color="9EADCC"),
+                    top=Side(style="thin", color="9EADCC"),
+                    bottom=Side(style="thin", color="9EADCC")
+                )
+
+                summary_items = [
+                    ("A3:B4", "总人数", f"{total_people} 人"),
+                    ("D3:E4", "总月数", f"{total_months}"),
+                    ("G3:H4", "总金额", f"RM {total_amount:,.2f}"),
+                ]
+
+                for cell_range, label, value in summary_items:
+                    ws.merge_cells(cell_range)
+                    cell = ws[cell_range.split(":")[0]]
+                    cell.value = f"{label}\n{value}"
+                    cell.fill = summary_fill
+                    cell.border = summary_border
+                    cell.font = Font(bold=True, size=12)
+                    cell.alignment = Alignment(
+                        horizontal="center",
+                        vertical="center",
+                        wrap_text=True
+                    )
+
+                ws.row_dimensions[3].height = 28
+                ws.row_dimensions[4].height = 28
+
+                # ======================
+                # 表头美化
+                # ======================
+
+                header_fill = PatternFill("solid", fgColor="0F5F76")
+                header_font = Font(color="FFFFFF", bold=True)
+
+                row_fill = PatternFill("solid", fgColor="BFE8F5")
+
+                for cell in ws[6]:
+
+                    cell.font = Font(
+                        bold=True
+                    )
+
+                    cell.fill = header_fill
+
+                    cell.alignment = Alignment(
+                        horizontal="center",
+                        vertical="center",
+                        wrap_text=True
+                    )
+
+                # ======================
+                # 边框样式
+                # ======================
+
+                thin = Side(
+                    border_style="thin",
+                    color="CCCCCC"
+                )
+
+                border = Border(
+                    left=thin,
+                    right=thin,
+                    top=thin,
+                    bottom=thin
+                )
+
+                # ======================
+                # 自动栏宽
+                # ======================
+
+                for col in ws.columns:
+
+                    max_len = 0
+
+                    letter = get_column_letter(col[0].column)
+
+                    for cell in col:
+
                         try:
-                            receipt_raw = row["收据编号 \nOfficial Receipt No"]
+                            max_len = max(
+                                max_len,
+                                len(str(cell.value))
+                            )
+                        except:
+                            pass
 
-                            if pd.isna(receipt_raw):
+                    ws.column_dimensions[letter].width = min(max_len + 4, 30)
+
+                # ======================
+                # 冻结标题
+                # ======================
+
+                ws.freeze_panes = "A7"
+
+                # ======================
+                # 自动筛选
+                # ======================
+
+                # ======================
+                # 表格边框
+                # ======================
+
+                blue_fill = PatternFill(
+                    "solid",
+                    fgColor="D8EEF8"
+                )
+
+                white_fill = PatternFill(
+                    "solid",
+                    fgColor="FFFFFF"
+                )
+
+                for row_num in range(7, ws.max_row + 1):
+
+                    fill = blue_fill if row_num % 2 == 0 else white_fill
+
+                    for col in range(1, 9):
+
+                        cell = ws.cell(row=row_num, column=col)
+
+                        cell.fill = fill
+                        cell.border = border
+
+                ws.auto_filter.ref = f"A6:H{ws.max_row}"
+
+                # ======================
+                # 金额格式
+                # ======================
+
+                for row in range(7, ws.max_row + 1):
+
+                    ws[f"A{row}"].number_format = "dd/mm/yyyy"
+
+                    ws[f"H{row}"].number_format = '#,##0.00'
+
+                    ws[f"H{row}"].alignment = Alignment(
+                        horizontal="right"
+                    )
+
+            output.seek(0)
+
+            month_text = "全部" if not months else "_".join(months)
+            filename = f"{year}_{month_text}_月费记录.xlsx"
+
+            return send_file(
+                output,
+                as_attachment=True,
+                download_name=filename,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+        except Exception as e:
+            error = f"下载失败：{e}"
+
+    # 上传 Excel
+    if request.method == "POST":
+
+        file = request.files.get("file")
+
+        if not file or file.filename == "":
+            error = "请选择 Excel 文件"
+        else:
+            try:
+                df = pd.read_excel(file)
+
+                df = df[[
+                    "日期\nDate",
+                    "收据编号 \nOfficial Receipt No",
+                    "编号 No/",
+                    "捐款人\n姓名\nName",
+                    "START MONTH",
+                    "END MONTH",
+                    "No/ of Mth",
+                    "Total Amt"
+                ]]
+
+                df = df.dropna(subset=["编号 No/"])
+
+                inserted = 0
+                skipped = 0
+
+                for _, row in df.iterrows():
+                    try:
+                        receipt_raw = row["收据编号 \nOfficial Receipt No"]
+
+                        if pd.isna(receipt_raw):
+                            receipt_no = None
+                        else:
+                            receipt_no = str(receipt_raw).strip().replace(" ", "")
+                            if receipt_no == "":
                                 receipt_no = None
-                            else:
-                                receipt_no = str(receipt_raw).strip().replace(" ", "")
-                                if receipt_no == "":
-                                    receipt_no = None
 
-                            member_no = int(row["编号 No/"])
-                            member_id = f"CHE-{member_no}"
+                        member_no = int(row["编号 No/"])
+                        member_id = f"CHE-{member_no}"
 
-                            name = str(row["捐款人\n姓名\nName"]).strip()
+                        name = str(row["捐款人\n姓名\nName"]).strip()
 
-                            payment_date = pd.to_datetime(row["日期\nDate"]).date()
-                            start_month = pd.to_datetime(row["START MONTH"]).date()
-                            end_month = pd.to_datetime(row["END MONTH"]).date()
+                        payment_date = pd.to_datetime(row["日期\nDate"]).date()
+                        start_month = pd.to_datetime(row["START MONTH"]).date()
+                        end_month = pd.to_datetime(row["END MONTH"]).date()
 
-                            month_count = int(row["No/ of Mth"])
-                            amount = float(row["Total Amt"])
+                        month_count = int(row["No/ of Mth"])
+                        amount = float(row["Total Amt"])
 
-                            result = db_query("""
-                                insert into member_payments
-                                (
-                                    receipt_no,
-                                    member_id,
-                                    name,
-                                    payment_date,
-                                    start_month,
-                                    end_month,
-                                    month_count,
-                                    amount
-                                )
-                                values
-                                (
-                                    %s, %s, %s, %s,
-                                    %s, %s, %s, %s
-                                )
-                                on conflict (receipt_no) do nothing
-                                returning id
-                            """, (
+                        result = db_query("""
+                            insert into member_payments
+                            (
                                 receipt_no,
                                 member_id,
                                 name,
@@ -463,29 +2076,188 @@ def finance_upload():
                                 end_month,
                                 month_count,
                                 amount
-                            ))
+                            )
+                            values
+                            (
+                                %s, %s, %s, %s,
+                                %s, %s, %s, %s
+                            )
+                            on conflict (receipt_no) do nothing
+                            returning id
+                        """, (
+                            receipt_no,
+                            member_id,
+                            name,
+                            payment_date,
+                            start_month,
+                            end_month,
+                            month_count,
+                            amount
+                        ))
 
-                            if result:
-                                inserted += 1
-                            else:
-                                skipped += 1
-
-                        except Exception as e:
-                            print("导入失败:", row.to_dict(), e)
+                        if result:
+                            inserted += 1
+                        else:
                             skipped += 1
 
-                    msg = f"上传完成：读取 {len(df)} 行，新增 {inserted} 行，跳过 {skipped} 行。"
+                    except Exception as e:
+                        print("导入失败:", row.to_dict(), e)
+                        skipped += 1
 
-                except Exception as e:
-                    print("上传失败:", e)
-                    error = f"上传失败：{e}"
+                msg = f"上传完成：读取 {len(df)} 行，新增 {inserted} 行，跳过 {skipped} 行。"
+
+            except Exception as e:
+                print("上传失败:", e)
+                error = f"上传失败：{e}"
+
+    # 搜索记录
+    try:
+        if q:
+            keyword = q.strip()
+            member_id = normalize_member_id(keyword)
+
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    if keyword.isdigit() and len(keyword) <= 6:
+                        cur.execute("""
+                            select *
+                            from member_payments
+                            where member_id = %s
+                            order by payment_date desc, id desc
+                            limit 200
+                        """, (member_id,))
+                    else:
+                        cur.execute("""
+                            select *
+                            from member_payments
+                            where member_id ilike %s
+                               or name ilike %s
+                               or receipt_no ilike %s
+                            order by payment_date desc, id desc
+                            limit 200
+                        """, (
+                            f"%{keyword}%",
+                            f"%{keyword}%",
+                            f"%{keyword}%"
+                        ))
+
+                    rows = cur.fetchall()
+
+    except Exception as e:
+        error = f"搜索失败：{e}"
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    select *
+                    from member_payment_history
+                    order by changed_at desc
+                    limit 30
+                """)
+                history_rows = cur.fetchall()
+
+                # =========================
+                # 财政安全检查
+                # =========================
+
+                # 1. 重复收据
+                cur.execute("""
+                    select
+                        receipt_no,
+                        count(*) as cnt
+                    from member_payments
+                    where receipt_no is not null
+                    and receipt_no <> ''
+                    group by receipt_no
+                    having count(*) > 1
+                """)
+
+                for r in cur.fetchall():
+                    safety_issues.append({
+                        "type": "重复收据",
+                        "detail": f"收据 {r['receipt_no']} 出现 {r['cnt']} 次"
+                    })
+
+                # 2. 金额和月数不符
+                cur.execute("""
+                    select
+                        id,
+                        member_id,
+                        receipt_no,
+                        amount,
+                        month_count
+                    from member_payments
+                """)
+
+                for r in cur.fetchall():
+
+                    amount = float(r["amount"] or 0)
+                    months = int(r["month_count"] or 0)
+
+                    if months > 0:
+
+                        expected = months * 50
+
+                        if amount != expected:
+
+                            safety_issues.append({
+                                "type": "金额不符",
+                                "detail":
+                                f"{r['member_id']} / {r['receipt_no']}：RM {amount:.2f}，应为 RM {expected:.2f}",
+                                "payment_id": r["id"]
+                            })
+
+                # 3. 未来日期
+                cur.execute("""
+                    select
+                        id,
+                        member_id,
+                        receipt_no,
+                        payment_date
+                    from member_payments
+                    where payment_date > current_date
+                """)
+
+                for r in cur.fetchall():
+
+                    safety_issues.append({
+                        "type": "未来日期",
+                        "detail":
+                        f"{r['member_id']} / {r['receipt_no']}：{r['payment_date']}",
+                        "payment_id": r["id"]
+                    })
+
+                # 4. 会员编号不存在
+                cur.execute("""
+                    select
+                        p.id,
+                        p.member_id,
+                        p.receipt_no
+                    from member_payments p
+                    left join members m
+                        on p.member_id = m.member_id
+                    where m.member_id is null
+                """)
+
+                for r in cur.fetchall():
+
+                    safety_issues.append({
+                        "type": "会员不存在",
+                        "detail":
+                        f"{r['member_id']} / {r['receipt_no']}",
+                        "payment_id": r["id"]
+                    })
+
+    except Exception as e:
+        print("读取修改历史失败:", e)
 
     return render_template_string("""
 <!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>财政上传月费 Excel</title>
+<title>月费资料管理中心</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 body{
@@ -495,7 +2267,7 @@ body{
     padding:18px;
 }
 .box{
-    max-width:720px;
+    max-width:1100px;
     margin:auto;
     background:white;
     padding:24px;
@@ -505,76 +2277,95 @@ body{
 h1{
     text-align:center;
     font-size:42px;
-    margin:20px 0 28px;
+}
+.card{
+    background:#f8f9fa;
+    border:1px solid #ddd;
+    border-radius:14px;
+    padding:18px;
+    margin-top:18px;
 }
 label{
-    font-size:26px;
+    font-size:20px;
     font-weight:bold;
     display:block;
-    margin-top:22px;
+    margin-top:14px;
 }
-input{
+input, select{
     width:100%;
-    font-size:28px;
-    padding:18px;
+    font-size:22px;
+    padding:12px;
     border:1px solid #ccc;
-    border-radius:12px;
+    border-radius:10px;
     box-sizing:border-box;
-    margin-top:8px;
+    margin-top:6px;
 }
-input[type=file]{
-    background:#fafafa;
-}
-button{
+button,.btn{
+    display:inline-block;
     width:100%;
-    font-size:34px;
+    text-align:center;
+    font-size:24px;
     font-weight:bold;
-    padding:22px;
-    margin-top:28px;
+    padding:14px;
+    margin-top:18px;
     border:0;
-    border-radius:14px;
+    border-radius:12px;
     background:#2d7ff9;
     color:white;
+    text-decoration:none;
+    box-sizing:border-box;
 }
 .error{
     background:#ffe5e5;
     color:#a10000;
-    font-size:22px;
-    padding:16px;
-    border-radius:12px;
-    margin-bottom:16px;
+    padding:14px;
+    border-radius:10px;
+    margin-bottom:12px;
 }
 .ok{
     background:#e8f7e8;
     color:#176b2c;
-    font-size:22px;
-    padding:16px;
-    border-radius:12px;
-    margin-bottom:16px;
+    padding:14px;
+    border-radius:10px;
+    margin-bottom:12px;
 }
-.link{
-    font-size:20px;
-    margin-bottom:16px;
+.grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:16px;
 }
-.link a{
-    color:#555;
+table{
+    width:100%;
+    border-collapse:collapse;
+    background:white;
+    margin-top:16px;
+}
+th,td{
+    border:1px solid #ddd;
+    padding:8px;
+    text-align:center;
+    font-size:15px;
+}
+th{background:#eee;}
+.edit{
+    background:#2d7ff9;
+    color:white;
+    padding:5px 10px;
+    border-radius:6px;
     text-decoration:none;
+    font-size:14px;
 }
 .note{
     background:#fff7d6;
     color:#6b4b00;
-    padding:14px;
-    border-radius:12px;
-    font-size:20px;
-    margin-top:18px;
+    padding:12px;
+    border-radius:10px;
+    margin-top:12px;
 }
-@media(max-width:600px){
-    body{padding:10px;}
-    .box{padding:18px;border-radius:14px;}
+@media(max-width:700px){
+    .grid{grid-template-columns:1fr;}
     h1{font-size:34px;}
-    label{font-size:24px;}
-    input{font-size:26px;}
-    button{font-size:30px;}
+    th,td{font-size:12px;padding:5px;}
 }
 </style>
 </head>
@@ -582,11 +2373,9 @@ button{
 
 <div class="box">
 
-    <div class="link">
-        <a href="/member/admin">← 返回月费管理员</a>
-    </div>
+    <a href="/member/admin">← 返回月费管理员</a>
 
-    <h1>财政上传月费 Excel</h1>
+    <h1>月费资料管理中心</h1>
 
     {% if error %}
         <div class="error">❌ {{ error }}</div>
@@ -596,37 +2385,245 @@ button{
         <div class="ok">✅ {{ msg }}</div>
     {% endif %}
 
-    <form method="post" enctype="multipart/form-data">
-        <label>财政 PIN</label>
-        <input
-            name="pin"
-            type="password"
-            inputmode="numeric"
-            autocomplete="new-password"
-            placeholder="请输入财政 PIN"
-            required
-        >
+    <div class="grid">
 
-        <label>选择 Excel 文件</label>
-        <input
-            name="file"
-            type="file"
-            accept=".xlsx,.xls"
-            required
-        >
+        <div class="card">
+            <h2>① 上传单月 Excel</h2>
 
-        <button type="submit">上传 Excel</button>
-    </form>
+            <form method="post" enctype="multipart/form-data">
+                <label>选择 Excel 文件</label>
+                <input name="file" type="file" accept=".xlsx,.xls" required>
 
-    <div class="note">
-        上传后系统会自动导入月费记录；收据编号空白的记录也会导入，重复收据编号会自动跳过。
+                <button type="submit">上传 Excel</button>
+            </form>
+
+            <div class="note">
+                系统会保留旧数据，只导入这次 Excel 的新记录。重复收据编号会自动跳过。
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>② 下载月费 Excel</h2>
+
+            <form method="get">
+                <input type="hidden" name="download" value="1">
+
+                <label>年份</label>
+                <input name="year" value="{{ year }}">
+
+                <label>月份</label>
+
+                <div style="
+                    color:#666;
+                    font-size:14px;
+                    margin-bottom:10px;
+                ">
+                    💡 不打勾 = 下载全年，可同时选择多个月
+                </div>
+
+                <div style="
+                    display:grid;
+                    grid-template-columns:repeat(4,1fr);
+                    gap:12px;
+                ">
+
+                {% for m in range(1,13) %}
+
+                <label style="
+                    display:flex;
+                    align-items:center;
+                    gap:10px;
+                    font-size:28px;
+                    font-weight:bold;
+                    cursor:pointer;
+                    padding:12px;
+                    border:1px solid #ddd;
+                    border-radius:12px;
+                    background:white;
+                ">
+
+                    <input
+                        type="checkbox"
+                        name="months"
+                        value="{{ '%02d'|format(m) }}"
+                        style="
+                            width:28px;
+                            height:28px;
+                            cursor:pointer;
+                        "
+                    >
+
+                    {{ m }}月
+
+                </label>
+
+                {% endfor %}
+
+                </div>
+
+                <button type="submit">下载 Excel</button>
+            </form>
+        </div>
+
+    </div>
+                                  
+    
+    <div class="card">
+        <h2>③ 搜索月费记录</h2>
+
+        <form method="get">
+            <label>寻找编号 / 姓名 / 收据编号</label>
+            <input name="q" value="{{ q }}" placeholder="例如：108 / CHE-108 / 张三 / CHE0001493">
+
+            <button type="submit">搜索记录</button>
+        </form>
+
+        {% if q %}
+            <h3>搜索结果：{{ rows|length }} 笔</h3>
+
+            {% if rows %}
+            <table>
+                <tr>
+                    <th>付款日期</th>
+                    <th>月费编号</th>
+                    <th>姓名</th>
+                    <th>收据编号</th>
+                    <th>开始月份</th>
+                    <th>结束月份</th>
+                    <th>月数</th>
+                    <th>金额</th>
+                    <th>操作</th>
+                </tr>
+
+                {% for r in rows %}
+                <tr>
+                    <td>{{ r.payment_date.strftime("%Y-%m-%d") if r.payment_date else "-" }}</td>
+                    <td>{{ r.member_id }}</td>
+                    <td>{{ r.name }}</td>
+                    <td>{{ r.receipt_no }}</td>
+                    <td>{{ r.start_month.strftime("%Y-%m") if r.start_month else "-" }}</td>
+                    <td>{{ r.end_month.strftime("%Y-%m") if r.end_month else "-" }}</td>
+                    <td>{{ r.month_count }}</td>
+                    <td>RM {{ "%.2f"|format(r.amount or 0) }}</td>
+                    <td>
+                        <a class="edit" href="/member/payment/edit/{{ r.id }}">✏ 编辑</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% else %}
+                <div class="note">找不到相关记录。</div>
+            {% endif %}
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <h2>④ 修改历史 History</h2>
+
+        {% if history_rows %}
+        <table>
+            <tr>
+                <th>时间</th>
+                <th>会员编号</th>
+                <th>收据编号</th>
+                <th>动作</th>
+                <th>修改者</th>
+                <th>详情</th>
+            </tr>
+
+            {% for h in history_rows %}
+            <tr>
+                <td>{{ (h.changed_at + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M") if h.changed_at else "-" }}</td>
+                <td>{{ h.member_id }}</td>
+                <td>{{ h.receipt_no }}</td>
+                <td>{{ h.action }}</td>
+                <td>{{ h.changed_by }}</td>
+                <td>
+                    <a class="edit" href="/member/payment/history/{{ h.id }}">查看详情</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <div class="note">暂时没有修改记录。</div>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <h2>⑤ 月费安全检查</h2>
+
+        {% if safety_issues %}
+
+        <div class="error">
+            ⚠️ 发现 {{ safety_issues|length }} 个问题
+        </div>
+
+        <table>
+        <tr>
+            <th>类型</th>
+            <th>问题</th>
+            <th>操作</th>
+        </tr>
+
+        {% for s in safety_issues %}
+        <tr>
+
+            <td>{{ s.type }}</td>
+
+            <td>{{ s.detail }}</td>
+
+            <td>
+
+                {% if s.payment_id %}
+                <a class="edit"
+                href="/member/payment/edit/{{ s.payment_id }}">
+                ✏ 编辑
+                </a>
+                {% else %}
+                -
+                {% endif %}
+
+            </td>
+
+        </tr>
+        {% endfor %}
+
+        </table>
+
+        {% else %}
+
+        <div class="ok">
+            ✅ 没有发现问题
+        </div>
+
+        {% endif %}
+    </div>
+                                  
+    <div class="card">
+        <h2>⑥ 会员资料管理</h2>
+
+        <a class="btn"
+        href="/member/member-management">
+        👤 会员资料管理
+        </a>
+
     </div>
 
 </div>
 
 </body>
 </html>
-""", error=error, msg=msg)
+""",
+error=error,
+msg=msg,
+rows=rows,
+q=q,
+year=year,
+months=months,
+timedelta=timedelta,
+safety_issues=safety_issues,
+history_rows=history_rows
+)
 
 MEMBER_HTML = """
 <!doctype html>
@@ -643,7 +2640,7 @@ body{
     padding:14px;
 }
 .box{
-    max-width:780px;
+    max-width:1100px;
     margin:auto;
     background:white;
     padding:22px;
@@ -705,79 +2702,11 @@ button{
     margin-bottom:16px;
     font-size:22px;
 }
-.change-pin-btn{
-    display:block;
-    text-align:center;
-    margin-top:16px;
-    padding:16px;
-    background:#f0f0f0;
-    border-radius:12px;
-    color:#333;
-    text-decoration:none;
-    font-size:22px;
-    font-weight:bold;
-}
 .result{
     margin-top:24px;
     background:#eef8ee;
     padding:20px;
     border-radius:16px;
-}
-.name{
-    font-size:34px;
-    font-weight:bold;
-    text-align:center;
-    margin-bottom:8px;
-}
-.info{
-    font-size:22px;
-    line-height:1.7;
-}
-.big-status{
-    margin-top:18px;
-    background:white;
-    border-radius:16px;
-    padding:22px;
-    text-align:center;
-    border:2px solid #bde5c8;
-}
-.status-title{
-    font-size:24px;
-    color:#555;
-}
-.status-month{
-    font-size:42px;
-    font-weight:bold;
-    color:#1b7f3a;
-    margin-top:8px;
-}
-.summary-grid{
-    display:grid;
-    grid-template-columns:1fr 1fr;
-    gap:12px;
-    margin-top:16px;
-}
-.summary-box{
-    background:white;
-    border-radius:14px;
-    padding:16px;
-    text-align:center;
-    border:1px solid #ddd;
-}
-.summary-title{
-    font-size:18px;
-    color:#666;
-}
-.summary-value{
-    font-size:28px;
-    font-weight:bold;
-    margin-top:6px;
-}
-.record-title{
-    font-size:26px;
-    font-weight:bold;
-    margin-top:24px;
-    margin-bottom:10px;
 }
 .record-card{
     background:white;
@@ -787,32 +2716,81 @@ button{
     border:1px solid #ddd;
     font-size:20px;
 }
-.record-date{
-    font-weight:bold;
-    font-size:22px;
+.member-card{
+    margin-top:20px;
+    padding:18px;
+    background:#f7f7f7;
+    border-radius:12px;
 }
-.record-amount{
+.member-title{
+    font-size:30px;
     font-weight:bold;
-    color:#1b7f3a;
+    margin-bottom:8px;
+}
+.member-title small{
+    font-size:18px;
+    color:#666;
+    font-weight:normal;
+}
+.member-info{
+    font-size:17px;
+    line-height:1.7;
+}
+.summary-grid{
+    display:grid;
+    grid-template-columns:repeat(3, 1fr);
+    gap:12px;
+    margin-top:18px;
+}
+.summary-box{
+    background:white;
+    border:1px solid #ddd;
+    border-radius:12px;
+    padding:14px 16px;
+}
+.summary-title{
+    color:#666;
+    font-size:16px;
+}
+.summary-value{
+    font-size:24px;
+    font-weight:bold;
+    margin-top:6px;
+}
+.last-payment-box{
+    margin-top:12px;
+    background:white;
+    border:1px solid #ddd;
+    border-radius:12px;
+    padding:14px 16px;
+}
+table{
+    width:100%;
+    border-collapse:collapse;
+    margin-top:18px;
+    background:white;
+}
+th,td{
+    border:1px solid #ddd;
+    padding:10px;
+    text-align:center;
+    font-size:16px;
+}
+th{
+    background:#eeeeee;
 }
 .no-record{
-    margin-top:16px;
+    margin-top:18px;
     background:#fff4d6;
     padding:14px;
-    border-radius:12px;
+    border-radius:10px;
     color:#7a4b00;
-    font-size:20px;
+    font-size:18px;
 }
-@media(max-width:600px){
-    body{padding:10px;}
-    .box{padding:18px;}
-    h1{font-size:38px;}
-    label{font-size:25px;}
-    input{font-size:28px;}
-    button{font-size:32px;}
-    .name{font-size:30px;}
-    .status-month{font-size:36px;}
+@media(max-width:700px){
+    h1{font-size:36px;}
     .summary-grid{grid-template-columns:1fr;}
+    th,td{font-size:13px;padding:6px;}
 }
 </style>
 </head>
@@ -830,102 +2808,134 @@ button{
     {% if error %}
     <div class="error">❌ {{ error }}</div>
     {% endif %}
-
+    
     <form method="post">
         <label>月费编号 / 姓名 / 英文名 / 电话</label>
-        <input name="member_id"
+        <input
+            name="member_id"
             placeholder="例如：CHE-108 / 0108 / 张三 / 0123456789"
             autocomplete="off"
-            required>
-
-        <label>PIN</label>
-        <input
-            id="member_pin"
-            name="pin"
-            type="password"
-            inputmode="numeric"
-            placeholder="请输入 PIN"
-            autocomplete="new-password"
-            autocorrect="off"
-            autocapitalize="off"
-            spellcheck="false"
-            readonly
-            onfocus="this.removeAttribute('readonly');"
             required
         >
 
         <button type="submit">查询</button>
     </form>
 
-    <a href="/member/change-pin" class="change-pin-btn">
-        🔒 更改月费密码
-    </a>
+    {% if candidates %}
+    <div class="result">
+        <h3>找到多位会员，请选择</h3>
+
+        <form method="post">
+            {% for m in candidates %}
+            <div class="record-card">
+                <div><b>{{ m.member_id }}</b></div>
+                <div>{{ m.name }}</div>
+
+                {% if m.english_name %}
+                <div>{{ m.english_name }}</div>
+                {% endif %}
+
+                <div>{{ m.phone or "-" }}</div>
+
+                <button
+                    type="submit"
+                    name="selected_member_id"
+                    value="{{ m.member_id }}"
+                >
+                    查看这个会员
+                </button>
+            </div>
+            {% endfor %}
+        </form>
+    </div>
+    {% endif %}
 
     {% if member %}
-    <div class="result">
-        <div class="name">{{ member.name }}</div>
+    <div class="member-card">
 
-        <div class="info">
-            {% if member.english_name %}
-            英文名：{{ member.english_name }}<br>
-            {% endif %}
-            月费编号：{{ member.member_id }}
+        <div class="member-title">
+            {{ member.name }}
+            <small>｜月费编号：{{ member.member_id }}</small>
         </div>
 
-        <div class="big-status">
-            <div class="status-title">✅ 月费已缴至</div>
-            <div class="status-month">{{ paid_until or "暂无记录" }}</div>
+        <div class="member-info">
+            {% if member.english_name %}
+                英文名：{{ member.english_name }}<br>
+            {% endif %}
+            电话：{{ member.phone or "-" }}
         </div>
 
         {% if summary %}
         <div class="summary-grid">
             <div class="summary-box">
-                <div class="summary-title">总缴费金额</div>
+                <div class="summary-title">已付月费总额</div>
                 <div class="summary-value">RM {{ "%.2f"|format(summary.total_payment or 0) }}</div>
             </div>
 
             <div class="summary-box">
-                <div class="summary-title">总缴费月数</div>
+                <div class="summary-title">累计已付月数</div>
                 <div class="summary-value">{{ summary.total_months or 0 }} 个月</div>
             </div>
 
             <div class="summary-box">
-                <div class="summary-title">最近付款</div>
+                <div class="summary-title">月费已缴至</div>
                 <div class="summary-value">
-                    {% if summary.last_payment_date %}
-                        {{ summary.last_payment_date.strftime("%Y-%m-%d") }}
+                    {% if summary.paid_until %}
+                        {{ summary.paid_until.strftime("%Y-%m") }}
                     {% else %}
-                        -
+                        暂无记录
                     {% endif %}
                 </div>
             </div>
         </div>
+
+        <div class="last-payment-box">
+            <div class="summary-title">最后付款记录</div>
+
+            <div class="summary-value">
+                {% if summary.last_payment_date %}
+                    {{ summary.last_payment_date.strftime("%Y-%m-%d") }}
+                    ｜RM {{ "%.2f"|format(summary.last_payment_amount or 0) }}
+                {% else %}
+                    暂无记录
+                {% endif %}
+            </div>
+        </div>
         {% endif %}
 
-        <div class="record-title">最近缴费记录</div>
-
         {% if payments %}
-            {% for p in payments[:5] %}
-            <div class="record-card">
-                <div class="record-date">
-                    {{ p.payment_date.strftime("%Y-%m-%d") if p.payment_date else "-" }}
-                </div>
-                <div>
-                    缴费月份：
-                    {{ p.start_month.strftime("%Y-%m") if p.start_month else "-" }}
-                    ~
-                    {{ p.end_month.strftime("%Y-%m") if p.end_month else "-" }}
-                </div>
-                <div class="record-amount">
-                    金额：RM {{ "%.2f"|format(p.amount or 0) }}
-                </div>
-            </div>
+        <h3>缴费记录</h3>
+
+        <table>
+            <tr>
+                <th>付款日期</th>
+                <th>收据编号</th>
+                <th>开始月份</th>
+                <th>结束月份</th>
+                <th>月数</th>
+                <th>金额</th>
+            </tr>
+
+            {% for p in payments %}
+            <tr>
+                <td>{{ p.payment_date.strftime("%Y-%m-%d") if p.payment_date else "-" }}</td>
+                <td>{{ p.receipt_no }}</td>
+                <td>{{ p.start_month.strftime("%Y-%m") if p.start_month else "-" }}</td>
+                <td>{{ p.end_month.strftime("%Y-%m") if p.end_month else "-" }}</td>
+                <td>{{ p.month_count }}</td>
+                <td>RM {{ "%.2f"|format(p.amount or 0) }}</td>
+            </tr>
             {% endfor %}
+        </table>
+
         {% else %}
-            <div class="no-record">暂无缴费记录。</div>
+        <div class="no-record">
+            这个会员目前没有缴费记录。
+        </div>
         {% endif %}
     </div>
     {% endif %}
+
 </div>
 
 </body>
@@ -947,7 +2957,7 @@ body{
     padding:20px;
 }
 .box{
-    max-width:1000px;
+    max-width:1100px;
     margin:auto;
     background:white;
     padding:24px;
@@ -960,18 +2970,18 @@ a{
 }
 h1{
     text-align:center;
-    font-size:48px;
+    font-size:42px;
 }
 label{
     font-weight:bold;
-    font-size:28px;
+    font-size:24px;
     display:block;
     margin-top:14px;
 }
 input{
     width:100%;
-    font-size:30px;
-    padding:16px;
+    font-size:26px;
+    padding:14px;
     box-sizing:border-box;
     border:1px solid #ccc;
     border-radius:10px;
@@ -980,8 +2990,8 @@ input{
 button{
     width:100%;
     margin-top:20px;
-    font-size:32px;
-    padding:18px;
+    font-size:30px;
+    padding:16px;
     border:0;
     border-radius:12px;
     background:#2d7ff9;
@@ -995,15 +3005,46 @@ button{
     border-radius:10px;
     margin-bottom:12px;
 }
+.ok{
+    background:#e8f5e9;
+    color:#176b2c;
+    padding:12px;
+    border-radius:10px;
+    margin-bottom:15px;
+    font-size:18px;
+    font-weight:bold;
+}
+.warning{
+    background:#fff3cd;
+    border:1px solid #ffecb5;
+    color:#664d03;
+    padding:14px;
+    border-radius:10px;
+    margin-top:18px;
+}
 .member-card{
     margin-top:20px;
     padding:18px;
     background:#f7f7f7;
     border-radius:12px;
 }
+.member-title{
+    font-size:30px;
+    font-weight:bold;
+    margin-bottom:8px;
+}
+.member-title small{
+    font-size:18px;
+    color:#666;
+    font-weight:normal;
+}
+.member-info{
+    font-size:17px;
+    line-height:1.7;
+}
 .summary-grid{
     display:grid;
-    grid-template-columns:repeat(2, 1fr);
+    grid-template-columns:repeat(3, 1fr);
     gap:12px;
     margin-top:18px;
 }
@@ -1011,16 +3052,23 @@ button{
     background:white;
     border:1px solid #ddd;
     border-radius:12px;
-    padding:16px;
+    padding:14px 16px;
 }
 .summary-title{
     color:#666;
-    font-size:18px;
+    font-size:16px;
 }
 .summary-value{
-    font-size:30px;
+    font-size:24px;
     font-weight:bold;
     margin-top:6px;
+}
+.last-payment-box{
+    margin-top:12px;
+    background:white;
+    border:1px solid #ddd;
+    border-radius:12px;
+    padding:14px 16px;
 }
 table{
     width:100%;
@@ -1044,8 +3092,30 @@ th{
     border-radius:10px;
     color:#7a4b00;
 }
+.pagination{
+    margin-top:20px;
+    text-align:center;
+}
+.pagination a,
+.pagination span{
+    display:inline-block;
+    padding:8px 13px;
+    margin:3px;
+    border-radius:6px;
+    text-decoration:none;
+    font-size:16px;
+}
+.pagination a{
+    background:#eee;
+    color:#333;
+}
+.pagination span{
+    background:#2d7ff9;
+    color:white;
+    font-weight:bold;
+}
 @media(max-width:700px){
-    h1{font-size:36px;}
+    h1{font-size:34px;}
     .summary-grid{grid-template-columns:1fr;}
     th,td{font-size:13px;padding:6px;}
 }
@@ -1054,68 +3124,107 @@ th{
 <body>
 
 <div class="box">
-    <a href="/member">← 返回月费查询</a>
-    &nbsp; | &nbsp;
-    <a href="/">返回签到首页</a>
-    &nbsp; | &nbsp;
-    <a href="/member/finance-upload">财政上传Excel</a>
+
+    <div style="margin-bottom:20px;">
+
+        <a href="/member">← 返回月费查询</a>
+
+        &nbsp; | &nbsp;
+
+        <a href="/member/finance-upload">资料管理中心</a>
+
+        &nbsp; | &nbsp;
+
+        <a href="/member/admin/late_members"
+           style="color:#d97706;font-weight:bold;">
+            ⚠️ 月费迟付名单
+        </a>
+
+    </div>
 
     <h1>月费管理员</h1>
 
-    <div style="margin-bottom:15px;">
-        <a href="/member/admin/logout"
-        style="color:red;font-size:18px;text-decoration:none;">
-        🚪 退出管理员
-        </a>
-    </div>
+    {% if session.get("member_admin") %}
+        <div class="ok">
+            ✅ 管理员已登录
+        </div>
+
+        <div style="margin-bottom:15px;">
+            <a href="/member/admin/logout"
+               style="color:red;font-size:18px;">
+                🚪 退出管理员
+            </a>
+        </div>
+    {% endif %}
 
     {% if error %}
     <div class="error">{{ error }}</div>
     {% endif %}
 
     <form method="post">
+
+    {% if not session.get("member_admin") %}
+
         <label>管理员 PIN</label>
+
         <input
             id="member_admin_pin"
             name="admin_pin"
             type="password"
             inputmode="numeric"
             autocomplete="new-password"
-            autocorrect="off"
-            autocapitalize="off"
-            spellcheck="false"
-            value=""
             readonly
             onfocus="this.removeAttribute('readonly');"
             required
         >
 
-        <label>月费编号 / 姓名</label>
-        <input name="member_id" value="{{ raw_member_id }}" placeholder="例如：CHE-3 / Anna" required>
+        <button type="submit">
+            登录管理员
+        </button>
 
-        <button type="submit">查找会员</button>
+    {% else %}
+
+        <label>月费编号 / 姓名</label>
+
+        <input
+            name="member_id"
+            value="{{ raw_member_id }}"
+            placeholder="例如：CHE-108 / 张三 / zhangsan"
+            required
+        >
+
+        <button type="submit">
+            查找会员
+        </button>
+
+    {% endif %}
+
     </form>
 
     {% if member %}
     <div class="member-card">
-        <h2>{{ member.name }}</h2>
 
-        {% if member.english_name %}
-        <div>英文名：{{ member.english_name }}</div>
-        {% endif %}
+        <div class="member-title">
+            {{ member.name }}
+            <small>｜月费编号：{{ member.member_id }}</small>
+        </div>
 
-        <div>电话：{{ member.phone or "-" }}</div>
-        <div>月费编号：{{ member.member_id }}</div>
+        <div class="member-info">
+            {% if member.english_name %}
+                英文名：{{ member.english_name }}<br>
+            {% endif %}
+            电话：{{ member.phone or "-" }}
+        </div>
 
         {% if summary %}
         <div class="summary-grid">
             <div class="summary-box">
-                <div class="summary-title">总缴费金额</div>
+                <div class="summary-title">已付月费总额</div>
                 <div class="summary-value">RM {{ "%.2f"|format(summary.total_payment or 0) }}</div>
             </div>
 
             <div class="summary-box">
-                <div class="summary-title">总缴费月数</div>
+                <div class="summary-title">累计已付月数</div>
                 <div class="summary-value">{{ summary.total_months or 0 }} 个月</div>
             </div>
 
@@ -1129,50 +3238,192 @@ th{
                     {% endif %}
                 </div>
             </div>
+        </div>
 
-            <div class="summary-box">
-                <div class="summary-title">最后付款日期</div>
-                <div class="summary-value">
-                    {% if summary.last_payment_date %}
-                        {{ summary.last_payment_date.strftime("%Y-%m-%d") }}
-                    {% else %}
-                        暂无记录
+        <div class="last-payment-box">
+            <div class="summary-title">最后付款记录</div>
+            <div class="summary-value">
+                {% if summary.last_payment_date %}
+                    {{ summary.last_payment_date.strftime("%Y-%m-%d") }}
+                    {% if summary.last_payment_amount %}
+                        ｜RM {{ "%.2f"|format(summary.last_payment_amount or 0) }}
                     {% endif %}
-                </div>
+                {% else %}
+                    暂无记录
+                {% endif %}
             </div>
+        </div>
+        {% endif %}
+
+        {% if warnings %}
+        <div class="warning">
+            <b>⚠️ 系统发现可能有错误：</b>
+            <ul>
+                {% for w in warnings %}
+                    <li>{{ w }}</li>
+                {% endfor %}
+            </ul>
         </div>
         {% endif %}
 
         {% if payments %}
         <h3>缴费记录</h3>
+
         <table>
             <tr>
-                <th>付款日期</th>
-                <th>收据编号</th>
-                <th>Start Month</th>
-                <th>End Month</th>
-                <th>月数</th>
-                <th>金额</th>
+                <th>日期<br>Date</th>
+                <th>收据编号<br>Official Receipt No</th>
+                <th>编号 No/</th>
+                <th>捐款人<br>姓名</th>
+                <th>START MONTH</th>
+                <th>END MONTH</th>
+                <th>No/ of Mth</th>
+                <th>Total Amt</th>
+                <th>操作</th>
             </tr>
 
             {% for p in payments %}
             <tr>
-                <td>{{ p.payment_date.strftime("%Y-%m-%d") if p.payment_date else "-" }}</td>
+                <td>{{ p.payment_date.strftime("%d/%m/%Y") if p.payment_date else "-" }}</td>
                 <td>{{ p.receipt_no }}</td>
-                <td>{{ p.start_month.strftime("%Y-%m") if p.start_month else "-" }}</td>
-                <td>{{ p.end_month.strftime("%Y-%m") if p.end_month else "-" }}</td>
+                <td>{{ p.member_id.replace("CHE-", "").replace("STW-", "") if p.member_id else "-" }}</td>
+                <td>{{ p.name or member.name }}</td>
+                <td>{{ p.start_month.strftime("%b-%y") if p.start_month else "-" }}</td>
+                <td>{{ p.end_month.strftime("%b-%y") if p.end_month else "-" }}</td>
                 <td>{{ p.month_count }}</td>
-                <td>RM {{ "%.2f"|format(p.amount or 0) }}</td>
+                <td>{{ "%.2f"|format(p.amount or 0) }}</td>
+                <td>
+                    <a href="/member/payment/edit/{{ p.id }}"
+                        style="
+                            background:#2d7ff9;
+                            color:white;
+                            padding:6px 12px;
+                            border-radius:6px;
+                            font-size:14px;
+                        ">
+                        ✏ 编辑
+                    </a>
+                </td>
             </tr>
             {% endfor %}
         </table>
+
+        {% if total_pages and total_pages > 1 %}
+        <div class="pagination">
+            {% for p in range(1, total_pages + 1) %}
+                {% if p == page %}
+                    <span>{{ p }}</span>
+                {% else %}
+                    <a href="/member/admin?member_id={{ raw_member_id }}&page={{ p }}">{{ p }}</a>
+                {% endif %}
+            {% endfor %}
+        </div>
+        {% endif %}
+
         {% else %}
         <div class="no-record">
-            这个会员目前没有财政 Excel 缴费记录。
+            这个会员目前没有缴费记录。
         </div>
         {% endif %}
     </div>
     {% endif %}
+</div>
+
+</body>
+</html>
+"""
+
+PAYMENT_EDIT_HTML = """
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>修改缴费记录</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{
+    font-family:Arial,"Microsoft YaHei",sans-serif;
+    background:#f5f5f5;
+    padding:20px;
+}
+.box{
+    max-width:700px;
+    margin:auto;
+    background:white;
+    padding:24px;
+    border-radius:16px;
+    box-shadow:0 2px 10px rgba(0,0,0,.08);
+}
+label{
+    font-weight:bold;
+    display:block;
+    margin-top:14px;
+}
+input{
+    width:100%;
+    font-size:20px;
+    padding:12px;
+    box-sizing:border-box;
+    border:1px solid #ccc;
+    border-radius:8px;
+}
+button{
+    width:100%;
+    margin-top:20px;
+    font-size:24px;
+    padding:14px;
+    border:0;
+    border-radius:10px;
+    background:#2d7ff9;
+    color:white;
+    font-weight:bold;
+}
+.error{
+    background:#ffe5e5;
+    color:#a10000;
+    padding:12px;
+    border-radius:10px;
+}
+</style>
+</head>
+<body>
+
+<div class="box">
+    <a href="/member/admin?member_id={{ payment.member_id }}">← 返回会员记录</a>
+
+    <h1>修改缴费记录</h1>
+
+    {% if error %}
+    <div class="error">{{ error }}</div>
+    {% endif %}
+
+    <form method="post">
+        <label>日期 Date</label>
+        <input type="date" name="payment_date" value="{{ payment.payment_date.strftime('%Y-%m-%d') if payment.payment_date else '' }}" required>
+
+        <label>收据编号 Official Receipt No</label>
+        <input name="receipt_no" value="{{ payment.receipt_no or '' }}" required>
+
+        <label>编号 No/</label>
+        <input value="{{ payment.member_id.replace('CHE-', '').replace('STW-', '') }}" disabled>
+
+        <label>捐款人 姓名 Name</label>
+        <input name="name" value="{{ payment.name or '' }}" required>
+        
+        <label>START MONTH</label>
+        <input type="month" name="start_month" value="{{ payment.start_month.strftime('%Y-%m') if payment.start_month else '' }}" required>
+
+        <label>END MONTH</label>
+        <input type="month" name="end_month" value="{{ payment.end_month.strftime('%Y-%m') if payment.end_month else '' }}" required>
+
+        <label>No/ of Mth</label>
+        <input type="number" name="month_count" value="{{ payment.month_count or 1 }}" required>
+
+        <label>Total Amt</label>
+        <input type="number" step="0.01" name="amount" value="{{ payment.amount or 0 }}" required>
+
+        <button type="submit">保存修改</button>
+    </form>
 </div>
 
 </body>
@@ -1267,6 +3518,161 @@ button{width:100%;margin-top:22px;font-size:22px;padding:14px;border:0;border-ra
 
 </form>
 </div>
+</body>
+</html>
+"""
+
+def format_history_changes(old_data, new_data):
+    old = old_data or {}
+    new = new_data or {}
+
+    labels = {
+        "payment_date": "付款日期",
+        "receipt_no": "收据编号",
+        "name": "姓名",
+        "start_month": "开始月份",
+        "end_month": "结束月份",
+        "month_count": "月数",
+        "amount": "金额",
+    }
+
+    changes = []
+
+    for key, label in labels.items():
+        old_value = old.get(key, "")
+        new_value = new.get(key, "")
+
+        # 新资料没有这个字段
+        if key not in new:
+            continue
+
+        # 金额格式统一
+        if key == "amount":
+            try:
+                old_value = float(old_value)
+                new_value = float(new_value)
+            except:
+                pass
+
+        if str(old_value) != str(new_value):
+
+            changes.append({
+                "label": label,
+                "old": old_value or "-",
+                "new": new_value or "-"
+            })
+
+    return changes
+
+
+PAYMENT_HISTORY_DETAIL_HTML = """
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>修改历史详情</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{
+    font-family:Arial,"Microsoft YaHei",sans-serif;
+    background:#f3f4f6;
+    padding:20px;
+}
+.box{
+    max-width:900px;
+    margin:auto;
+    background:white;
+    padding:28px;
+    border-radius:18px;
+    box-shadow:0 3px 12px rgba(0,0,0,.08);
+}
+a{
+    color:#555;
+    text-decoration:none;
+}
+h1{
+    font-size:36px;
+    margin-top:20px;
+}
+.info{
+    background:#f8f9fa;
+    border:1px solid #ddd;
+    border-radius:12px;
+    padding:16px;
+    line-height:1.8;
+    margin-bottom:20px;
+}
+table{
+    width:100%;
+    border-collapse:collapse;
+    background:white;
+}
+th,td{
+    border:1px solid #ddd;
+    padding:12px;
+    text-align:center;
+    font-size:17px;
+}
+th{
+    background:#eeeeee;
+}
+.old{
+    color:#a10000;
+    font-weight:bold;
+}
+.new{
+    color:#176b2c;
+    font-weight:bold;
+}
+.no-change{
+    background:#fff7d6;
+    padding:14px;
+    border-radius:10px;
+    color:#6b4b00;
+}
+</style>
+</head>
+<body>
+
+<div class="box">
+    <a href="/member/finance-upload">← 返回月费资料管理中心</a>
+
+    <h1>修改历史详情</h1>
+
+    <div class="info">
+        时间：
+        {{ (h.changed_at + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M") if h.changed_at else "-" }}
+        <br>
+        会员编号：{{ h.member_id }}<br>
+        收据编号：{{ h.receipt_no }}<br>
+        修改者：{{ h.changed_by }}
+    </div>
+
+    <h2>修改内容</h2>
+
+    {% if changes %}
+    <table>
+        <tr>
+            <th>项目</th>
+            <th>修改前</th>
+            <th>修改后</th>
+        </tr>
+
+        {% for c in changes %}
+        <tr>
+            <td>{{ c.label }}</td>
+            <td class="old">{{ c.old }}</td>
+            <td class="new">{{ c.new }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <div class="no-change">
+        没有发现明显变化。
+    </div>
+    {% endif %}
+</div>
+
 </body>
 </html>
 """

@@ -4,6 +4,7 @@ import os
 import re
 
 from flask import Blueprint, request, redirect, url_for, render_template_string, send_file
+from matplotlib.pylab import record
 from psycopg2.extras import RealDictCursor
 from datetime import date
 from openpyxl import Workbook
@@ -155,6 +156,32 @@ def get_next_receipt_no_by_category(category):
 
     return prefix + next_number
 
+def get_next_receipt_no(prefix="CHE"):
+
+    row = db_query("""
+        select receipt_no
+        from finance_records
+        where receipt_no like %s
+          and receipt_no is not null
+          and receipt_no <> ''
+        order by receipt_no desc
+        limit 1
+    """, (prefix + "%",), fetchone=True)
+
+    if not row or not row["receipt_no"]:
+        return f"{prefix}0000001"
+
+    last_no = row["receipt_no"].strip().upper()
+
+    m = re.match(rf"^({prefix})(\d+)$", last_no)
+
+    if not m:
+        return f"{prefix}0000001"
+
+    number = m.group(2)
+
+    return prefix + str(int(number) + 1).zfill(len(number))
+
 @finance_bp.route("/login", methods=["GET", "POST"])
 def finance_login():
 
@@ -210,14 +237,22 @@ def late_members():
             m.member_id,
             m.name,
             m.phone,
-            max(p.end_month) as paid_until
+            m.remark,
+            max(p.end_month) as paid_until,
+            max(p.payment_date) as last_payment_date
         from members m
         left join member_payments p
             on p.member_id = m.member_id
+        where coalesce(m.member_status, m.status, '') not in (
+            '停供',
+            '往生',
+            '已往生'
+        )
         group by
             m.member_id,
             m.name,
-            m.phone
+            m.phone,
+            m.remark
         having
             max(p.end_month) is not null
             and max(p.end_month) < date_trunc('month', current_date)
@@ -226,27 +261,173 @@ def late_members():
             m.member_id
     """, fetchall=True)
 
-    return render_template_string(FINANCE_STYLE + """
-<h1>⚠️ 月费迟付名单</h1>
+    today = date.today()
+    current_month_index = today.year * 12 + today.month
 
-<p>
-    共 {{ rows|length }} 人
-</p>
+    for r in rows:
+        paid_until = r["paid_until"]
+
+        paid_index = paid_until.year * 12 + paid_until.month
+
+        late_months = current_month_index - paid_index
+
+        r["late_months"] = late_months
+        r["reference_amount"] = late_months * 50
+
+        if late_months <= 2:
+            r["level"] = "green"
+        elif late_months <= 6:
+            r["level"] = "yellow"
+        else:
+            r["level"] = "red"
+
+        phone = (r["phone"] or "").strip()
+        phone_digits = "".join(ch for ch in phone if ch.isdigit())
+
+        if phone_digits.startswith("0"):
+            phone_digits = "6" + phone_digits
+
+        if phone_digits:
+            r["wa_link"] = "https://wa.me/" + phone_digits
+        else:
+            r["wa_link"] = ""
+
+    green_count = 0
+    yellow_count = 0
+    red_count = 0
+    total_amount = 0
+
+    for r in rows:
+        total_amount += r["reference_amount"]
+
+        if r["level"] == "green":
+            green_count += 1
+        elif r["level"] == "yellow":
+            yellow_count += 1
+        else:
+            red_count += 1
+
+    return render_template_string(FINANCE_STYLE + """
+<h1>🌿 月费迟付名单</h1>
+
+<div style="
+    display:flex;
+    gap:20px;
+    flex-wrap:wrap;
+    margin-bottom:25px;
+">
+
+    <div style="
+        padding:15px;
+        border:1px solid #ddd;
+        border-radius:8px;
+        background:#f8f9fa;
+    ">
+        <b>总人数</b><br>
+        {{ rows|length }} 人
+    </div>
+
+    <div style="
+        padding:15px;
+        border:1px solid #ddd;
+        border-radius:8px;
+        background:#f8f9fa;
+    ">
+        <b>参考金额</b><br>
+        RM {{ "{:,.2f}".format(total_amount) }}
+    </div>
+
+    <div style="
+        padding:15px;
+        border-radius:8px;
+        background:#e8f5e9;
+    ">
+        🟢 最近缴费<br>
+        {{ green_count }} 人
+    </div>
+
+    <div style="
+        padding:15px;
+        border-radius:8px;
+        background:#fff8e1;
+    ">
+        🟡 一段时间未缴费<br>
+        {{ yellow_count }} 人
+    </div>
+
+    <div style="
+        padding:15px;
+        border-radius:8px;
+        background:#ffebee;
+    ">
+        🔴 较久未缴费<br>
+        {{ red_count }} 人
+    </div>
+
+</div>
 
 <table border="1" cellpadding="8">
     <tr>
         <th>会员编号</th>
         <th>姓名</th>
         <th>电话</th>
-        <th>已缴费至</th>
+        <th>WhatsApp</th>
+        <th>已缴至</th>
+        <th>缴费间隔</th>
+        <th>参考金额</th>
+        <th>状态</th>
+        <th>最后付款日期</th>
+        <th>备注</th>
     </tr>
 
     {% for r in rows %}
-    <tr>
+
+    <tr
+    {% if r.level == "green" %}
+        style="background:#e8f5e9;"
+    {% elif r.level == "yellow" %}
+        style="background:#fff8e1;"
+    {% elif r.level == "red" %}
+        style="background:#ffebee;"
+    {% endif %}
+    >
         <td>{{ r.member_id }}</td>
         <td>{{ r.name }}</td>
-        <td>{{ r.phone or "-" }}</td>
+        <td>
+            {{ r.phone or "-" }}
+        </td>
+        <td>
+            {% if r.wa_link %}
+                <a href="{{ r.wa_link }}" target="_blank">打开</a>
+            {% else %}
+                -
+            {% endif %}
+        </td>
         <td>{{ r.paid_until.strftime("%Y-%m") }}</td>
+        <td>{{ r.late_months }} 个月</td>
+        <td>RM {{ "%.2f"|format(r.reference_amount) }}</td>
+        <td>
+                               
+        {% if r.level == "green" %}
+        🟢 最近缴费
+
+        {% elif r.level == "yellow" %}
+        🟡 一段时间未缴费
+
+        {% else %}
+        🔴 较久未缴费
+
+        {% endif %}
+
+        </td>
+        <td>
+            {% if r.last_payment_date %}
+                {{ r.last_payment_date }}
+            {% else %}
+                -
+            {% endif %}
+        </td>
+        <td>{{ r.remark or "-" }}</td>
     </tr>
     {% endfor %}
 </table>
@@ -256,8 +437,14 @@ def late_members():
         返回财政首页
     </a>
 </p>
-""", rows=rows)
-
+""",
+rows=rows,
+green_count=green_count,
+yellow_count=yellow_count,
+red_count=red_count,
+total_amount=total_amount
+)
+    
     
 @finance_bp.route("/records/<int:record_id>/delete", methods=["POST"])
 def delete_record(record_id):
@@ -268,6 +455,95 @@ def delete_record(record_id):
     """, (record_id,))
 
     return redirect(url_for("finance.records"))
+
+@finance_bp.route("/member/<member_id>/edit",
+                  methods=["GET","POST"])
+def edit_member(member_id):
+
+    member = db_query("""
+        select *
+        from members
+        where member_id = %s
+        limit 1
+    """, (member_id,), fetchone=True)
+
+    if not member:
+        return "Member not found"
+
+    if request.method == "POST":
+
+        status = request.form.get("status")
+
+        db_query("""
+            update members
+            set status = %s
+            where member_id = %s
+        """, (
+            status,
+            member_id
+        ))
+
+        return redirect(
+            url_for("finance.member_management")
+        )
+
+    return render_template_string(FINANCE_STYLE + """
+
+    <h1>{{ member.member_id }}</h1>
+
+    <p>姓名：{{ member.name }}</p>
+
+    <p>电话：{{ member.phone }}</p>
+
+    <form method="post">
+
+        <p>
+
+            状态：
+
+            <select name="status">
+
+                <option
+                {% if member.status == '在册' %}
+                selected
+                {% endif %}
+                >
+                在册
+                </option>
+
+                <option
+                {% if member.status == '停供' %}
+                selected
+                {% endif %}
+                >
+                停供
+                </option>
+
+                <option
+                {% if member.status == '往生' %}
+                selected
+                {% endif %}
+                >
+                往生
+                </option>
+
+            </select>
+
+        </p>
+
+        <button type="submit">
+            保存
+        </button>
+
+    </form>
+
+    <p>
+        <a href="{{ url_for('finance.member_management') }}">
+            返回
+        </a>
+    </p>
+
+    """, member=member)
 
 
 @finance_bp.route("/")
@@ -409,13 +685,13 @@ def finance_home():
         <div class="title">日常录入</div>
 
         <div class="grid">
-            <a class="card card-member" href="{{ url_for('finance.monthly_fee', branch='CHE') }}">
+            <a class="card card-member" href="{{ url_for('finance.monthly_fee_batch', branch='CHE') }}">
                 <h2>CHE 月费收款</h2>
                 <p>会员月费登记</p>
                 <p>收条：CHE0000001 起</p>
             </a>
 
-            <a class="card card-member" href="{{ url_for('finance.monthly_fee', branch='STW') }}">
+            <a class="card card-member" href="{{ url_for('finance.monthly_fee_batch', branch='STW') }}">
                 <h2>STW 月费收款</h2>
                 <p>会员月费登记</p>
                 <p>收条：STW0000001 起</p>
@@ -427,17 +703,17 @@ def finance_home():
                 <p>查看待确认记录</p>
             </a>
                                   
-            <a class="card card-income" href="{{ url_for('finance.normal_income', category='财布施') }}">
+            <a class="card card-income" href="{{ url_for('finance.income_batch', category='财布施') }}">
                 <h2>财布施</h2>
                 <p>普通布施收入记录</p>
             </a>
 
-            <a class="card card-income" href="{{ url_for('finance.normal_income', category='观音村') }}">
+            <a class="card card-income" href="{{ url_for('finance.income_batch', category='观音村') }}">
                 <h2>观音村</h2>
                 <p>观音村相关收入记录</p>
             </a>
 
-            <a class="card card-income" href="{{ url_for('finance.normal_income', category='膳食结缘') }}">
+            <a class="card card-income" href="{{ url_for('finance.income_batch', category='膳食结缘') }}">
                 <h2>膳食结缘</h2>
                 <p>膳食结缘收入记录</p>
             </a>
@@ -451,6 +727,14 @@ def finance_home():
             <a class="card card-report" href="{{ url_for('finance.dashboard') }}">
                 <h2>财政 Dashboard</h2>
                 <p>查看本月收入与支出统计</p>
+            </a>
+                                  
+            <a class="card card-member"
+                href="{{ url_for('finance.member_management') }}">
+
+                <h2>会员管理</h2>
+                <p>新增会员 / 会员状态管理</p>
+
             </a>
 
             <a class="card card-report" href="{{ url_for('finance.records') }}">
@@ -502,8 +786,130 @@ def finance_home():
     </div>
     """, today_ym=today_ym)
 
-@finance_bp.route("/monthly_fee/<branch>", methods=["GET", "POST"])
-def monthly_fee(branch):
+@finance_bp.route("/member_management")
+def member_management():
+
+    q = request.args.get("q", "").strip()
+
+    if q:
+        keyword = f"%{q}%"
+        rows = db_query("""
+            select
+                member_id,
+                name,
+                english_name,
+                phone,
+                coalesce(status,'在册') as status,
+                remark
+            from members
+            where
+                member_id ilike %s
+                or name ilike %s
+                or english_name ilike %s
+                or phone ilike %s
+            order by member_id
+            limit 300
+        """, (keyword, keyword, keyword, keyword), fetchall=True)
+    else:
+        rows = db_query("""
+            select
+                member_id,
+                name,
+                english_name,
+                phone,
+                coalesce(status,'在册') as status,
+                remark
+            from members
+            order by member_id
+            limit 300
+        """, fetchall=True)
+
+    return render_template_string(FINANCE_STYLE + """
+    <h1>会员管理</h1>
+
+    <p>
+        <a href="{{ url_for('finance.add_member') }}">
+            ➕ 新增会员
+        </a>
+    </p>
+
+    <form method="get">
+        <input
+            name="q"
+            value="{{ q }}"
+            placeholder="搜索：编号 / 姓名 / 英文名 / 电话"
+            style="width:420px;"
+        >
+        <button type="submit">搜索</button>
+        <a href="{{ url_for('finance.member_management') }}">清除</a>
+    </form>
+
+    <br>
+
+    <table border="1" cellpadding="8">
+        <tr>
+            <th>编号</th>
+            <th>姓名</th>
+            <th>英文名</th>
+            <th>电话</th>
+            <th>值班状态</th>
+            <th>备注</th>
+            <th>操作</th>
+        </tr>
+
+        {% for r in rows %}
+        <tr>
+            <td>{{ r.member_id }}</td>
+            <td>{{ r.name }}</td>
+            <td>{{ r.english_name or "-" }}</td>
+            <td>{{ r.phone or "-" }}</td>
+            <td>{{ r.status }}</td>
+            <td>{{ r.remark or "-" }}</td>
+            <td>
+
+            <a href="{{ url_for(
+                'finance.edit_member',
+                member_id=r.member_id
+            ) }}">
+                编辑
+            </a>
+
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+
+    <p>
+        <a href="{{ url_for('finance.finance_home') }}">
+            返回财政首页
+        </a>
+    </p>
+    """, rows=rows, q=q)
+
+@finance_bp.route("/member/<member_id>/status", methods=["POST"])
+def update_member_status(member_id):
+
+    status = request.form.get("status", "").strip()
+
+    allowed_status = ["在册", "停供", "往生"]
+
+    if status not in allowed_status:
+        return "Invalid status", 400
+
+    db_query("""
+        update members
+        set status = %s
+        where member_id = %s
+    """, (status, member_id))
+
+    return redirect(url_for("finance.member_management"))
+
+@finance_bp.route("/add_member", methods=["GET","POST"])
+def add_member():
+    return "Add Member Coming Soon"
+
+@finance_bp.route("/monthly_fee_batch/<branch>", methods=["GET", "POST"])
+def monthly_fee_batch(branch):
 
     branch = branch.upper()
 
@@ -511,34 +917,75 @@ def monthly_fee(branch):
         return "Invalid branch", 400
 
     message = ""
-    member = None
-    paid_until = None
-    raw_member_id = ""
+    preview_rows = []
+    raw_text = request.form.get("raw_text", "").strip()
+    next_receipt_no = get_next_receipt_no(branch)
+    next_receipt_raw = next_receipt_no.replace(branch, "", 1)
+    receipt_start_raw = request.form.get("receipt_start", "").strip().upper()
 
-    default_month_from = ""
-    default_month_to = ""
-    next_receipt_no = ""
+    if not receipt_start_raw:
+        receipt_start_raw = next_receipt_raw
 
-    if request.method == "POST":
+    if receipt_start_raw.isdigit():
+        receipt_start = branch + str(int(receipt_start_raw)).zfill(7)
+    else:
+        receipt_start = receipt_start_raw
+    receipt_date = request.form.get("receipt_date") or date.today().isoformat()
+    payment_method = request.form.get("payment_method", "现金")
 
-        action = request.form.get("action", "save")
-        raw_member_id = request.form.get("member_id", "").strip()
+    if payment_method == "银行过账":
+        payment_date = request.form.get("payment_date") or receipt_date
+    else:
+        payment_date = receipt_date
+    payment_method = request.form.get("payment_method", "现金")
+    action = request.form.get("action", "")
+    default_amount = money(request.form.get("default_amount") or 50)
 
-        if raw_member_id.isdigit():
-            member_id = f"{branch}-{int(raw_member_id)}"
-        else:
-            member_id = normalize_member_id(raw_member_id, default_branch=branch)
+    def make_receipt_no(start_no, index):
+        m = re.match(r"^([A-Z]+)(\d+)$", start_no)
+        if not m:
+            return ""
+        prefix = m.group(1)
+        num = m.group(2)
+        return prefix + str(int(num) + index).zfill(len(num))
 
-        member = db_query("""
-            select *
-            from members
-            where member_id = %s
-            limit 1
-        """, (member_id,), fetchone=True)
+    def build_preview():
+        rows = []
+        lines = raw_text.splitlines()
 
-        if not member:
-            message = "找不到这个会员编号"
-        else:
+        for idx, line in enumerate(lines):
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split()
+
+            raw_member_id = parts[0].strip()
+
+            if len(parts) >= 2:
+                amount = money(parts[1])
+            else:
+                amount = default_amount
+
+            if raw_member_id.isdigit():
+                member_id = f"{branch}-{int(raw_member_id)}"
+            else:
+                member_id = normalize_member_id(raw_member_id, default_branch=branch)
+
+            member = db_query("""
+                select *
+                from members
+                where member_id = %s
+                limit 1
+            """, (member_id,), fetchone=True)
+
+            if not member:
+                rows.append({
+                    "error": f"找不到会员：{raw_member_id}",
+                    "raw": line
+                })
+                continue
+
             paid = db_query("""
                 select max(end_month) as paid_until
                 from member_payments
@@ -546,223 +993,328 @@ def monthly_fee(branch):
             """, (member_id,), fetchone=True)
 
             paid_until_date = paid["paid_until"] if paid else None
-            paid_until = date_to_ym(paid_until_date)
+            month_from = next_month_ym(paid_until_date)
 
-            default_month_from = next_month_ym(paid_until_date)
-            default_month_to = default_month_from
+            month_count = max(1, round(amount / 50))
+            month_to = add_months_ym(month_from, month_count - 1)
 
-            last_receipt = db_query("""
-                select receipt_no
+            receipt_no = make_receipt_no(receipt_start, len(rows))
+
+            existing = db_query("""
+                select id
                 from finance_records
-                where category = '月费'
-                and receipt_no like %s
-                order by receipt_no desc
+                where receipt_no = %s
                 limit 1
-            """, (branch + "%",), fetchone=True)
+            """, (receipt_no,), fetchone=True)
 
-            if last_receipt and last_receipt["receipt_no"]:
-                old_no = last_receipt["receipt_no"]
-                prefix = old_no[:3]
-                number = int(old_no[3:])
-                next_receipt_no = prefix + str(number + 1).zfill(len(old_no) - 3)
-            else:
-                next_receipt_no = f"{branch}0000001"
+            rows.append({
+                "error": "收条已存在" if existing else "",
+                "receipt_no": receipt_no,
+                "member_id": member["member_id"],
+                "name": member.get("姓名") or member.get("name"),
+                "phone": member.get("电话号码") or member.get("phone"),
+                "amount": amount,
+                "month_from": month_from,
+                "month_to": month_to,
+                "month_count": month_count
+            })
 
-            if action == "save":
-                amount = money(request.form.get("amount"))
-                receipt_no = request.form.get("receipt_no", "").strip().upper()
-                payment_method = request.form.get("payment_method", "现金")
-                month_from = request.form.get("month_from", "").strip()
-                month_to = request.form.get("month_to", "").strip()
-                remarks = request.form.get("remarks", "").strip()
+        return rows
 
-                if not receipt_no.startswith(branch):
-                    message = f"收条号码必须以 {branch} 开头"
-                else:
-                    months = (
-                        (int(month_to[:4]) * 12 + int(month_to[5:7]))
-                        -
-                        (int(month_from[:4]) * 12 + int(month_from[5:7]))
-                        + 1
-                    )
+    if request.method == "POST":
 
-                    month_from_db = month_from + "-01" if month_from and len(month_from) == 7 else month_from
-                    month_to_db = month_to + "-01" if month_to and len(month_to) == 7 else month_to
+        if not receipt_start:
+            message = "请填写收条开始号码"
 
-                    existing = db_query("""
-                        select id
-                        from member_payments
-                        where receipt_no = %s
-                        limit 1
-                    """, (receipt_no,), fetchone=True)
+        elif not re.match(rf"^{branch}\d+$", receipt_start):
+            message = f"收条号码格式错误，例如：{branch}0001501，或只输入 1501"
 
-                    if existing:
-                        message = "这个收条号码已经记录过了，请检查是否重复输入"
-                    else:
-                        db_query("""
-                            insert into finance_records
-                            (record_type, fund_account, record_date, category, receipt_no, member_id, name, phone,
-                             amount, payment_method, month_from, month_to, remarks)
-                            values
-                            (%s, %s, %s, '月费', %s, %s, %s, %s,
-                             %s, %s, %s, %s, %s)
-                        """, (
-                            "income",
-                            get_fund_account("月费"),
-                            date.today(),
+        elif not raw_text:
+            message = "请粘贴批量月费资料"
+
+        else:
+            preview_rows = build_preview()
+
+            has_error = any(r.get("error") for r in preview_rows)
+
+            if action == "confirm" and not has_error:
+
+                for r in preview_rows:
+
+                    month_from_db = r["month_from"] + "-01"
+                    month_to_db = r["month_to"] + "-01"
+
+                    db_query("""
+                        insert into finance_records
+                        (
+                            record_type,
+                            fund_account,
+                            record_date,
+                            receipt_date,
+                            category,
                             receipt_no,
-                            member["member_id"],
-                            member.get("姓名") or member.get("name"),
-                            member.get("电话号码") or member.get("phone"),
+                            member_id,
+                            name,
+                            phone,
                             amount,
                             payment_method,
                             month_from,
                             month_to,
                             remarks
-                        ))
+                        )
+                        values
+                        (
+                            %s, %s, %s, %s,
+                            '月费',
+                            %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s
+                        )
+                    """, (
+                        "income",
+                        get_fund_account("月费"),
+                        payment_date,
+                        receipt_date,
+                        r["receipt_no"],
+                        r["member_id"],
+                        r["name"],
+                        r["phone"],
+                        r["amount"],
+                        payment_method,
+                        r["month_from"],
+                        r["month_to"],
+                        "批量月费录入"
+                    ))
 
-                        db_query("""
-                            insert into member_payments
-                            (
-                                payment_date,
-                                member_id,
-                                name,
-                                receipt_no,
-                                amount,
-                                start_month,
-                                end_month,
-                                month_count
-                            )
-                            values
-                            (
-                                %s, %s, %s, %s, %s, %s, %s, %s
-                            )
-                        """, (
-                            date.today(),
-                            member["member_id"],
-                            member.get("姓名") or member.get("name"),
+                    db_query("""
+                        insert into member_payments
+                        (
+                            payment_date,
+                            receipt_date,
+                            member_id,
+                            name,
                             receipt_no,
                             amount,
-                            month_from_db,
-                            month_to_db,
-                            months
-                        ))
+                            start_month,
+                            end_month,
+                            month_count
+                        )
+                        values
+                        (
+                            %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s
+                        )
+                    """, (
+                        payment_date,
+                        receipt_date,
+                        r["member_id"],
+                        r["name"],
+                        r["receipt_no"],
+                        r["amount"],
+                        month_from_db,
+                        month_to_db,
+                        r["month_count"]
+                    ))
 
-                        return redirect(url_for("finance.records"))
+                return redirect(url_for("finance.records"))
 
     return render_template_string(FINANCE_STYLE + """
-    <h1>{{ branch }} 月费收款</h1>
+<h1>{{ branch }} 批量月费录入</h1>
 
-    {% if message %}
-        <p style="color:red;">{{ message }}</p>
-    {% endif %}
+{% if message %}
+<p style="color:red;">{{ message }}</p>
+{% endif %}
 
-    <form method="post">
-        <input type="hidden" name="action" value="check">
+<form method="post">
 
         <p>
-            月费编号：
-            <input name="member_id" value="{{ raw_member_id }}" placeholder="例如 {{ branch }}-108 / 108" required>
-            <button type="submit">查询会员</button>
+            收条开始号码：
+            <b>{{ branch }}</b>
+
+            <input
+                name="receipt_start"
+                value="{{ receipt_start_raw }}"
+                placeholder="例如 1501"
+                required
+            >
+
+            <br>
+
+            <small style="color:#666;">
+                系统建议下一张收条：{{ next_receipt_no }}
+            </small>
         </p>
-    </form>
+    </p>
 
-    {% if member %}
-        <hr>
+    <p>
+        开收条日期：
+        <input name="receipt_date" type="date" value="{{ receipt_date }}" required>
+    </p>
 
-        <h2>会员资料</h2>
+    <div id="payment_date_box" style="display:none;">
 
-        <p>编号：{{ member.member_id }}</p>
-        <p>姓名：{{ member.get("姓名") or member.get("name") }}</p>
-        <p>电话：{{ member.get("电话号码") or member.get("phone") }}</p>
-        <p>目前已缴费至：{{ paid_until or "没有记录" }}</p>
+        <p>
+            付款日期：
+            <input name="payment_date" type="date" value="{{ payment_date }}">
+            <small style="color:#666;">
+                只有银行过账日期和开收条日期不一样时才需要改。
+            </small>
+        </p>
 
-        <hr>
+    </div>
 
-        <form method="post">
-            <input type="hidden" name="action" value="save">
-            <input type="hidden" name="member_id" value="{{ member.member_id }}">
+    <p>
+        付款方式：
+        <select name="payment_method" id="payment_method" onchange="togglePaymentDate()">
+            <option {% if payment_method == '现金' %}selected{% endif %}>现金</option>
+            <option {% if payment_method == '银行过账' %}selected{% endif %}>银行过账</option>
+            <option {% if payment_method == '支票' %}selected{% endif %}>支票</option>
+        </select>
+    </p>
+                                  
+    <p>
+        默认月费 RM：
+        <input name="default_amount" type="number" step="50.00" value="{{ default_amount }}" required>
+        <small style="color:#666;">只输入会员编号时，系统会自动用这个金额。</small>
+    </p>
 
-            <p>
-                收条号码：
-                <input name="receipt_no" value="{{ next_receipt_no }}" required>
-                <br>
-                <small style="color:#666;">
-                    系统会自动建议号码；如果换新收条簿，可以手动修改。
-                </small>
-            </p>
+    <p>批量输入：</p>
 
-            <p>金额 RM：<input name="amount" type="number" step="50" min="0" required></p>
+    <textarea
+        name="raw_text"
+        rows="12"
+        style="width:100%;max-width:700px;"
+        placeholder="例如：
+208
+160
+69
+188 100
+205 300"
+        required
+    >{{ raw_text }}</textarea>
 
-            <p>
-                开始月份：
-                <input id="month_from" name="month_from" value="{{ default_month_from }}" required>
-            </p>
+    <br><br>
 
-            <p>
-                缴费至：
-                <input id="month_to" name="month_to" value="{{ default_month_to }}" required>
-            </p>
+    <button type="submit" name="action" value="preview">
+        预览
+    </button>
 
-            <p id="month_hint" style="color:blue;"></p>
-
-            <p>付款方式：
-                <select name="payment_method">
-                    <option>现金</option>
-                    <option>银行过账</option>
-                    <option>支票</option>
-                </select>
-            </p>
-
-            <p>备注：<input name="remarks"></p>
-
-            <button type="submit">保存月费</button>
-        </form>
-
-        <script>
-        function addMonthsYM(ym, months) {
-            let parts = ym.split("-");
-            let y = parseInt(parts[0]);
-            let m = parseInt(parts[1]);
-
-            m += months;
-            y += Math.floor((m - 1) / 12);
-            m = ((m - 1) % 12) + 1;
-
-            return y.toString().padStart(4, "0") + "-" + m.toString().padStart(2, "0");
-        }
-
-        function updateMonthTo() {
-            let amountInput = document.querySelector('input[name="amount"]');
-            let fromInput = document.getElementById("month_from");
-            let toInput = document.getElementById("month_to");
-            let hint = document.getElementById("month_hint");
-
-            let amount = parseFloat(amountInput.value || "0");
-            let months = Math.max(1, Math.round(amount / 50));
-
-            if (fromInput.value && amount > 0) {
-                toInput.value = addMonthsYM(fromInput.value, months - 1);
-                hint.innerText = "系统判断：RM" + amount + " = " + months + "个月";
-            }
-        }
-
-        document.querySelector('input[name="amount"]').addEventListener("input", updateMonthTo);
-        document.getElementById("month_from").addEventListener("input", updateMonthTo);
-        </script>
+    {% if preview_rows %}
+        <button type="submit" name="action" value="confirm"
+            onclick="return confirm('确定全部入账？');">
+            确认全部入账
+        </button>
     {% endif %}
 
-    <p><a href="{{ url_for('finance.finance_home') }}">返回财政首页</a></p>
-    """,
+</form>
+
+{% if preview_rows %}
+<hr>
+
+<h2>预览</h2>
+
+<table border="1" cellpadding="8">
+    <tr>
+        <th>收条</th>
+        <th>编号</th>
+        <th>姓名</th>
+        <th>金额</th>
+        <th>开始月份</th>
+        <th>缴费至</th>
+        <th>状态</th>
+    </tr>
+
+    {% for r in preview_rows %}
+    <tr {% if r.error %}style="background:#ffd6d6;"{% endif %}>
+        <td>{{ r.receipt_no or "-" }}</td>
+        <td>{{ r.member_id or "-" }}</td>
+        <td>{{ r.name or "-" }}</td>
+        <td>
+            {% if r.amount %}
+                RM {{ "%.2f"|format(r.amount) }}
+            {% else %}
+                -
+            {% endif %}
+        </td>
+        <td>{{ r.month_from or "-" }}</td>
+        <td>{{ r.month_to or "-" }}</td>
+        <td>
+            {% if r.error %}
+                ❌ {{ r.error }}
+            {% else %}
+                ✅ 可以入账
+            {% endif %}
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+{% endif %}
+                                  
+<script>
+function togglePaymentDate(){
+    let method = document.getElementById("payment_method").value;
+    let box = document.getElementById("payment_date_box");
+
+    if(method === "银行过账"){
+        box.style.display = "block";
+    }else{
+        box.style.display = "none";
+    }
+}
+
+togglePaymentDate();
+</script>
+
+<p>
+    <a href="{{ url_for('finance.finance_home') }}">返回财政首页</a>
+</p>
+""",
     branch=branch,
     message=message,
-    member=member,
-    paid_until=paid_until,
-    raw_member_id=raw_member_id,
-    default_month_from=default_month_from,
-    default_month_to=default_month_to,
-    next_receipt_no=next_receipt_no
+    raw_text=raw_text,
+    receipt_start=receipt_start,
+    receipt_start_raw=receipt_start_raw,
+    next_receipt_no=next_receipt_no,
+    receipt_date=receipt_date,
+    payment_date=payment_date,
+    payment_method=payment_method,
+    default_amount=default_amount,
+    preview_rows=preview_rows
     )
+
+def get_recent_donors(category=None):
+    if category:
+        return db_query("""
+            select
+                name,
+                max(phone) as phone,
+                count(*) as times,
+                max(record_date) as last_date
+            from finance_records
+            where record_type = 'income'
+              and category = %s
+              and coalesce(status, 'confirmed') <> 'cancelled'
+              and coalesce(name, '') <> ''
+              and category <> '月费'
+            group by name
+            order by max(record_date) desc, count(*) desc
+            limit 100
+        """, (category,), fetchall=True)
+
+    return db_query("""
+        select
+            name,
+            max(phone) as phone,
+            count(*) as times,
+            max(record_date) as last_date
+        from finance_records
+        where record_type = 'income'
+          and coalesce(status, 'confirmed') <> 'cancelled'
+          and coalesce(name, '') <> ''
+          and category <> '月费'
+        group by name
+        order by max(record_date) desc, count(*) desc
+        limit 100
+    """, fetchall=True)
     
 
 @finance_bp.route("/income/<category>", methods=["GET", "POST"])
@@ -795,6 +1347,9 @@ def normal_income(category):
     if request.method == "POST":
 
         receipt_no = request.form.get("receipt_no", "").strip().upper()
+        receipt_date = request.form.get("receipt_date") or date.today()
+        record_date = request.form.get("record_date") or date.today()
+
         name = request.form.get("name", "").strip()
         phone = request.form.get("phone", "").strip()
         amount = money(request.form.get("amount"))
@@ -803,6 +1358,10 @@ def normal_income(category):
 
         if not receipt_no.startswith("CHE"):
             message = "收条号码必须以 CHE 开头"
+
+        elif amount <= 0:
+            message = "金额必须大过 0"
+
         else:
             existing = db_query("""
                 select id
@@ -820,6 +1379,7 @@ def normal_income(category):
                         record_type,
                         fund_account,
                         record_date,
+                        receipt_date,
                         category,
                         receipt_no,
                         name,
@@ -831,12 +1391,13 @@ def normal_income(category):
                     values
                     (
                         %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s
                     )
                 """, (
                     "income",
                     get_fund_account(category),
-                    date.today(),
+                    record_date,
+                    receipt_date,
                     category,
                     receipt_no,
                     name,
@@ -871,6 +1432,16 @@ def normal_income(category):
         </p>
 
         <p>
+            开收条日期：
+            <input name="receipt_date" type="date" value="{{ today }}" required>
+        </p>
+
+        <p>
+            付款日期：
+            <input name="record_date" type="date" value="{{ today }}" required>
+        </p>
+
+        <p>
             姓名：
             <input name="name">
         </p>
@@ -885,7 +1456,7 @@ def normal_income(category):
             <input
                 name="amount"
                 type="number"
-                step="50"
+                step="1.00"
                 min="0"
                 value="50"
                 required
@@ -917,11 +1488,447 @@ def normal_income(category):
             返回财政首页
         </a>
     </p>
+                                  
+    <script>
+
+    function addDonor(name){
+
+        let textarea = document.querySelector(
+            'textarea[name="raw_text"]'
+        );
+
+        if(textarea.value.trim() === ""){
+            textarea.value = name;
+        }else{
+            textarea.value += "\\n" + name;
+        }
+
+        textarea.focus();
+    }
+
+    </script>
 
     """,
     category=category,
     next_receipt_no=next_receipt_no,
-    message=message)
+    message=message,
+    today=date.today().isoformat()
+    )
+
+@finance_bp.route("/income_batch/<category>", methods=["GET", "POST"])
+def income_batch(category):
+
+    allowed_categories = ["财布施", "观音村", "膳食结缘"]
+
+    if category not in allowed_categories:
+        return "Invalid category", 400
+
+    message = ""
+    preview_rows = []
+
+    raw_text = request.form.get("raw_text", "").strip()
+    next_receipt_no = get_next_receipt_no("CHE")
+    next_receipt_raw = next_receipt_no.replace("CHE", "", 1)
+    receipt_start_raw = request.form.get("receipt_start", "").strip().upper()
+
+    if not receipt_start_raw:
+        receipt_start_raw = next_receipt_raw
+
+    if receipt_start_raw.isdigit():
+        receipt_start = "CHE" + str(int(receipt_start_raw)).zfill(7)
+    else:
+        receipt_start = receipt_start_raw
+
+    receipt_date = request.form.get("receipt_date") or date.today().isoformat()
+    record_date = receipt_date
+    payment_method = request.form.get("payment_method", "现金")
+    default_amount = money(request.form.get("default_amount") or 50)
+    remarks = request.form.get("remarks", "").strip()
+    action = request.form.get("action", "")
+
+    def make_receipt_no(start_no, index):
+        m = re.match(r"^([A-Z]+)(\d+)$", start_no)
+        if not m:
+            return ""
+
+        prefix = m.group(1)
+        num = m.group(2)
+
+        return prefix + str(int(num) + index).zfill(len(num))
+
+    def find_donor_info(keyword):
+
+        keyword = keyword.strip()
+
+        # 1. 如果是数字，先当会员编号找
+        if keyword.isdigit():
+            member_id = f"CHE-{int(keyword)}"
+
+            row = db_query("""
+                select member_id, name, phone
+                from members
+                where member_id = %s
+                limit 1
+            """, (member_id,), fetchone=True)
+
+            if row:
+                return {
+                    "name": row["name"],
+                    "phone": row["phone"],
+                    "source": "会员"
+                }
+
+        # 2. 用姓名找 members
+        row = db_query("""
+            select member_id, name, phone
+            from members
+            where name ilike %s
+            limit 1
+        """, (f"%{keyword}%",), fetchone=True)
+
+        if row:
+            return {
+                "name": row["name"],
+                "phone": row["phone"],
+                "source": "会员"
+            }
+
+        # 3. 用姓名找义工 volunteers
+        row = db_query("""
+            select name, phone
+            from volunteers
+            where name ilike %s
+            limit 1
+        """, (f"%{keyword}%",), fetchone=True)
+
+        if row:
+            return {
+                "name": row["name"],
+                "phone": row["phone"],
+                "source": "义工"
+            }
+
+        # 4. 最后找历史捐赠者
+        row = db_query("""
+            select name, phone
+            from finance_records
+            where category <> '月费'
+            and coalesce(status, 'confirmed') <> 'cancelled'
+            and name ilike %s
+            and coalesce(name, '') <> ''
+            order by record_date desc, id desc
+            limit 1
+        """, (f"%{keyword}%",), fetchone=True)
+
+        if row:
+            return {
+                "name": row["name"],
+                "phone": row["phone"],
+                "source": "历史捐赠"
+            }
+
+        return {
+            "name": keyword,
+            "phone": "",
+            "source": "手动"
+        }
+
+    def build_preview():
+        rows = []
+        valid_index = 0
+
+        for line in raw_text.splitlines():
+            line = line.strip()
+
+            if not line:
+                continue
+
+            parts = line.split()
+
+            if len(parts) >= 2:
+                amount = money(parts[-1])
+                name = " ".join(parts[:-1]).strip()
+            else:
+                amount = default_amount
+                name = parts[0].strip()
+
+            receipt_no = make_receipt_no(receipt_start, valid_index)
+            valid_index += 1
+
+            donor = find_donor_info(name)
+
+            name = donor["name"]
+            phone = donor["phone"]
+            source = donor["source"]
+
+            existing = db_query("""
+                select id
+                from finance_records
+                where receipt_no = %s
+                limit 1
+            """, (receipt_no,), fetchone=True)
+
+            error = ""
+
+            if not name:
+                error = "姓名不能为空"
+            elif amount <= 0:
+                error = "金额必须大过 0"
+            elif existing:
+                error = "收条已存在"
+
+            rows.append({
+                "error": error,
+                "receipt_no": receipt_no,
+                "name": name,
+                "phone": phone,
+                "amount": amount,
+                "source": source,
+            })
+
+        return rows
+
+    recent_donors = db_query("""
+        select
+            name,
+            max(phone) as phone,
+            count(*) as times,
+            max(record_date) as last_date
+        from finance_records
+        where category <> '月费'
+          and coalesce(status, 'confirmed') <> 'cancelled'
+          and coalesce(name, '') <> ''
+        group by name
+        order by max(record_date) desc, count(*) desc
+        limit 50
+    """, fetchall=True)
+
+    if request.method == "POST":
+
+        if not receipt_start:
+            message = "请填写收条开始号码"
+
+        elif not re.match(r"^CHE\d+$", receipt_start):
+            message = "收条号码格式错误，例如：CHE0001501，或只输入 1501"
+
+        elif not raw_text:
+            message = "请粘贴批量资料"
+
+        else:
+            preview_rows = build_preview()
+            has_error = any(r.get("error") for r in preview_rows)
+
+            if action == "confirm" and not has_error:
+
+                for r in preview_rows:
+
+                    db_query("""
+                        insert into finance_records
+                        (
+                            record_type,
+                            fund_account,
+                            record_date,
+                            receipt_date,
+                            category,
+                            receipt_no,
+                            name,
+                            phone,
+                            amount,
+                            payment_method,
+                            remarks
+                        )
+                        values
+                        (
+                            %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s
+                        )
+                    """, (
+                        "income",
+                        get_fund_account(category),
+                        record_date,
+                        receipt_date,
+                        category,
+                        r["receipt_no"],
+                        r["name"],
+                        r["phone"],
+                        r["amount"],
+                        payment_method,
+                        remarks or "批量布施录入"
+                    ))
+
+                return redirect(url_for("finance.records"))
+
+    return render_template_string(FINANCE_STYLE + """
+<h1>{{ category }} 批量录入</h1>
+
+{% if message %}
+<p style="color:red;">{{ message }}</p>
+{% endif %}
+
+<form method="post">
+
+    <p>
+        收条开始号码：
+        <b>CHE</b>
+
+        <input
+            name="receipt_start"
+            value="{{ receipt_start_raw }}"
+            placeholder="例如 1501"
+            required
+        >
+
+        <br>
+
+        <small style="color:#666;">
+            目前建议下一张收条：{{ next_receipt_no }}
+        </small>
+    </p>
+
+    <p>
+        开收条日期：
+        <input name="receipt_date" type="date" value="{{ receipt_date }}" required>
+    </p>
+
+    <p>
+        默认金额 RM：
+        <input name="default_amount" type="number" step="1.00" value="{{ default_amount }}" required>
+        <small style="color:#666;">只输入姓名时，系统会用这个金额。</small>
+    </p>
+
+    <p>
+        付款方式：
+        <select name="payment_method">
+            <option {% if payment_method == '现金' %}selected{% endif %}>现金</option>
+            <option {% if payment_method == '银行过账' %}selected{% endif %}>银行过账</option>
+            <option {% if payment_method == '支票' %}selected{% endif %}>支票</option>
+        </select>
+    </p>
+
+    <p>
+        备注：
+        <input name="remarks" value="{{ remarks }}" placeholder="例如 观音诞 / 法会 / 普通布施">
+    </p>
+
+    <p>批量输入：</p>
+
+    <textarea
+        name="raw_text"
+        rows="12"
+        style="width:100%;max-width:750px;"
+        placeholder="例如：
+王小明
+李大华
+陈美玲 100
+郑依颖 30"
+        required
+    >{{ raw_text }}</textarea>
+
+    <br><br>
+
+    <button type="submit" name="action" value="preview">
+        预览
+    </button>
+
+    {% if preview_rows %}
+        <button type="submit" name="action" value="confirm"
+            onclick="return confirm('确定全部入账？');">
+            确认全部入账
+        </button>
+    {% endif %}
+
+</form>
+
+{% if preview_rows %}
+<hr>
+
+<h2>预览</h2>
+
+<table border="1" cellpadding="8">
+    <tr>
+        <th>收条</th>
+        <th>姓名</th>
+        <th>电话</th>
+        <th>来源</th>
+        <th>金额</th>
+        <th>状态</th>
+    </tr>
+
+    {% for r in preview_rows %}
+    <tr {% if r.error %}style="background:#ffd6d6;"{% endif %}>
+        <td>{{ r.receipt_no or "-" }}</td>
+        <td>{{ r.name or "-" }}</td>
+        <td>{{ r.phone or "-" }}</td>
+        <td>{{ r.source }}</td>
+        <td>RM {{ "%.2f"|format(r.amount or 0) }}</td>
+        <td>
+            {% if r.error %}
+                ❌ {{ r.error }}
+            {% else %}
+                ✅ 可以入账
+            {% endif %}
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+{% endif %}
+
+<hr>
+
+<h2>最近捐赠者</h2>
+                                  
+<div style="margin-top:10px;">
+
+{% for d in recent_donors %}
+<button
+    type="button"
+    onclick="addDonor('{{ d.name }}')"
+    style="
+        margin:3px;
+        padding:6px 10px;
+        cursor:pointer;
+    "
+>
+    {{ d.name }}
+</button>
+{% endfor %}
+
+</div>
+
+<table border="1" cellpadding="8">
+    <tr>
+        <th>姓名</th>
+        <th>电话</th>
+        <th>次数</th>
+        <th>最后日期</th>
+    </tr>
+
+    {% for d in recent_donors %}
+    <tr>
+        <td>{{ d.name }}</td>
+        <td>{{ d.phone or "-" }}</td>
+        <td>{{ d.times }}</td>
+        <td>{{ d.last_date }}</td>
+    </tr>
+    {% endfor %}
+</table>
+
+<p>
+    <a href="{{ url_for('finance.finance_home') }}">返回财政首页</a>
+</p>
+""",
+    category=category,
+    message=message,
+    raw_text=raw_text,
+    receipt_start_raw=receipt_start_raw,
+    next_receipt_no=next_receipt_no,
+    receipt_date=receipt_date,
+    payment_method=payment_method,
+    default_amount=default_amount,
+    remarks=remarks,
+    preview_rows=preview_rows,
+    recent_donors=recent_donors
+    )
 
 @finance_bp.route("/bank_pending/<int:pending_id>/delete", methods=["POST"])
 def delete_bank_pending(pending_id):
@@ -941,8 +1948,6 @@ def bank_pending():
 
     if request.method == "POST":
 
-        import re
-
         raw_text = request.form.get("raw_text", "").strip()
 
         member_id_raw = request.form.get("member_id", "").strip()
@@ -957,16 +1962,13 @@ def bank_pending():
         category = request.form.get("category", "月费")
         remarks = request.form.get("remarks", "").strip()
 
-        # 如果有粘贴 receipt 文字，先尝试自动解析
         if raw_text:
 
-            # 抓会员编号：CHE-108 / CHE108 / STW-108 / STW108
             member_match = re.search(r"(CHE|STW)[-\s]?\d+", raw_text, re.IGNORECASE)
 
             if member_match and not member_id_raw:
                 member_id_raw = member_match.group(0).replace(" ", "-").upper()
 
-            # 抓金额：RM50 / RM 50.00 / MYR50.00
             amount_match = re.search(
                 r"(RM|MYR)\s*([0-9]+(?:\.[0-9]{1,2})?)",
                 raw_text,
@@ -976,7 +1978,6 @@ def bank_pending():
             if amount_match and not amount_raw:
                 amount_raw = amount_match.group(2)
 
-            # 抓 Reference
             ref_match = re.search(
                 r"(Reference|Ref|Transaction|DuitNow)\s*(No|ID|Number)?[:\s#-]*([A-Za-z0-9\-]+)",
                 raw_text,
@@ -986,21 +1987,16 @@ def bank_pending():
             if ref_match and not bank_ref:
                 bank_ref = ref_match.group(3)
 
-            # 抓银行名
             for b in ["Maybank", "Public Bank", "CIMB", "Hong Leong", "RHB", "AmBank", "Bank Islam", "BSN"]:
                 if b.lower() in raw_text.lower() and not bank_name:
                     bank_name = b
                     break
 
-            # 如果备注为空，把原始 receipt 放进备注，方便以后追查
             if not remarks:
                 remarks = raw_text[:1000]
 
         member_id = normalize_member_id(member_id_raw) if member_id_raw else ""
-
         amount = money(amount_raw)
-
-        member = None
 
         if category == "月费" and member_id:
             member = db_query("""
@@ -1017,16 +2013,31 @@ def bank_pending():
             select id
             from bank_pending_records
             where bank_ref = %s
-            and coalesce(bank_ref,'') <> ''
+              and coalesce(bank_ref,'') <> ''
             limit 1
         """, (bank_ref,), fetchone=True)
 
         if existing_ref:
             message = "这个 Bank Reference 已经存在，请检查是否重复导入"
-
-        db_query("""
-            insert into bank_pending_records
-            (
+        else:
+            db_query("""
+                insert into bank_pending_records
+                (
+                    member_id,
+                    name,
+                    amount,
+                    payment_date,
+                    bank_ref,
+                    bank_name,
+                    category,
+                    remarks
+                )
+                values
+                (
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s
+                )
+            """, (
                 member_id,
                 name,
                 amount,
@@ -1035,24 +2046,9 @@ def bank_pending():
                 bank_name,
                 category,
                 remarks
-            )
-            values
-            (
-                %s, %s, %s, %s,
-                %s, %s, %s, %s
-            )
-        """, (
-            member_id,
-            name,
-            amount,
-            payment_date,
-            bank_ref,
-            bank_name,
-            category,
-            remarks
-        ))
+            ))
 
-        return redirect(url_for("finance.bank_pending"))
+            return redirect(url_for("finance.bank_pending"))
     
     summary = db_query("""
         select
@@ -1090,9 +2086,7 @@ def bank_pending():
         </select>
     </p>
 
-    <p>
-        粘贴 WhatsApp / 银行 Receipt 文字：
-    </p>
+    <p>粘贴 WhatsApp / 银行 Receipt 文字：</p>
 
     <textarea
         name="raw_text"
@@ -1108,7 +2102,6 @@ def bank_pending():
     <p>
         会员编号：
         <input name="member_id" placeholder="例如 CHE-108 / STW-108 / 108">
-        <small>月费建议填写会员编号，系统会自动找会员姓名。</small>
     </p>
 
     <p>
@@ -1118,12 +2111,12 @@ def bank_pending():
 
     <p>
         金额 RM：
-        <input name="amount" type="number" step="50.00" min="50.00" placeholder="例如 50.00">
+        <input name="amount" type="number" step="1.00" min="0" placeholder="例如 50.00">
     </p>
 
     <p>
         付款日期：
-        <input name="payment_date" type="date">
+        <input name="payment_date" type="date" value="{{ today }}">
     </p>
 
     <p>
@@ -1143,7 +2136,6 @@ def bank_pending():
             <option>AmBank</option>
             <option>Bank Islam</option>
         </select>
-        
     </p>
 
     <p>
@@ -1160,13 +2152,9 @@ def bank_pending():
 <h2>待确认列表</h2>
 
 <p style="font-size:16px;">
-    待确认笔数：
-    <b>{{ summary.cnt }}</b>
-
+    待确认笔数：<b>{{ summary.cnt }}</b>
     &nbsp;&nbsp;&nbsp;
-
-    待确认总额：
-    <b>RM {{ "%.2f"|format(summary.total) }}</b>
+    待确认总额：<b>RM {{ "%.2f"|format(summary.total) }}</b>
 </p>
 
 <table border="1" cellpadding="6">
@@ -1179,7 +2167,8 @@ def bank_pending():
         <th>Reference</th>
         <th>银行</th>
         <th>备注</th>
-        <th>操作</th>
+        <th>确认入账</th>
+        <th>删除</th>
     </tr>
 
     {% for r in rows %}
@@ -1194,20 +2183,31 @@ def bank_pending():
         <td>{{ r.bank_ref or "-" }}</td>
         <td>{{ r.bank_name or "-" }}</td>
         <td>{{ r.remarks or "-" }}</td>
+
         <td>
             <form
                 method="post"
                 action="{{ url_for('finance.confirm_bank', pending_id=r.id) }}"
-                style="display:inline;"
                 onsubmit="return confirm('确定确认入账？');"
             >
+                <p>
+                    收条号码：
+                    <input name="receipt_no" placeholder="CHE0000001" required style="width:150px;">
+                </p>
+
+                <p>
+                    开收条日期：
+                    <input name="receipt_date" type="date" value="{{ today }}" required>
+                </p>
+
                 <button type="submit">确认入账</button>
             </form>
+        </td>
 
+        <td>
             <form
                 method="post"
                 action="{{ url_for('finance.delete_bank_pending', pending_id=r.id) }}"
-                style="display:inline;"
                 onsubmit="return confirm('确定删除这笔待确认记录？');"
             >
                 <button type="submit" style="background:red;color:white;">
@@ -1225,11 +2225,28 @@ def bank_pending():
 """,
 rows=rows,
 summary=summary,
-message=message
+message=message,
+today=date.today().isoformat()
 )
 
 @finance_bp.route("/bank_pending/<int:pending_id>/confirm", methods=["POST"])
 def confirm_bank(pending_id):
+
+    receipt_no = request.form.get("receipt_no", "").strip().upper()
+    receipt_date = request.form.get("receipt_date") or date.today()
+
+    if not receipt_no:
+        return "必须填写收条号码", 400
+
+    existing = db_query("""
+        select id
+        from finance_records
+        where receipt_no = %s
+        limit 1
+    """, (receipt_no,), fetchone=True)
+
+    if existing:
+        return "这个收条号码已经用过了，请检查是否重复输入", 400
 
     p = db_query("""
         select *
@@ -1279,7 +2296,9 @@ def confirm_bank(pending_id):
             record_type,
             fund_account,
             record_date,
+            receipt_date,
             category,
+            receipt_no,
             member_id,
             name,
             amount,
@@ -1292,15 +2311,18 @@ def confirm_bank(pending_id):
         )
         values
         (
-            %s, %s, %s, %s, %s, %s, %s,
-            '银行过账', %s, %s,
-            %s, %s, %s
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s,
+            '银行过账',
+            %s, %s, %s, %s, %s
         )
     """, (
         "income",
         get_fund_account(p["category"], "income"),
         p["payment_date"],
+        receipt_date,
         p["category"],
+        receipt_no,
         p["member_id"],
         p["name"],
         p["amount"],
@@ -1312,10 +2334,12 @@ def confirm_bank(pending_id):
     ))
 
     if p["category"] == "月费" and p["member_id"]:
+
         db_query("""
             insert into member_payments
             (
                 payment_date,
+                receipt_date,
                 member_id,
                 name,
                 receipt_no,
@@ -1326,13 +2350,15 @@ def confirm_bank(pending_id):
             )
             values
             (
-                %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s,
+                %s, %s, %s, %s
             )
         """, (
             p["payment_date"],
+            receipt_date,
             p["member_id"],
             p["name"],
-            p["bank_ref"],
+            receipt_no,
             p["amount"],
             month_from_db,
             month_to_db,
@@ -1344,6 +2370,42 @@ def confirm_bank(pending_id):
         set status = 'confirmed'
         where id = %s
     """, (pending_id,))
+
+    return redirect(url_for("finance.records"))
+
+@finance_bp.route("/records/<int:record_id>/cancel", methods=["POST"])
+def cancel_record(record_id):
+
+    record = db_query("""
+        select receipt_no, status
+        from finance_records
+        where id = %s
+    """, (record_id,), fetchone=True)
+
+    if not record:
+        return redirect(url_for("finance.records"))
+
+    if record["status"] == "cancelled":
+        return redirect(url_for("finance.records"))
+
+    cancel_reason = request.form.get("cancel_reason", "").strip()
+
+    if not cancel_reason:
+        cancel_reason = "未填写原因"
+
+    db_query("""
+        update finance_records
+        set
+            status = 'cancelled',
+            cancel_reason = %s
+        where id = %s
+    """, (cancel_reason, record_id))
+
+    if record["receipt_no"]:
+        db_query("""
+            delete from member_payments
+            where receipt_no = %s
+        """, (record["receipt_no"],))
 
     return redirect(url_for("finance.records"))
 
@@ -1379,6 +2441,27 @@ def records():
             limit 300
         """, fetchall=True)
 
+    summary = db_query("""
+        select
+            sum(
+                case
+                    when coalesce(status, 'confirmed') <> 'cancelled'
+                    then 1 else 0
+                end
+            ) as active_count,
+
+            sum(
+                case
+                    when status = 'cancelled'
+                    then 1 else 0
+                end
+            ) as cancelled_count
+        from finance_records
+    """, fetchone=True)
+
+    active_count = summary["active_count"] or 0
+    cancelled_count = summary["cancelled_count"] or 0
+
     return render_template_string(FINANCE_STYLE + """
     <h1>财政记录</h1>
 
@@ -1390,9 +2473,20 @@ def records():
 
     <br>
 
+    <p>
+        正常记录：
+        <b>{{ active_count }}</b>
+
+        &nbsp;&nbsp;&nbsp;
+
+        作废记录：
+        <b style="color:red;">{{ cancelled_count }}</b>
+    </p>
+
     <table border="1" cellpadding="6">
         <tr>
-            <th>日期</th>
+            <th>付款日期</th>
+            <th>开收条日期</th>
             <th>项目</th>
             <th>收条</th>
             <th>编号</th>
@@ -1402,33 +2496,58 @@ def records():
             <th>Reference</th>
             <th>月份</th>
             <th>备注</th>
+            <th>状态</th>
             <th>操作</th>
         </tr>
 
         {% for r in rows %}
-        <tr>
+        <tr {% if r.status == 'cancelled' %}style="background:#eee;color:#888;text-decoration:line-through;"{% endif %}>
             <td>{{ r.record_date }}</td>
+            <td>{{ r.receipt_date or "-" }}</td>
             <td>{{ r.category }}</td>
-            <td>{{ r.receipt_no }}</td>
-            <td>{{ r.member_id }}</td>
-            <td>{{ r.name }}</td>
+            <td>{{ r.receipt_no or "-" }}</td>
+            <td>{{ r.member_id or "-" }}</td>
+            <td>{{ r.name or "-" }}</td>
             <td>RM {{ "%.2f"|format(r.amount or 0) }}</td>
-            <td>{{ r.payment_method }}</td>
-            <td>{{ r.bank_ref }}</td>
+            <td>{{ r.payment_method or "-" }}</td>
+            <td>{{ r.bank_ref or "-" }}</td>
             <td>
                 {% if r.month_from or r.month_to %}
-                    {{ r.month_from }} - {{ r.month_to }}
+                    {{ r.month_from or "-" }} - {{ r.month_to or "-" }}
                 {% else %}
                     -
                 {% endif %}
             </td>
-            <td>{{ r.remarks }}</td>
+            <td>{{ r.remarks or "-" }}</td>
             <td>
-                <form method="post"
-                    action="{{ url_for('finance.delete_record', record_id=r.id) }}"
-                    onsubmit="return confirm('确定要删除这笔财政记录吗？');">
-                    <button type="submit">删除</button>
-                </form>
+                {% if r.status == 'cancelled' %}
+                    ❌ 已作废
+                {% elif r.status == 'confirmed' or not r.status %}
+                    ✅ 已入账
+                {% else %}
+                    ⏳ 待确认
+                {% endif %}
+            </td>
+            <td>
+                {% if r.status != 'cancelled' %}
+                    <form method="post"
+                        action="{{ url_for('finance.cancel_record', record_id=r.id) }}"
+                        onsubmit="return confirm('确定要作废这张收条吗？作废后不会计入统计。');">
+
+                        <input
+                            name="cancel_reason"
+                            placeholder="作废原因"
+                            required
+                            style="width:120px;"
+                        >
+
+                        <button type="submit" style="background:#ff9800;color:white;">
+                            作废
+                        </button>
+                    </form>
+                {% else %}
+                    -
+                {% endif %}
             </td>
         </tr>
         {% endfor %}
@@ -1439,7 +2558,12 @@ def records():
     {% endif %}
 
     <p><a href="{{ url_for('finance.finance_home') }}">返回财政首页</a></p>
-    """, rows=rows, q=q)
+    """,
+    rows=rows,
+    active_count=active_count,
+    cancelled_count=cancelled_count,
+    q=q
+    )
 
 @finance_bp.route("/dashboard")
 def dashboard():
@@ -1452,6 +2576,7 @@ def dashboard():
             coalesce(sum(amount), 0) as total
         from finance_records
         where to_char(record_date, 'YYYY-MM') = %s
+          and coalesce(status, 'confirmed') <> 'cancelled'
           and fund_account = '观音堂日常户口'
           and record_type = 'income'
         group by category
@@ -1464,6 +2589,7 @@ def dashboard():
             coalesce(sum(amount), 0) as total
         from finance_records
         where to_char(record_date, 'YYYY-MM') = %s
+          and coalesce(status, 'confirmed') <> 'cancelled'
           and fund_account = '观音堂日常户口'
           and record_type = 'expense'
         group by category
@@ -1476,6 +2602,7 @@ def dashboard():
             coalesce(sum(amount), 0) as total
         from finance_records
         where to_char(record_date, 'YYYY-MM') = %s
+          and coalesce(status, 'confirmed') <> 'cancelled'
           and fund_account = '总会户口'
           and record_type = 'income'
         group by category
@@ -1486,6 +2613,7 @@ def dashboard():
         select coalesce(sum(amount), 0) as total
         from finance_records
         where to_char(record_date, 'YYYY-MM') = %s
+          and coalesce(status, 'confirmed') <> 'cancelled'
           and fund_account = '观音堂日常户口'
           and record_type = 'income'
     """, (ym,), fetchone=True)
@@ -1494,6 +2622,7 @@ def dashboard():
         select coalesce(sum(amount), 0) as total
         from finance_records
         where to_char(record_date, 'YYYY-MM') = %s
+          and coalesce(status, 'confirmed') <> 'cancelled'
           and fund_account = '观音堂日常户口'
           and record_type = 'expense'
     """, (ym,), fetchone=True)
@@ -1502,6 +2631,7 @@ def dashboard():
         select coalesce(sum(amount), 0) as total
         from finance_records
         where to_char(record_date, 'YYYY-MM') = %s
+          and coalesce(status, 'confirmed') <> 'cancelled'
           and fund_account = '总会户口'
           and record_type = 'income'
     """, (ym,), fetchone=True)
@@ -1521,11 +2651,12 @@ def dashboard():
     <form method="get">
         <label>月份：</label>
         <input name="ym" value="{{ ym }}" placeholder="2026-06">
+
+        <label>上月结余 RM：</label>
+        <input name="opening_balance" value="{{ opening_balance }}" placeholder="例如 15000">
+
         <button type="submit">查看</button>
     </form>
-                                  
-    <label>上月结余 RM：</label>
-    <input name="opening_balance" value="{{ opening_balance }}" placeholder="例如 15000">
 
     <hr>
 
@@ -1619,7 +2750,6 @@ def dashboard():
     daily_balance=daily_balance)
 
 
-
 @finance_bp.route("/expense/<category>", methods=["GET", "POST"])
 def expense(category):
     next_receipt_no = get_next_receipt_no_by_category(category)
@@ -1668,7 +2798,7 @@ def expense(category):
 
         <p>
             金额 RM：
-            <input name="amount" type="number" step="0.01" required>
+            <input name="amount" type="number" step="1.00" min="0" required>
         </p>
 
         <p>
@@ -1704,6 +2834,7 @@ def export_monthly_report():
     rows = db_query("""
         select
             record_date,
+            receipt_date,
             receipt_no,
             category,
             record_type,
@@ -1711,9 +2842,10 @@ def export_monthly_report():
             name,
             phone,
             amount,
-            '' as note
+            remarks as note
         from finance_records
         where to_char(record_date, 'YYYY-MM') = %s
+        and coalesce(status,'confirmed') <> 'cancelled'
         order by record_date, id
     """, (ym,), fetchall=True)
 
@@ -1950,7 +3082,15 @@ def export_monthly_report():
     ws["A14"].font = Font(bold=True, size=14, color="FFFFFF")
     ws["A14"].alignment = Alignment(horizontal="center")
 
-    income_headers = ["日期", "收条号码", "分类", "户口", "姓名", "电话", "金额（RM）"]
+    income_headers = [
+        "付款日期",
+        "开收条日期",
+        "收条号码",
+        "分类",
+        "户口",
+        "姓名",
+        "金额（RM）"
+    ]
     for col, h in enumerate(income_headers, 1):
         c = ws.cell(15, col)
         c.value = h
@@ -1963,11 +3103,11 @@ def export_monthly_report():
     for r in income_rows[:8]:
         vals = [
             r["record_date"],
+            r["receipt_date"],
             r["receipt_no"],
             r["category"],
             r["fund_account"],
             r["name"],
-            r["phone"],
             money(r["amount"]),
         ]
         for col, v in enumerate(vals, 1):
@@ -2004,7 +3144,15 @@ def export_monthly_report():
     ws["I14"].font = Font(bold=True, size=14, color="FFFFFF")
     ws["I14"].alignment = Alignment(horizontal="center")
 
-    expense_headers = ["日期", "收条号码", "分类", "户口", "姓名", "电话", "金额（RM）"]
+    expense_headers = [
+        "付款日期",
+        "开收条日期",
+        "收条号码",
+        "分类",
+        "户口",
+        "姓名",
+        "金额（RM）"
+    ]
     for col, h in enumerate(expense_headers, 9):
         c = ws.cell(15, col)
         c.value = h
@@ -2017,11 +3165,11 @@ def export_monthly_report():
     for r in expense_rows[:8]:
         vals = [
             r["record_date"],
+            r["receipt_date"],
             r["receipt_no"],
             r["category"],
             r["fund_account"],
             r["name"],
-            r["phone"],
             money(r["amount"]),
         ]
         for col, v in enumerate(vals, 9):
@@ -2065,7 +3213,17 @@ def export_monthly_report():
         ws2["A1"].alignment = Alignment(horizontal="center", vertical="center")
         ws2["A1"].fill = PatternFill("solid", fgColor=main_color)
 
-        headers = ["日期", "收条号码", "分类", "户口", "姓名", "电话", "金额（RM）", "备注", "类型"]
+        headers = [
+            "付款日期",
+            "开收条日期",
+            "收条号码",
+            "分类",
+            "户口",
+            "姓名",
+            "金额（RM）",
+            "备注",
+            "类型"
+        ]
 
         for col, h in enumerate(headers, 1):
             c = ws2.cell(4, col)
@@ -2079,14 +3237,14 @@ def export_monthly_report():
         for r in data_rows:
             vals = [
                 r["record_date"],
+                r["receipt_date"],
                 r["receipt_no"],
                 r["category"],
                 r["fund_account"],
                 r["name"],
-                r["phone"],
                 money(r["amount"]),
                 r["note"],
-                "收入" if r["record_type"] == "income" else "支出",
+                ...
             ]
 
             for col, v in enumerate(vals, 1):
