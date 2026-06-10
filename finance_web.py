@@ -4,7 +4,6 @@ import os
 import re
 
 from flask import Blueprint, request, redirect, url_for, render_template_string, send_file
-from matplotlib.pylab import record
 from psycopg2.extras import RealDictCursor
 from datetime import date
 from openpyxl import Workbook
