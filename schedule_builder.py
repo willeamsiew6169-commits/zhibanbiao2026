@@ -1,8 +1,13 @@
 import os
 import re
 import pandas as pd
+import os
+import traceback
+import psycopg2
 
+from db import get_db
 from datetime import datetime
+from psycopg2.extras import RealDictCursor
 from sqlalchemy import create_engine, text
 from lunar_rules import get_special_day_info, get_next_day_remove_info
 
@@ -13,6 +18,37 @@ PREBOOK_FILE = os.path.join(BASE_DIR, "prebook_schedule.xlsx")
 OUTPUT_FILE = os.path.join(BASE_DIR, "schedule_output.txt")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True) if DATABASE_URL else None
+VOLUNTEER_SIGNUP_URL = "https://你的系统网址.onrender.com/volunteer"
+
+
+def build_master_table_section(arranged):
+    setup_master = format_people_inline(
+        arranged.get("设师父供台", [])
+    )
+
+    remove_master = format_people_inline(
+        arranged.get("收师父供台", [])
+    )
+
+    section = ""
+
+    if setup_master:
+        section += f"""
+6:00am~8:00am 或 
+6:00am~完成供台工作
+设师父供台:
+{setup_master}
+"""
+
+    if remove_master:
+        section += f"""
+12:00pm~2:00pm
+收师父供台:
+{remove_master}
+12pm的香结束之后，请下供桌。
+"""
+
+    return section
 
 
 def load_prebook_input(target_date_str):
@@ -169,6 +205,120 @@ def save_assignment_history(date_obj, result):
                 r
             )
 
+
+def load_supabase_signups(target_date_str):
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        return pd.DataFrame(columns=["姓名", "岗位", "开始时间", "结束时间", "优先岗位", "备注"])
+
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select id, volunteer_id, name, role, start_time, end_time
+                from volunteer_schedule_signups
+                where signup_date = %s
+                and coalesce(status, 'pending') <> 'cancelled'
+                order by created_at
+            """, (target_date_str,))
+            rows = cur.fetchall()
+
+    if not rows:
+        return pd.DataFrame(columns=["姓名", "岗位", "开始时间", "结束时间", "优先岗位", "备注"])
+
+    data = []
+    for r in rows:
+        data.append({
+            "姓名": r["name"],
+            "岗位": r["role"],
+            "开始时间": r["start_time"],
+            "结束时间": r["end_time"],
+            "优先岗位": "",
+            "signup_id": r["id"],
+            "volunteer_id": r["volunteer_id"],
+            "备注": "义工网页报名",
+        })
+
+    return pd.DataFrame(data)
+
+
+def update_assigned_places(target_date, assigned_rows):
+    date_str = str(target_date)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute("""
+                delete from volunteer_schedule_assignments
+                where assignment_date = %s
+            """, (date_str,))
+
+            for row in assigned_rows:
+                signup_id = row.get("signup_id") or row.get("id")
+                volunteer_id = row.get("volunteer_id")
+                name = row.get("name") or row.get("姓名")
+                role = row.get("role") or row.get("岗位")
+                shift_label = row.get("shift_label")
+                assigned_place = row.get("assigned_place")
+                start_time = row.get("start_time")
+                end_time = row.get("end_time")
+                remarks = row.get("remarks") or row.get("备注")
+
+                if not name or not role or not assigned_place:
+                    continue
+
+                cur.execute("""
+                    insert into volunteer_schedule_assignments (
+                        signup_id,
+                        volunteer_id,
+                        name,
+                        assignment_date,
+                        role,
+                        shift_label,
+                        assigned_place,
+                        start_time,
+                        end_time,
+                        status,
+                        remarks,
+                        created_at
+                    )
+                    values (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, 'assigned', %s, now()
+                    )
+                """, (
+                    signup_id,
+                    volunteer_id,
+                    name,
+                    date_str,
+                    role,
+                    shift_label,
+                    assigned_place,
+                    start_time,
+                    end_time,
+                    remarks
+                ))
+
+                if signup_id:
+                    cur.execute("""
+                        update volunteer_schedule_signups
+                        set status = 'assigned'
+                        where id = %s
+                        and coalesce(status, 'pending') <> 'cancelled'
+                    """, (signup_id,))
+                else:
+                    cur.execute("""
+                        update volunteer_schedule_signups
+                        set status = 'assigned'
+                        where signup_date = %s
+                        and name = %s
+                        and role = %s
+                        and coalesce(status, 'pending') <> 'cancelled'
+                    """, (
+                        date_str,
+                        name,
+                        role
+                    ))
+
+        conn.commit()
 
 def load_last_assignment():
     if not engine:
@@ -460,6 +610,9 @@ def get_fixed_people(date_obj, buddhist_df, cleaning_df):
             raise ValueError(f"❌【佛台固定】缺少栏位：星期。当前栏位：{list(buddhist_df.columns)}")
 
         buddhist_row = buddhist_df[buddhist_df["星期"].astype(str).str.strip() == weekday]
+
+        print("DEBUG weekday =", weekday)
+        print("DEBUG buddhist_row =", buddhist_row)
 
         if not buddhist_row.empty:
             row = buddhist_row.iloc[0]
@@ -888,6 +1041,14 @@ def classify_shift_slot(start_time):
     return "橙"
 
 
+def get_person_name(p):
+    if isinstance(p, dict):
+        return p.get("name") or p.get("姓名")
+    if isinstance(p, (list, tuple)):
+        return p[0] if p else None
+    return p
+
+
 def assign_jobs(fixed_people, signup_df, special_info):
     result = {
         "整理佛台": fixed_people["整理佛台"][:],
@@ -903,56 +1064,137 @@ def assign_jobs(fixed_people, signup_df, special_info):
         "黄活动中心": [],
     }
 
+    cleaning_signups = []
+
     for _, r in signup_df.iterrows():
         name = r["姓名"]
         job = r["岗位"]
         start = r["开始时间"]
         end = r["结束时间"]
 
+        signup_id = r.get("signup_id")
+        volunteer_id = r.get("volunteer_id")
+
+        person = {
+            "name": name,
+            "姓名": name,
+            "start_time": start,
+            "end_time": end,
+            "开始时间": start,
+            "结束时间": end,
+            "signup_id": signup_id,
+            "volunteer_id": volunteer_id,
+        }
+
         if job == "整理佛台":
-            if name not in result["整理佛台"]:
-                result["整理佛台"].append(name)
+            person["role"] = "整理佛台"
+            person["岗位"] = "整理佛台"
+            result["整理佛台"].append(person)
 
-        elif job == "佛堂卫生":
-            if name not in result["佛堂卫生"]:
-                result["佛堂卫生"].append(name)
+        elif job in ["卫生", "佛堂卫生", "二楼卫生", "楼梯卫生"]:
+            person["role"] = "卫生"
+            person["岗位"] = "卫生"
+            cleaning_signups.append(person)
 
-        elif job == "二楼卫生":
-            if name not in result["二楼卫生"]:
-                result["二楼卫生"].append(name)
-
-        elif job == "楼梯卫生":
-            if name not in result["楼梯卫生"]:
-                result["楼梯卫生"].append(name)
-
-        elif job == "设师父供台":
-            if name not in result["设师父供台"]:
-                result["设师父供台"].append(name)
+        elif job in ["设师父供台", "供台"]:
+            person["role"] = "供台"
+            person["岗位"] = "供台"
+            result["设师父供台"].append(person)
 
         elif job == "绿观音堂":
-            result["绿观音堂"].append(name)
+            person["role"] = "值班"
+            person["岗位"] = "值班"
+            result["绿观音堂"].append(person)
 
         elif job == "绿活动中心":
-            result["绿活动中心"].append(name)
+            person["role"] = "值班"
+            person["岗位"] = "值班"
+            result["绿活动中心"].append(person)
 
         elif job in ["观音堂", "活动中心", "值班"]:
-            # 如果没有时间，当作全天或默认时间
             if not start or not end:
                 start = "10:00am"
                 end = "2:00pm"
 
+            person["start_time"] = start
+            person["end_time"] = end
+            person["开始时间"] = start
+            person["结束时间"] = end
+            person["role"] = "值班"
+            person["岗位"] = "值班"
+
             slot = classify_shift_slot(start)
 
             if job == "值班":
-                # 值班 → 先全部丢去观音堂，再让 auto_assign_duty 分
                 key = f"{slot}观音堂"
             else:
                 key = f"{slot}{job}"
 
-            result[key].append((name, start, end))
+            result[key].append(person)
 
-    # ✅ 循环结束后才做自动分配
-    result = auto_assign_cleaning_roles(result, signup_df)
+    # ✅ 合并固定卫生 + 报名卫生
+    all_cleaners = []
+    all_cleaners.extend(result["佛堂卫生"])
+    all_cleaners.extend(result["二楼卫生"])
+    all_cleaners.extend(result["楼梯卫生"])
+    all_cleaners.extend(cleaning_signups)
+
+    # ✅ 卫生去重
+    unique_cleaners = []
+    seen = set()
+
+    for p in all_cleaners:
+        if isinstance(p, dict):
+            name = p.get("name") or p.get("姓名")
+            item = dict(p)
+        else:
+            name = str(p).strip()
+            item = {
+                "name": name,
+                "姓名": name,
+            }
+
+        if not name:
+            continue
+
+        if name in seen:
+            continue
+
+        seen.add(name)
+
+        item["role"] = "卫生"
+        item["岗位"] = "卫生"
+        unique_cleaners.append(item)
+
+    # ✅ 重新分配卫生
+    result["佛堂卫生"] = []
+    result["二楼卫生"] = []
+    result["楼梯卫生"] = []
+
+    cleaning_count = len(unique_cleaners)
+
+    if cleaning_count == 1:
+        p = dict(unique_cleaners[0])
+        result["佛堂卫生"].append(dict(p))
+        result["二楼卫生"].append(dict(p))
+        result["楼梯卫生"].append(dict(p))
+
+    elif cleaning_count == 2:
+        p1 = dict(unique_cleaners[0])
+        p2 = dict(unique_cleaners[1])
+
+        result["佛堂卫生"].append(dict(p1))
+        result["二楼卫生"].append(dict(p2))
+        result["楼梯卫生"].append(dict(p1))
+        result["楼梯卫生"].append(dict(p2))
+
+    elif cleaning_count >= 3:
+        cleaning_places = ["佛堂卫生", "二楼卫生", "楼梯卫生"]
+
+        for i, p in enumerate(unique_cleaners):
+            place = cleaning_places[i % len(cleaning_places)]
+            result[place].append(dict(p))
+
     result = auto_assign_duty(result)
 
     return result
@@ -964,7 +1206,6 @@ def auto_assign_duty(result):
 
         s = str(t).strip().lower().replace(" ", "")
 
-        # 2pm -> 2:00pm
         if re.match(r"^\d{1,2}(am|pm)$", s):
             s = s.replace("am", ":00am").replace("pm", ":00pm")
 
@@ -981,147 +1222,209 @@ def auto_assign_duty(result):
         hour = m // 60
         minute = m % 60
         suffix = "am" if hour < 12 else "pm"
-        hour12 = hour % 12
-        if hour12 == 0:
-            hour12 = 12
+        hour12 = hour % 12 or 12
         return f"{hour12}:{minute:02d}{suffix}"
 
-    def assign_balanced(group1, group2, item):
-        name = item[0]
+    def get_name(item):
+        if isinstance(item, dict):
+            return item.get("name") or item.get("姓名")
+        if isinstance(item, (list, tuple)):
+            return item[0] if item else None
+        return str(item) if item else None
 
-        # 如果这个人已经在 group1 出现过，下一段优先去 group2
-        if any(x[0] == name for x in group1) and not any(x[0] == name for x in group2):
-            group2.append(item)
-            return
+    def get_start(item):
+        if isinstance(item, dict):
+            return item.get("start_time") or item.get("开始时间")
+        if isinstance(item, (list, tuple)):
+            return item[1] if len(item) > 1 else None
+        return None
 
-        # 如果这个人已经在 group2 出现过，下一段优先去 group1
-        if any(x[0] == name for x in group2) and not any(x[0] == name for x in group1):
-            group1.append(item)
-            return
+    def get_end(item):
+        if isinstance(item, dict):
+            return item.get("end_time") or item.get("结束时间")
+        if isinstance(item, (list, tuple)):
+            return item[2] if len(item) > 2 else None
+        return None
 
-        # 普通情况：人数平衡
-        if len(group1) <= len(group2):
-            group1.append(item)
+    def make_item(item, start_txt, end_txt):
+        if isinstance(item, dict):
+            new_item = dict(item)
         else:
-            group2.append(item)
+            name = get_name(item)
+            new_item = {
+                "name": name,
+                "姓名": name,
+                "signup_id": None,
+                "volunteer_id": None,
+            }
 
-    def assign_afternoon(item):
-        name = item[0]
+        new_item["start_time"] = start_txt
+        new_item["end_time"] = end_txt
+        new_item["开始时间"] = start_txt
+        new_item["结束时间"] = end_txt
+        new_item["role"] = "值班"
+        new_item["岗位"] = "值班"
+        return new_item
 
-        # 1）如果这个人上午在活动中心，下午优先去观音堂
-        if any(x[0] == name for x in result["橙活动中心"]):
-            result["黄观音堂"].append(item)
-            return
+    def has_overlap(a1, a2, b1, b2):
+        return max(a1, b1) < min(a2, b2)
 
-        # 2）如果这个人上午在观音堂，下午优先去活动中心
-        if any(x[0] == name for x in result["橙观音堂"]):
-            result["黄活动中心"].append(item)
-            return
+    def already_assigned_same_time(name, start, end):
+        for key in [
+            "绿观音堂", "绿活动中心",
+            "橙观音堂", "橙活动中心",
+            "黄观音堂", "黄活动中心",
+        ]:
+            for item in result.get(key, []):
+                if get_name(item) != name:
+                    continue
 
-        # 3）普通情况：下午观音堂优先，但保持平衡
-        if len(result["黄观音堂"]) <= len(result["黄活动中心"]):
-            result["黄观音堂"].append(item)
+                s2 = parse_min(get_start(item))
+                e2 = parse_min(get_end(item))
+
+                if s2 is not None and e2 is not None and has_overlap(start, end, s2, e2):
+                    return True
+
+        return False
+
+    def place_load(key):
+        total = 0
+        for item in result.get(key, []):
+            s = parse_min(get_start(item))
+            e = parse_min(get_end(item))
+            if s is not None and e is not None and e > s:
+                total += e - s
+        return total
+
+    def morning_place_of(name):
+        if any(get_name(x) == name for x in result["橙观音堂"]):
+            return "观音堂"
+        if any(get_name(x) == name for x in result["橙活动中心"]):
+            return "活动中心"
+        return None
+
+    def choose_place(shift, item, start, end):
+        name = get_name(item)
+
+        if shift == "绿":
+            gyt_key = "绿观音堂"
+            act_key = "绿活动中心"
+        elif shift == "橙":
+            gyt_key = "橙观音堂"
+            act_key = "橙活动中心"
         else:
-            result["黄活动中心"].append(item)
+            gyt_key = "黄观音堂"
+            act_key = "黄活动中心"
+
+        # ✅ 下午尽量换地点
+        if shift == "黄":
+            morning = morning_place_of(name)
+
+            if morning == "观音堂":
+                return act_key
+
+            if morning == "活动中心":
+                return gyt_key
+
+        # ✅ 先补空位
+        if len(result[gyt_key]) == 0:
+            return gyt_key
+
+        if len(result[act_key]) == 0:
+            return act_key
+
+        # ✅ 两边都有人才按覆盖时数平衡
+        if place_load(gyt_key) <= place_load(act_key):
+            return gyt_key
+
+        return act_key
 
     duty_pool = []
 
-    for key in ["橙观音堂", "橙活动中心", "黄观音堂", "黄活动中心"]:
-        for item in result[key]:
-            name, start, end = item
+    for key in [
+        "绿观音堂", "绿活动中心",
+        "橙观音堂", "橙活动中心",
+        "黄观音堂", "黄活动中心",
+    ]:
+        for item in result.get(key, []):
+            s = parse_min(get_start(item))
+            e = parse_min(get_end(item))
+
+            if s is None or e is None or e <= s:
+                continue
+
             duty_pool.append({
-                "name": name,
-                "start": parse_min(start),
-                "end": parse_min(end),
-                "raw": item
+                "name": get_name(item),
+                "start": s,
+                "end": e,
+                "duration": e - s,
+                "raw": item,
             })
 
-    # 清空重新排
+    result["绿观音堂"] = []
+    result["绿活动中心"] = []
     result["橙观音堂"] = []
     result["橙活动中心"] = []
     result["黄观音堂"] = []
     result["黄活动中心"] = []
 
-    for p in duty_pool:
-        if p["start"] is None or p["end"] is None:
-            continue
+    # ✅ 长时间优先，先把能稳定覆盖的人排进去
+    duty_pool.sort(key=lambda x: (-x["duration"], x["start"], x["name"] or ""))
 
+    for p in duty_pool:
         name = p["name"]
         s = p["start"]
         e = p["end"]
+        raw = p["raw"]
 
-        if e <= s:
-            continue
+        segments = []
 
-        name = p["name"]
-        start_txt = min_to_ampm(s)
-        end_txt = min_to_ampm(e)
-        duration = e - s
+        if s < 10 * 60 and e > 8 * 60:
+            seg_s = max(s, 8 * 60)
+            seg_e = min(e, 10 * 60)
+            if seg_e > seg_s:
+                segments.append(("绿", seg_s, seg_e))
 
-        # ===== 长班（≥4小时）直接锁岗位，但跨2pm要切开 =====
-        if duration >= 4 * 60:
+        if s < 14 * 60 and e > 10 * 60:
+            seg_s = max(s, 10 * 60)
+            seg_e = min(e, 14 * 60)
+            if seg_e > seg_s:
+                segments.append(("橙", seg_s, seg_e))
 
-            # 如果跨过2pm，例如 10~6 / 11~4
-            if s < 14 * 60 < e:
-                morning_item = (name, start_txt, "2:00pm")
-                afternoon_item = (name, "2:00pm", end_txt)
+        if e > 14 * 60:
+            seg_s = max(s, 14 * 60)
+            seg_e = e
+            if seg_e > seg_s:
+                segments.append(("黄", seg_s, seg_e))
 
-                # 上午先分
-                if len(result["橙观音堂"]) <= len(result["橙活动中心"]):
-                    result["橙观音堂"].append(morning_item)
-                else:
-                    result["橙活动中心"].append(morning_item)
-
-                # 下午一定要走统一逻辑
-                assign_afternoon(afternoon_item)
-
+        for shift, seg_s, seg_e in segments:
+            if already_assigned_same_time(name, seg_s, seg_e):
                 continue
 
-            # 没跨2pm的长班，例如 10~2
-            if e <= 14 * 60:
-                if len(result["橙观音堂"]) <= len(result["橙活动中心"]):
-                    result["橙观音堂"].append((name, start_txt, end_txt))
-                else:
-                    result["橙活动中心"].append((name, start_txt, end_txt))
-
-                continue
-
-            # 纯下午长班
-            if s >= 14 * 60:
-                assign_afternoon((name, start_txt, end_txt))
-                continue
-        
-        # ===== 跨 2pm 短班，例如 1pm~4pm =====
-        if s < 14 * 60 < e:
-            assign_balanced(
-                result["橙观音堂"],
-                result["橙活动中心"],
-                (name, start_txt, "2:00pm")
-            )
-
-            # 下午优先补观音堂
-            assign_afternoon((name, "2:00pm", end_txt))
-
-            continue
-
-        # ===== 上午 =====
-        if e <= 14 * 60:
-            assign_balanced(
-                result["橙观音堂"],
-                result["橙活动中心"],
-                (name, start_txt, end_txt)
-            )
-            continue
-
-        # ===== 下午 =====
-        if s >= 14 * 60:
-            assign_afternoon((name, start_txt, end_txt))
-            continue
+            item = make_item(raw, min_to_ampm(seg_s), min_to_ampm(seg_e))
+            key = choose_place(shift, item, seg_s, seg_e)
+            result[key].append(item)
 
     return result
 
 def format_people_inline(names, sep="  "):
-    return sep.join(names) if names else ""
+    if not names:
+        return ""
+
+    result = []
+
+    for item in names:
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("姓名")
+        elif isinstance(item, (list, tuple)):
+            name = item[0] if item else ""
+        else:
+            name = item
+
+        if name:
+            result.append(str(name))
+
+    return sep.join(result)
 
 
 def to_ampm_text(t):
@@ -1158,17 +1461,83 @@ def format_shift_block(items):
         return ""
 
     lines = []
-    for name, start, end in items:
-        start_txt = to_ampm_text(start)
-        end_txt = to_ampm_text(end)
-        lines.append(name)
-        lines.append(f"{start_txt}~{end_txt}")
+
+    for item in items:
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("姓名") or ""
+            start = item.get("start_time") or item.get("开始时间")
+            end = item.get("end_time") or item.get("结束时间")
+
+        elif isinstance(item, (list, tuple)):
+            name = item[0] if len(item) > 0 else ""
+            start = item[1] if len(item) > 1 else ""
+            end = item[2] if len(item) > 2 else ""
+
+        else:
+            name = str(item)
+            start = ""
+            end = ""
+
+        if not name:
+            continue
+
+        lines.append(str(name))
+
+        if start and end:
+            start_txt = to_ampm_text(start)
+            end_txt = to_ampm_text(end)
+            lines.append(f"{start_txt}~{end_txt}")
+
     return "\n".join(lines)
+
+
+def get_display_name(p):
+    if isinstance(p, dict):
+        return p.get("name") or p.get("姓名") or ""
+    if isinstance(p, (list, tuple)):
+        return p[0] if p else ""
+    return str(p or "")
 
 
 def build_normal_message(date_obj, arranged, special_info, remove_info):
     weekday = get_weekday_name(date_obj)
     date_text = f"{date_obj.day}/{date_obj.month}/{date_obj.year}"
+
+    setup_master = format_people_inline(
+        arranged.get("设师父供台", [])
+    )
+
+    remove_master = format_people_inline(
+        arranged.get("收师父供台", [])
+    )
+
+    master_section = ""
+
+    if setup_master:
+        master_section += f"""
+6:00am~8:00am
+设师父供台:
+{setup_master}
+"""
+
+    if remove_master:
+        master_section += f"""
+12:00pm~2:00pm
+收师父供台:
+{remove_master}
+12pm的香结束之后，请下供桌。
+"""
+
+    green_section = ""
+
+    if arranged.get("绿观音堂") or arranged.get("绿活动中心"):
+        green_section = f"""
+🟢 绿班
+🟢 观音堂:
+{format_shift_block(arranged.get("绿观音堂", []))}
+🟢 活动中心:
+{format_shift_block(arranged.get("绿活动中心", []))}
+"""
 
     msg = f"""师兄们大家好！
 
@@ -1179,26 +1548,29 @@ def build_normal_message(date_obj, arranged, special_info, remove_info):
 8:00am~10:00am  或      
 8:00am~完成佛台工作 
 整理佛台: 
-{format_people_inline(arranged["整理佛台"])}
+{format_people_inline(arranged.get("整理佛台", []))}
 
+{master_section}
 8:00am~10:00am 或 
 8:00am~完成卫生工作 
-佛堂卫生: {format_people_inline(arranged["佛堂卫生"])}
-二楼卫生: {format_people_inline(arranged["二楼卫生"])}
-楼梯卫生: {format_people_inline(arranged["楼梯卫生"], sep="/")}
+佛堂卫生: {format_people_inline(arranged.get("佛堂卫生", []))}
+二楼卫生: {format_people_inline(arranged.get("二楼卫生", []))}
+楼梯卫生: {format_people_inline(arranged.get("楼梯卫生", []), sep="/")}
 每日卫生义工请注意：清理完卫生之后，请把卫生用具包括吸尘机放回原位（活动中心store里面的小房间）
+
+{green_section}
 
 10:00am~2:00pm 
 🟠 观音堂: 
-{format_shift_block(arranged["橙观音堂"])}
+{format_shift_block(arranged.get("橙观音堂", []))}
 🟠 活动中心: 
-{format_shift_block(arranged["橙活动中心"])}
+{format_shift_block(arranged.get("橙活动中心", []))}
 
 2:00pm~6:00pm 
 🟡 观音堂: 
-{format_shift_block(arranged["黄观音堂"])}
+{format_shift_block(arranged.get("黄观音堂", []))}
 🟡 活动中心: 
-{format_shift_block(arranged["黄活动中心"])}
+{format_shift_block(arranged.get("黄活动中心", []))}
 
 观音堂早晚香 由值班义工带领上香。
 
@@ -1211,6 +1583,9 @@ def build_normal_message(date_obj, arranged, special_info, remove_info):
 3）观音堂第一架的冷气坚决不能调。第二架和第三架可以轮流。
 
 另外，请大家多留意义工群信息，以便大家能够团结一致的护持好观音堂。佛子齐心，普度众生。
+
+义工报名请点击以下链接：
+{VOLUNTEER_SIGNUP_URL}
 
 非常感恩大家！
 大家功德无量！
@@ -1237,17 +1612,13 @@ def build_lunar_1_15_message(date_obj, arranged, special_info, remove_info):
 整理佛台:  
 {format_people_inline(arranged["整理佛台"])}
 
-6:00am~8:00am 或
-6:00am~完成供台工作 
-师父供台: 
-{format_people_inline(arranged["设师父供台"])}
+{build_master_table_section(arranged)}
 
 6:00am~8:00am 或 
 6:00am~完成卫生工作 
 佛堂卫生: {format_people_inline(arranged["佛堂卫生"])}
 二楼卫生: {format_people_inline(arranged["二楼卫生"])}
 楼梯卫生: {format_people_inline(arranged["楼梯卫生"], sep="/")}
-
 每日卫生义工请注意：清理完卫生之后，请把卫生用具包括吸尘机放回原位（活动中心store里面的小房间）
 
 🟢 8:00am~10:00am
@@ -1279,6 +1650,9 @@ def build_lunar_1_15_message(date_obj, arranged, special_info, remove_info):
 3）观音堂第一架的冷气坚决不能调。第二架和第三架可以轮流。
 
 另外，请大家多留意义工群信息，以便大家能够团结一致的护持好观音堂。佛子齐心，普度众生。
+
+义工报名请点击以下链接：
+{VOLUNTEER_SIGNUP_URL}
 
 非常感恩大家！
 大家功德无量！
@@ -1312,10 +1686,7 @@ def build_buddhist_festival_message(date_obj, arranged, special_info, remove_inf
 整理佛台: 
 {format_people_inline(arranged["整理佛台"])}
 
-6:00am~8:00am 或 
-6:00am~完成供台工作
-设师父供台: 
-{format_people_inline(arranged["设师父供台"])}
+{build_master_table_section(arranged)}
 
 6:00am~8:00am 或 
 6:00am~完成卫生工作 
@@ -1354,6 +1725,9 @@ def build_buddhist_festival_message(date_obj, arranged, special_info, remove_inf
 
 另外，请大家多留意义工群信息，以便大家能够团结一致的护持好观音堂。佛子齐心，普度众生。
 
+义工报名请点击以下链接：
+{VOLUNTEER_SIGNUP_URL}
+
 {remove_notice}非常感恩大家！
 大家功德无量！
 🙏🙏🙏
@@ -1388,6 +1762,141 @@ def main():
     except Exception as e:
         print(f"❌ 生成排班失败：{e}")
 
+def flatten_arranged_for_db(arranged):
+    rows = []
+
+    for group_name, people in arranged.items():
+
+        for p in people:
+
+            signup_id = None
+            volunteer_id = None
+
+            if isinstance(p, dict):
+
+                row = dict(p)
+
+                name = row.get("name") or row.get("姓名")
+                start_time = row.get("start_time") or row.get("开始时间")
+                end_time = row.get("end_time") or row.get("结束时间")
+
+                signup_id = row.get("signup_id")
+                volunteer_id = row.get("volunteer_id")
+
+            elif isinstance(p, (list, tuple)):
+
+                name = p[0] if len(p) > 0 else None
+                start_time = p[1] if len(p) > 1 else None
+                end_time = p[2] if len(p) > 2 else None
+
+                row = {
+                    "name": name,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                }
+
+            else:
+
+                name = str(p).strip() if p else None
+                start_time = None
+                end_time = None
+
+                row = {
+                    "name": name
+                }
+
+            if not name:
+                continue
+
+            shift_label = None
+            assigned_place = group_name
+            role = row.get("role") or row.get("岗位")
+
+            # ------------------------
+            # 整理佛台
+            # ------------------------
+            if group_name == "整理佛台":
+
+                role = "整理佛台"
+                assigned_place = "整理佛台"
+
+                start_time = None
+                end_time = None
+
+            # ------------------------
+            # 卫生
+            # ------------------------
+            elif group_name in [
+                "佛堂卫生",
+                "二楼卫生",
+                "楼梯卫生"
+            ]:
+
+                role = "卫生"
+                assigned_place = group_name
+
+                start_time = None
+                end_time = None
+
+            # ------------------------
+            # 供台
+            # ------------------------
+            elif group_name == "设师父供台":
+
+                role = "供台"
+                assigned_place = "设师父供台"
+
+                start_time = None
+                end_time = None
+
+            # ------------------------
+            # 值班
+            # ------------------------
+            elif group_name in [
+
+                "绿观音堂",
+                "绿活动中心",
+
+                "橙观音堂",
+                "橙活动中心",
+
+                "黄观音堂",
+                "黄活动中心",
+
+            ]:
+
+                role = "值班"
+
+                shift_label = group_name[0] + "班"
+
+                if "观音堂" in group_name:
+                    assigned_place = "观音堂"
+
+                elif "活动中心" in group_name:
+                    assigned_place = "活动中心"
+
+            else:
+
+                assigned_place = group_name
+
+            rows.append({
+
+                "signup_id": signup_id,
+                "volunteer_id": volunteer_id,
+
+                "name": name,
+                "role": role,
+
+                "shift_label": shift_label,
+                "assigned_place": assigned_place,
+
+                "start_time": start_time,
+                "end_time": end_time,
+
+            })
+
+    return rows
+
 def run_schedule_for_date(date_str):
     from datetime import datetime
 
@@ -1397,6 +1906,8 @@ def run_schedule_for_date(date_str):
         buddhist_df, cleaning_df = load_fixed_schedule()
         fixed_people = get_fixed_people(date_obj, buddhist_df, cleaning_df)
         override_names = load_buddha_override(date_obj)
+
+        print("DEBUG fixed_people =", fixed_people)
 
         if override_names:
             original = fixed_people.get("整理佛台", [])
@@ -1421,9 +1932,33 @@ def run_schedule_for_date(date_str):
         special_info = get_special_day_info(date_obj)
         remove_info = get_next_day_remove_info(date_obj)
 
+        # 1. 读取 Excel 预报名
         signup_df = load_prebook_input(date_str)
 
+        # 2. 读取义工网页报名 Supabase
+        web_df = load_supabase_signups(date_str)
+
+        # 3. 合并两边报名
+        if web_df is not None and not web_df.empty:
+            signup_df = pd.concat(
+                [signup_df, web_df],
+                ignore_index=True
+            )
+
         arranged = assign_jobs(fixed_people, signup_df, special_info)
+
+        assigned_rows = flatten_arranged_for_db(arranged)
+
+        print("========== DEBUG ==========")
+        print("排班结果数量:", len(assigned_rows))
+        print(assigned_rows[:5])
+        print("===========================")
+
+        try:
+            update_assigned_places(date_str, assigned_rows)
+        except Exception as e:
+            print("⚠️ 写入 Supabase assignments 失败：", e)
+            traceback.print_exc()
 
         if special_info["template_type"] == "normal":
             message = build_normal_message(date_obj, arranged, special_info, remove_info)
@@ -1432,7 +1967,7 @@ def run_schedule_for_date(date_str):
         else:
             message = build_buddhist_festival_message(date_obj, arranged, special_info, remove_info)
 
-        save_assignment_history(date_obj, arranged)
+        #save_assignment_history(date_obj, arranged)
 
         return message
 

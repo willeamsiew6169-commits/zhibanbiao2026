@@ -103,6 +103,7 @@ ROLE_TEXT = {
 
 app = Flask(__name__)
 app.secret_key = "change-this-simple-secret"
+app.permanent_session_lifetime = timedelta(hours=2)
 app.register_blueprint(schedule_bp)
 app.register_blueprint(reading_bp)
 app.register_blueprint(finance_bp)
@@ -310,7 +311,7 @@ def find_volunteer(volunteer_id: str):
 
     ids = [raw_id]
 
-    # CHE-208 / STW-160 → 同时尝试数字部分
+    # CHE-108 / STW-160 → 同时尝试数字部分
     if "-" in raw_id:
         branch, num = raw_id.split("-", 1)
         branch = branch.strip().upper()
@@ -323,7 +324,7 @@ def find_volunteer(volunteer_id: str):
             ids.append("0" + num)
 
     else:
-        # 208 → 尝试 CHE-208
+        # 108 → 尝试 CHE-108
         ids.append(f"CHE-{raw_id}")
 
         # 0160 → 尝试 STW-160
@@ -482,6 +483,122 @@ def get_today_records(limit: int | None = None) -> list[dict]:
         return out[-limit:]
     return out
 
+def load_today_assignments_for_volunteer(volunteer, raw_id):
+
+    ids = get_assignment_id_candidates(volunteer, raw_id)
+
+    if not ids:
+        return []
+
+    return db_query("""
+        select
+            id,
+            volunteer_id,
+            name,
+            assignment_date,
+            role,
+            shift_label,
+            assigned_place,
+            start_time,
+            end_time
+        from volunteer_schedule_assignments
+        where volunteer_id = any(%s)
+        and assignment_date = %s
+        and coalesce(status,'assigned') <> 'cancelled'
+    """, (
+        ids,
+        now_date_str()
+    ), fetchall=True) or []
+
+
+def format_assignment_for_attendance(a):
+    role = a.get("role")
+    place = a.get("assigned_place") or ""
+    shift = a.get("shift_label") or ""
+    start = a.get("start_time") or ""
+    end = a.get("end_time") or ""
+
+    if role == "值班":
+        time_text = f"{start} ~ {end}" if start and end else ""
+        return f"{time_text} {shift} {place}".strip()
+
+    return place or role
+
+
+def check_in_assignment(assignment):
+
+    db_query("""
+        insert into volunteer_attendance_logs (
+            assignment_id,
+            volunteer_id,
+            name,
+            attendance_date,
+            actual_role,
+            actual_place,
+            walk_in,
+            remarks
+        )
+        values (%s, %s, %s, %s, %s, %s, false, %s)
+    """, (
+        assignment["id"],
+        assignment["volunteer_id"],
+        assignment["name"],
+        assignment["assignment_date"],
+        assignment["role"],
+        assignment["assigned_place"],
+        "按排班签到"
+    ))
+
+def get_assignment_id_candidates(volunteer, raw_id):
+    ids = []
+
+    if volunteer.get("编号"):
+        ids.append(str(volunteer["编号"]).strip())
+
+    if raw_id:
+        ids.append(str(raw_id).strip())
+
+    # 去重复
+    return list(dict.fromkeys(ids))
+
+
+def load_today_assignments_for_volunteer(volunteer, raw_id):
+    ids = get_assignment_id_candidates(volunteer, raw_id)
+
+    if not ids:
+        return []
+
+    return db_query("""
+        select
+            id,
+            volunteer_id,
+            name,
+            assignment_date,
+            role,
+            shift_label,
+            assigned_place,
+            start_time,
+            end_time
+        from volunteer_schedule_assignments
+        where volunteer_id = any(%s)
+        and assignment_date = %s
+        and coalesce(status, 'assigned') <> 'cancelled'
+        order by start_time, role, assigned_place
+    """, (ids, now_date_str()), fetchall=True) or []
+
+
+def format_assignment_for_attendance(a):
+    role = a.get("role")
+    place = a.get("assigned_place") or ""
+    shift = a.get("shift_label") or ""
+    start = a.get("start_time") or ""
+    end = a.get("end_time") or ""
+
+    if role == "值班":
+        time_text = f"{start} ~ {end}" if start and end else ""
+        return f"{time_text} {shift} {place}".strip()
+
+    return place or role
 
 # =========================
 # 5) 签到 / 签退 / 修改
@@ -494,12 +611,12 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "") -> tuple[
 
     if not raw_id:
         return False, "请输入编号。"
+
     if not pin:
         return False, "请输入 PIN。"
-    if role not in ROLES:
-        return False, "请选择正确岗位。"
 
     volunteer = find_volunteer(raw_id)
+
     if not volunteer:
         return False, f"找不到编号：{raw_id}"
 
@@ -508,7 +625,7 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "") -> tuple[
 
     if not verify_pin_for_volunteer(volunteer, pin):
         return False, "PIN 不正确。"
-    
+
     opened = db_query("""
         select id
         from attendance
@@ -521,6 +638,69 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "") -> tuple[
 
     if opened:
         return False, f"{volunteer['姓名']} 今天已经签到，还没签退。请先签退。"
+
+    assignments = load_today_assignments_for_volunteer(volunteer, raw_id)
+
+    if assignments:
+        job_lines = [
+            format_assignment_for_attendance(a)
+            for a in assignments
+        ]
+
+        role_text = " / ".join(job_lines)
+
+        db_query("""
+            insert into attendance
+            (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            now_date_str(),
+            volunteer["编号"],
+            volunteer["姓名"],
+            1,
+            1,
+            role_text,
+            now_time_str(),
+            "",
+            None,
+            card_no,
+            "按排班签到"
+        ))
+
+        for a in assignments:
+            db_query("""
+                insert into volunteer_attendance_logs (
+                    assignment_id,
+                    volunteer_id,
+                    name,
+                    attendance_date,
+                    actual_role,
+                    actual_place,
+                    walk_in,
+                    remarks
+                )
+                values (%s, %s, %s, %s, %s, %s, false, '按排班签到')
+            """, (
+                a["id"],
+                a["volunteer_id"],
+                a["name"],
+                a["assignment_date"],
+                a["role"],
+                a["assigned_place"],
+            ))
+
+        jobs_display = "\n".join([f"・{x}" for x in job_lines])
+
+        return True, f"""{volunteer['姓名']} 已签到
+
+今天岗位：
+{jobs_display}
+
+完成后请记得签退。"""
+
+    # 没有排班，才需要义工选择岗位
+    if role not in ROLES:
+        return False, "今天没有排班记录，请选择实际协助岗位。"
 
     db_query("""
         insert into attendance
@@ -537,28 +717,35 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "") -> tuple[
         "",
         None,
         card_no,
-        "iPad签到"
+        "临时报到 / 未排班签到"
     ))
 
-    phone = volunteer.get("电话号码") or ""
-    paid_until = get_member_paid_until(to_member_id(volunteer))
+    db_query("""
+        insert into volunteer_attendance_logs (
+            assignment_id,
+            volunteer_id,
+            name,
+            attendance_date,
+            actual_role,
+            actual_place,
+            walk_in,
+            remarks
+        )
+        values (null, %s, %s, %s, %s, %s, true, '未排班临时报到')
+    """, (
+        volunteer["编号"],
+        volunteer["姓名"],
+        now_date_str(),
+        role,
+        role,
+    ))
 
-    if phone:
-        phone_text = phone
-    else:
-        phone_text = "未登记"
+    return True, f"""{volunteer['姓名']} 已签到
 
-    extra = f"\n电话：{phone_text}"
+今天没有正式排班记录。
+已记录为临时报到：{role}
 
-    if paid_until:
-        try:
-            paid_until_text = paid_until.strftime("%Y-%m")
-        except Exception:
-            paid_until_text = str(paid_until)
-
-        extra += f"\n月费已缴费至：{paid_until_text}"
-
-    return True, f"{volunteer['姓名']} 已签到：{role}{extra}"
+完成后请记得签退。"""
 
 def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
     raw_id = str(volunteer_id or "").strip()
@@ -605,6 +792,17 @@ def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
             hours = %s
         where id = %s
     """, (end_time, hours, row["id"]))
+
+    db_query("""
+        update volunteer_attendance_logs
+        set check_out_time = now()
+        where volunteer_id = %s
+        and attendance_date = %s
+        and check_out_time is null
+    """, (
+        volunteer["编号"],
+        now_date_str(),
+    ))
 
     return True, f"{volunteer['姓名']} 已签退。"
 

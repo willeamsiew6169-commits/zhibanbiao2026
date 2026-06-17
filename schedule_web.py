@@ -4,14 +4,16 @@ import os
 import psycopg2
 import pandas as pd
 
+from db import get_db
 from opencc import OpenCC
 from openpyxl import load_workbook
 from datetime import datetime, timedelta, date
 from psycopg2.extras import RealDictCursor
 from sqlalchemy import create_engine, text
-from schedule_builder import run_schedule_for_date, parse_signup_line_multi, normalize_time_text
+
 from monthly_prebook_message import generate_monthly_prebook_message
 from flask import Blueprint, request, session, redirect, url_for, render_template_string
+from schedule_builder import run_schedule_for_date, parse_signup_line_multi, normalize_time_text, build_buddhist_festival_message, get_special_day_info, get_next_day_remove_info, build_lunar_1_15_message, build_normal_message
 
 
 cc = OpenCC('t2s')  # 繁 → 简
@@ -40,7 +42,11 @@ TIME_OPTIONS = [
     "4:00pm", "4:30pm", "5:00pm", "5:30pm", "6:00pm"
 ]
 
-ROLE_OPTIONS = ["值班", "卫生", "供台"]
+ROLE_OPTIONS = [
+    "值班",
+    "卫生",
+    "整理佛台",
+]
 
 schedule_records = []
 
@@ -49,6 +55,136 @@ def to_simple(text):
     if not text:
         return ""
     return cc.convert(str(text).strip())
+
+
+@schedule_bp.route(
+    "/volunteer/cancel/<int:signup_id>",
+    methods=["POST"]
+)
+def volunteer_cancel_signup(signup_id):
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+            cur.execute("""
+                select
+                    id,
+                    name,
+                    signup_date,
+                    role,
+                    coalesce(status, 'pending') as status
+                from volunteer_schedule_signups
+                where id = %s
+            """, (signup_id,))
+
+            row = cur.fetchone()
+
+            if not row:
+                return """
+                <h1>❌ 找不到报名记录</h1>
+                <a href="/volunteer">返回</a>
+                """
+
+            if row["status"] == "assigned":
+                return f"""
+                <h1>❌ 已安排值班</h1>
+
+                <p>
+                {row["name"]}
+                </p>
+
+                <p>
+                {row["signup_date"]}
+                </p>
+
+                <p>
+                {row["role"]}
+                </p>
+
+                <p style="color:red;">
+                已经安排值班，请联系负责人取消。
+                </p>
+
+                <a href="/volunteer">
+                返回
+                </a>
+                """
+
+            cur.execute("""
+                update volunteer_schedule_signups
+                set
+                    status = 'cancelled',
+                    assigned_place = null,
+                    remarks = '义工自行取消报名'
+                where id = %s
+            """, (signup_id,))
+
+            conn.commit()
+
+    return """
+    <h1>✅ 已取消报名</h1>
+
+    <a href="/volunteer">
+    返回义工报名
+    </a>
+    """
+
+
+def get_pending_signup_counts():
+    from datetime import date, timedelta
+    from db import db_query
+
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    month_start = today.replace(day=1)
+
+    today_count = db_query("""
+        select count(*) as count
+        from volunteer_schedule_signups
+        where signup_date = %s
+        and coalesce(status, 'pending') = 'pending'
+    """, (today,), fetchone=True)["count"]
+
+    tomorrow_count = db_query("""
+        select count(*) as count
+        from volunteer_schedule_signups
+        where signup_date = %s
+        and coalesce(status, 'pending') = 'pending'
+    """, (tomorrow,), fetchone=True)["count"]
+
+    month_count = db_query("""
+        select count(*) as count
+        from volunteer_schedule_signups
+        where signup_date >= %s
+        and coalesce(status, 'pending') = 'pending'
+    """, (month_start,), fetchone=True)["count"]
+
+    return {
+        "today": today_count or 0,
+        "tomorrow": tomorrow_count or 0,
+        "month": month_count or 0,
+    }
+
+
+def time_to_minutes(t):
+    from datetime import datetime
+
+    if not t:
+        return None
+
+    s = str(t).strip().lower().replace(" ", "")
+
+    if "am" in s or "pm" in s:
+        if ":" not in s:
+            s = s.replace("am", ":00am").replace("pm", ":00pm")
+
+        try:
+            dt = datetime.strptime(s, "%I:%M%p")
+            return dt.hour * 60 + dt.minute
+        except:
+            return None
+
+    return None
 
 
 def search_volunteer_names(keyword, volunteers):
@@ -138,6 +274,40 @@ def normalize_vol_id_for_search(s):
         return "CHE-" + s
 
     return s
+
+
+@schedule_bp.route("/schedule/logout")
+def schedule_logout():
+
+    session.pop("schedule_login", None)
+
+    return redirect("/volunteer")
+
+
+@schedule_bp.route(
+    "/schedule/signup_cancel/<int:signup_id>",
+    methods=["POST"]
+)
+def schedule_signup_cancel(signup_id):
+
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute("""
+                update volunteer_schedule_signups
+                set
+                    status = 'cancelled',
+                    assigned_place = null,
+                    remarks = '负责人取消报名'
+                where id = %s
+            """, (signup_id,))
+
+            conn.commit()
+
+    return redirect("/schedule/signups")
 
 
 def find_volunteer_by_keyword(keyword):
@@ -277,6 +447,69 @@ def save_prebook_record(record):
     with pd.ExcelWriter(PREBOOK_FILE, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="预报名", index=False)
 
+def load_display_records(mode, target_date=None, year=None, month=None):
+    if not os.path.exists(PREBOOK_FILE):
+        return []
+
+    try:
+        df = pd.read_excel(PREBOOK_FILE, sheet_name="预报名")
+        df.columns = df.columns.astype(str).str.strip()
+
+        if df.empty:
+            return []
+
+        df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+        df = df.dropna(subset=["日期"])
+
+        if mode == "day" and target_date:
+            target = pd.to_datetime(target_date).date()
+            df = df[df["日期"].dt.date == target]
+
+        elif mode == "prebook" and year and month:
+            df = df[
+                (df["日期"].dt.year == int(year)) &
+                (df["日期"].dt.month == int(month))
+            ]
+
+        else:
+            return []
+
+        df["日期"] = df["日期"].dt.strftime("%Y-%m-%d")
+
+        return df.fillna("").to_dict("records")
+
+    except Exception as e:
+        print("load_display_records error:", e)
+        return []
+    
+
+def get_signup_summary_for_date(date_str):
+    from db import db_query
+
+    row = db_query("""
+        select
+            count(*) as total,
+            count(*) filter (
+                where coalesce(status, 'pending') = 'pending'
+            ) as pending,
+            count(*) filter (
+                where status = 'assigned'
+            ) as assigned,
+            count(*) filter (
+                where status = 'cancelled'
+            ) as cancelled
+        from volunteer_schedule_signups
+        where signup_date = %s
+    """, (date_str,), fetchone=True)
+
+    return {
+        "total": row["total"] or 0,
+        "pending": row["pending"] or 0,
+        "assigned": row["assigned"] or 0,
+        "cancelled": row["cancelled"] or 0,
+    }
+    
+
 def save_buddha_override(date_str, final_names):
     file = os.path.join(BASE_DIR, "buddha_override.xlsx")
 
@@ -325,27 +558,526 @@ def delete_prebook_record(record):
         print("delete_prebook_record error:", e)
 
 
+def build_whatsapp_from_assigned(date_str):
+    from datetime import datetime
+
+    rows = load_assigned_places_for_date(date_str)
+
+    if not rows:
+        return f"📅 {date_str}\n\n暂时没有已安排的值班资料。"
+
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+    special_info = get_special_day_info(date_obj)
+    remove_info = get_next_day_remove_info(date_obj)
+
+    arranged = {
+        "整理佛台": [],
+        "佛堂卫生": [],
+        "二楼卫生": [],
+        "楼梯卫生": [],
+        "设师父供台": [],
+        "绿观音堂": [],
+        "绿活动中心": [],
+        "橙观音堂": [],
+        "橙活动中心": [],
+        "黄观音堂": [],
+        "黄活动中心": [],
+    }
+
+    for r in rows:
+        name = r.get("name")
+        role = r.get("role")
+        place = r.get("assigned_place")
+        shift = r.get("shift_label")
+        start = r.get("start_time")
+        end = r.get("end_time")
+
+        if not name:
+            continue
+
+        if role == "整理佛台" or place == "整理佛台":
+            arranged["整理佛台"].append(name)
+
+        elif role == "卫生" and place in ["佛堂卫生", "二楼卫生", "楼梯卫生"]:
+            arranged[place].append(name)
+
+        elif role == "供台" or place == "设师父供台":
+            arranged["设师父供台"].append(name)
+
+        elif role == "值班":
+            shift_key = str(shift or "").replace("班", "")
+
+            is_lunar_day = special_info["template_type"] == "lunar_1_15"
+
+            # 普通日不要绿班
+            if shift_key == "绿" and not is_lunar_day:
+                shift_key = "黄"
+
+            if shift_key in ["绿", "橙", "黄"] and place in ["观音堂", "活动中心"]:
+                key = f"{shift_key}{place}"
+                arranged[key].append((name, start, end))
+
+    
+    if special_info["template_type"] == "normal":
+        return build_normal_message(date_obj, arranged, special_info, remove_info)
+
+    elif special_info["template_type"] == "lunar_1_15":
+        return build_lunar_1_15_message(date_obj, arranged, special_info, remove_info)
+
+    else:
+        return build_buddhist_festival_message(date_obj, arranged, special_info, remove_info)
+
+
+@schedule_bp.route("/schedule/copy_whatsapp", methods=["POST"])
+def schedule_copy_whatsapp():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    date_str = request.form.get("date", "").strip()
+
+    if not date_str:
+        return "❌ 没有日期<br><a href='/schedule?mode=day'>返回</a>"
+
+    output = build_whatsapp_from_assigned(date_str)
+
+    return render_template_string(DAY_OUTPUT_HTML, output=output)
+
+
+@schedule_bp.route("/volunteer")
+def volunteer_home():
+    now = datetime.now()
+    change_time = now.replace(hour=19, minute=0, second=0, microsecond=0)
+
+    if now >= change_time:
+        default_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    else:
+        default_date = now.strftime("%Y-%m-%d")
+
+    return render_template_string(
+        VOLUNTEER_SIGNUP_HTML,
+        default_date=default_date,
+        times=TIME_OPTIONS
+    )
+
+@schedule_bp.route("/volunteer/signup", methods=["POST"])
+def volunteer_signup():
+    keyword = request.form.get("keyword", "").strip()
+    signup_date = request.form.get("signup_date", "").strip()
+    role = request.form.get("role", "").strip()
+    start_time = request.form.get("start_time", "").strip()
+    end_time = request.form.get("end_time", "").strip()
+
+    matches = find_volunteer_by_keyword(keyword)
+
+    if not matches:
+        return "❌ 找不到义工，请检查编号 / 姓名<br><a href='/volunteer'>返回</a>"
+
+    if len(matches) > 1:
+        return "❌ 找到多个同名义工，请用义工编号报名<br><a href='/volunteer'>返回</a>"
+
+    vol = matches[0]
+    vol_id = str(vol["id"])
+    name = str(vol["name"])
+
+    if role == "值班":
+        s_min = time_to_minutes(start_time)
+        e_min = time_to_minutes(end_time)
+
+        if s_min is None or e_min is None:
+            return "❌ 时间格式错误，请重新选择<br><a href='/volunteer'>返回</a>"
+
+        if e_min <= s_min:
+            return "❌ 结束时间必须比开始时间迟<br><a href='/volunteer'>返回</a>"
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select id
+                from volunteer_schedule_signups
+                where volunteer_id = %s
+                and signup_date = %s
+                and role = %s
+                and coalesce(status, 'pending') <> 'cancelled'
+                limit 1
+            """, (vol_id, signup_date, role))
+
+            existing = cur.fetchone()
+
+            if existing:
+                cur.execute("""
+                    update volunteer_schedule_signups
+                    set start_time = %s,
+                        end_time = %s,
+                        status = 'pending',
+                        assigned_place = null,
+                        remarks = '义工网页更新报名'
+                    where id = %s
+                """, (
+                    start_time,
+                    end_time,
+                    existing["id"]
+                ))
+
+                conn.commit()
+
+                return f"""
+                <h1>✅ 已更新报名</h1>
+                <p>{name}</p>
+                <p>{signup_date}</p>
+                <p>{role}：{start_time} ~ {end_time}</p>
+                <p>系统已用新的资料覆盖旧报名。</p>
+                <a href="/volunteer/day_schedule?date={signup_date}">查看当天值班表</a><br>
+                <a href="/volunteer">继续报名</a>
+                """
+
+            cur.execute("""
+                insert into volunteer_schedule_signups
+                (volunteer_id, name, signup_date, role, start_time, end_time, status, remarks)
+                values (%s, %s, %s, %s, %s, %s, 'pending', '义工网页报名')
+            """, (
+                vol_id,
+                name,
+                signup_date,
+                role,
+                start_time,
+                end_time
+            ))
+
+            conn.commit()
+
+    return redirect(url_for("schedule.volunteer_day_schedule", date=signup_date))
+
+@schedule_bp.route("/volunteer/my_schedule")
+def volunteer_my_schedule():
+    keyword = request.args.get("keyword", "").strip()
+
+    if not keyword:
+        return "❌ 请输入义工编号 / 姓名 / 电话<br><a href='/volunteer'>返回</a>"
+
+    matches = find_volunteer_by_keyword(keyword)
+
+    if not matches:
+        return "❌ 找不到义工<br><a href='/volunteer'>返回</a>"
+
+    if len(matches) > 1:
+        return "❌ 找到多个同名义工，请用义工编号查询<br><a href='/volunteer'>返回</a>"
+
+    vol = matches[0]
+    vol_id = str(vol["id"])
+    name = str(vol["name"])
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select *
+                from volunteer_schedule_signups
+                where volunteer_id = %s
+                and coalesce(status, 'pending') <> 'cancelled'
+                order by signup_date, start_time
+            """, (vol_id,))
+            rows = cur.fetchall()
+
+    html = f"""
+    <h1>我的报名记录</h1>
+    <h2>{name}</h2>
+    <a href="/volunteer">返回报名</a>
+    <hr>
+    """
+
+    if not rows:
+        html += "<p>暂时没有报名记录。</p>"
+    else:
+        for r in rows:
+            assigned_place = r.get("assigned_place") or "尚未安排"
+            status = str(r.get("status") or "pending")
+
+            html += f"""
+            <p style="font-size:22px;">
+            📅 {r["signup_date"]}<br>
+            岗位：{r["role"]}<br>
+            时间：{r["start_time"]} ~ {r["end_time"]}<br>
+            系统安排：{assigned_place}<br>
+            状态：{status}
+            </p>
+            """
+
+            if status == "pending":
+                html += f"""
+                <form method="post"
+                      action="/volunteer/cancel/{r['id']}"
+                      onsubmit="return confirm('确定取消报名？');">
+
+                    <button type="submit">
+                    ❌ 取消报名
+                    </button>
+
+                </form>
+                """
+            else:
+                html += """
+                <p style="color:#b36b00; font-size:20px;">
+                ⚠️ 已进入正式排班，如需取消请联系负责人。
+                </p>
+                """
+
+            html += "<hr>"
+
+    return html
+
+
+@schedule_bp.route(
+    "/schedule/signup_restore/<int:signup_id>",
+    methods=["POST"]
+)
+def schedule_signup_restore(signup_id):
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                update volunteer_schedule_signups
+                set
+                    status = 'pending',
+                    assigned_place = null,
+                    remarks = '负责人恢复报名'
+                where id = %s
+            """, (signup_id,))
+
+            conn.commit()
+
+    return redirect("/schedule/signups")
+
+
+
+@schedule_bp.route("/volunteer/day_schedule")
+def volunteer_day_schedule():
+    signup_date = request.args.get("date", "").strip()
+
+    if not signup_date:
+        return "❌ 没有日期<br><a href='/volunteer'>返回</a>"
+
+    try:
+        output = build_whatsapp_from_assigned(signup_date)
+    except Exception as e:
+        output = f"❌ 暂时无法生成值班表：{e}"
+
+    return render_template_string("""
+    <!doctype html>
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>当天值班表</title>
+    <style>
+    body { font-family:"Microsoft YaHei"; background:#f5f5f5; padding:20px; }
+    .box { background:white; max-width:900px; margin:auto; padding:25px; border-radius:15px; }
+    textarea { width:100%; height:650px; font-size:20px; padding:15px; box-sizing:border-box; }
+    a, button { font-size:22px; padding:10px 18px; margin:8px; }
+    </style>
+    </head>
+    <body>
+    <div class="box">
+    <h1>📋 当天值班表</h1>
+    <a href="/volunteer">继续报名</a>
+    <br><br>
+    <textarea readonly>{{ output }}</textarea>
+    </div>
+    </body>
+    </html>
+    """, output=output)
+
+
+@schedule_bp.route("/schedule/edit_assigned/<int:assignment_id>", methods=["GET", "POST"])
+def edit_assigned_place(assignment_id):
+
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    shift_options = ["绿班", "橙班", "黄班"]
+    place_options = [
+        "观音堂",
+        "活动中心",
+        "佛堂卫生",
+        "二楼卫生",
+        "楼梯卫生",
+        "设师父供台",
+        "整理佛台",
+    ]
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+            if request.method == "POST":
+                shift_label = request.form.get("shift_label", "").strip()
+                assigned_place = request.form.get("assigned_place", "").strip()
+                start_time = request.form.get("start_time", "").strip()
+                end_time = request.form.get("end_time", "").strip()
+
+                cur.execute("""
+                    update volunteer_schedule_assignments
+                    set
+                        shift_label = %s,
+                        assigned_place = %s,
+                        start_time = %s,
+                        end_time = %s,
+                        remarks = '负责人调整排班'
+                    where id = %s
+                """, (
+                    shift_label or None,
+                    assigned_place,
+                    start_time or None,
+                    end_time or None,
+                    assignment_id
+                ))
+
+                conn.commit()
+
+                return redirect("/schedule/signups")
+
+            cur.execute("""
+                select *
+                from volunteer_schedule_assignments
+                where id = %s
+            """, (assignment_id,))
+
+            row = cur.fetchone()
+
+    if not row:
+        return "❌ 找不到排班记录<br><a href='/schedule/signups'>返回</a>"
+
+    return render_template_string("""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>调整排班</title>
+<style>
+body { font-family:"Microsoft YaHei", Arial; background:#f5f5f5; padding:20px; }
+.box { background:white; max-width:700px; margin:auto; padding:25px; border-radius:15px; }
+input, select, button { font-size:24px; padding:10px; margin:8px 0; width:100%; box-sizing:border-box; }
+p { font-size:22px; }
+</style>
+</head>
+<body>
+<div class="box">
+
+<h1>✏️ 调整排班</h1>
+
+<p><b>{{ row.name }}</b>（{{ row.volunteer_id or "" }}）</p>
+<p>日期：{{ row.assignment_date }}</p>
+<p>岗位：{{ row.role }}</p>
+
+<form method="post">
+
+    <label>班别</label>
+    <select name="shift_label">
+        <option value="">无</option>
+        {% for s in shift_options %}
+        <option value="{{ s }}" {% if row.shift_label == s %}selected{% endif %}>
+            {{ s }}
+        </option>
+        {% endfor %}
+    </select>
+
+    <label>地点</label>
+    <select name="assigned_place" required>
+        {% for p in place_options %}
+        <option value="{{ p }}" {% if row.assigned_place == p %}selected{% endif %}>
+            {{ p }}
+        </option>
+        {% endfor %}
+    </select>
+
+    <label>开始时间</label>
+    <input name="start_time" value="{{ row.start_time or '' }}" placeholder="例如 11:00am">
+
+    <label>结束时间</label>
+    <input name="end_time" value="{{ row.end_time or '' }}" placeholder="例如 2:00pm">
+
+    <button type="submit">💾 保存调整</button>
+
+</form>
+
+<br>
+<a href="/schedule/signups">⬅ 返回报名管理</a>
+
+</div>
+</body>
+</html>
+""",
+        row=row,
+        shift_options=shift_options,
+        place_options=place_options
+    )
+
+
+def load_day_flags(date_str):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select
+                    flag_date,
+                    coalesce(need_setup_master_table, false) as need_setup_master_table,
+                    coalesce(need_remove_master_table, false) as need_remove_master_table,
+                    coalesce(setup_people, '') as setup_people,
+                    coalesce(remove_people, '') as remove_people,
+                    remarks
+                from schedule_day_flags
+                where flag_date = %s
+            """, (date_str,))
+            row = cur.fetchone()
+
+    if not row:
+        return {
+            "need_setup_master_table": False,
+            "need_remove_master_table": False,
+            "setup_people": "",
+            "remove_people": "",
+            "remarks": "",
+        }
+
+    return row
+
+
 @schedule_bp.route("/schedule", methods=["GET", "POST"])
-def schedule():
+@schedule_bp.route("/schedule/admin", methods=["GET", "POST"])
+def schedule_admin():
+    from datetime import datetime, date
+
     if not session.get("schedule_login"):
         if request.method == "POST":
             pin = request.form.get("pin", "").strip()
             if pin == SCHEDULE_PIN:
+                session.permanent = True
                 session["schedule_login"] = True
-                return redirect(url_for("schedule.schedule"))
+                return redirect(url_for("schedule.schedule_admin"))
 
             return "❌ PIN 错误<br><a href='/schedule'>返回</a>"
 
         return LOGIN_HTML
     
-    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    now = datetime.now()
+
+    # 每天晚上 7:00pm 后，自动切换到明天的值班表
+    change_time = now.replace(hour=19, minute=0, second=0, microsecond=0)
+
+    if now >= change_time:
+        default_schedule_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    else:
+        default_schedule_date = now.strftime("%Y-%m-%d")
 
     mode = request.args.get("mode", "")
 
     buddha_names = load_buddha_name_options()
 
-    override_date = request.args.get("override_date") or tomorrow
+    override_date = request.args.get("override_date") or default_schedule_date
     fixed_buddha_today = get_fixed_buddha_for_date(override_date)
+    pending_counts = get_pending_signup_counts()
+    day_summary = get_signup_summary_for_date(override_date)
+    day_flags = load_day_flags(override_date)
+    selected_date_obj = datetime.strptime(override_date, "%Y-%m-%d").date()
+    is_today_or_past = selected_date_obj < date.today()
 
     today = date.today()
 
@@ -356,25 +1088,49 @@ def schedule():
         next_year = today.year
         next_month = today.month + 1
 
+    display_records = load_display_records(
+        mode=mode,
+        target_date=override_date if mode == "day" else None,
+        year=next_year if mode == "prebook" else None,
+        month=next_month if mode == "prebook" else None,
+    )
+
     return render_template_string(
         SCHEDULE_HTML,
         mode=mode,
         times=TIME_OPTIONS,
         roles=ROLE_OPTIONS,
-        records=schedule_records,
-        tomorrow=tomorrow,
+        records=display_records,
+        tomorrow=default_schedule_date,
         buddha_names=buddha_names,
         override_date=override_date,
         fixed_buddha_today=fixed_buddha_today,
         default_year=next_year,
         default_month=next_month,
+        pending_counts=pending_counts,
+        day_summary=day_summary,
+        is_today_or_past=is_today_or_past,
+        day_flags=day_flags,
     )
+
+
+@schedule_bp.route("/volunteer/today_schedule")
+def volunteer_today_schedule():
+    now = datetime.now()
+    change_time = now.replace(hour=19, minute=0, second=0, microsecond=0)
+
+    if now >= change_time:
+        target_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    else:
+        target_date = now.strftime("%Y-%m-%d")
+
+    return redirect(url_for("schedule.volunteer_day_schedule", date=target_date))
 
 
 @schedule_bp.route("/schedule/add", methods=["POST"])
 def schedule_add():
     if not session.get("schedule_login"):
-        return redirect(url_for("schedule.schedule"))
+        return redirect(url_for("schedule.schedule_admin"))
 
     mode = request.form.get("mode", "").strip()
 
@@ -388,6 +1144,20 @@ def schedule_add():
     year = request.form.get("year", "").strip()
     month = request.form.get("month", "").strip()
     days = request.form.getlist("days")
+
+    if mode == "prebook" and action == "generate_monthly":
+        year = request.form.get("year", "").strip()
+        month = request.form.get("month", "").strip()
+
+        try:
+            output = generate_monthly_prebook_message(int(year), int(month))
+        except Exception as e:
+            output = f"❌ 生成失败：{e}"
+
+        return render_template_string(
+            MONTHLY_PREBOOK_HTML,
+            output=output
+        )
 
     if mode == "day" and action == "parse_raw":
         if not single_date:
@@ -430,13 +1200,13 @@ def schedule_add():
                 schedule_records.append(record)
                 save_prebook_record(record)
 
-        return redirect(url_for("schedule.schedule", mode="day"))
+        return redirect(url_for("schedule.schedule_admin", mode="day"))
 
     if not vol_keyword:
-        return "❌ 请填写义工编号<br><a href='/schedule'>返回</a>"
+        return "❌ 请填写义工编号<br><a href='/schedule/admin'>返回</a>"
 
     if not roles:
-        return "❌ 请至少选择一个岗位<br><a href='/schedule'>返回</a>"
+        return "❌ 请至少选择一个岗位<br><a href='/schedule/admin'>返回</a>"
 
     matches = find_volunteer_by_keyword(vol_keyword)
 
@@ -448,7 +1218,7 @@ def schedule_add():
         <h3>找到多个义工，请选择：</h3>
 
         {% for v in matches %}
-            <form method="post" action="/schedule/add">
+            <form method="post" action="/schedule/prebook_add">
                 <input type="hidden" name="vol_id" value="{{ v.id }}">
                 <input type="hidden" name="mode" value="{{ mode }}">
                 <input type="hidden" name="action" value="{{ action }}">
@@ -544,13 +1314,254 @@ def schedule_add():
             schedule_records.append(record)
             save_prebook_record(record)
 
-    return redirect(url_for("schedule.schedule", mode=mode))
-        
+    return redirect(url_for("schedule.schedule_admin", mode=mode))
+
+
+@schedule_bp.route("/schedule/prebook_add", methods=["POST"])
+def schedule_prebook_add():
+
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    year = int(request.form.get("year"))
+    month = int(request.form.get("month"))
+    keyword = request.form.get("vol_id", "").strip()
+
+    days = request.form.getlist("days")
+    roles = request.form.getlist("roles")
+
+    start_time = request.form.get("start_time", "").strip()
+    end_time = request.form.get("end_time", "").strip()
+
+    if not keyword:
+        return "❌ 请输入义工编号 / 姓名<br><a href='/schedule?mode=prebook'>返回</a>"
+
+    if not days:
+        return "❌ 请选择日期<br><a href='/schedule?mode=prebook'>返回</a>"
+
+    if not roles:
+        return "❌ 请选择岗位<br><a href='/schedule?mode=prebook'>返回</a>"
+
+    matches = find_volunteer_by_keyword(keyword)
+
+    if not matches:
+        return "❌ 找不到义工<br><a href='/schedule?mode=prebook'>返回</a>"
+
+    if len(matches) > 1:
+        return "❌ 找到多个同名义工，请用义工编号查询<br><a href='/schedule?mode=prebook'>返回</a>"
+
+    vol = matches[0]
+    volunteer_id = str(vol["id"])
+    name = str(vol["name"])
+
+    inserted = 0
+    skipped = 0
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+
+            for d in days:
+                day = int(d)
+
+                try:
+                    signup_date = date(year, month, day)
+                except ValueError:
+                    skipped += 1
+                    continue
+
+                for role in roles:
+
+                    role_start = start_time if role == "值班" else None
+                    role_end = end_time if role == "值班" else None
+
+                    if role == "值班" and (not role_start or not role_end):
+                        skipped += 1
+                        continue
+
+                    cur.execute("""
+                        select id
+                        from volunteer_schedule_signups
+                        where volunteer_id = %s
+                        and signup_date = %s
+                        and role = %s
+                        and coalesce(status, 'pending') <> 'cancelled'
+                        limit 1
+                    """, (
+                        volunteer_id,
+                        signup_date,
+                        role
+                    ))
+
+                    exists = cur.fetchone()
+
+                    if exists:
+                        skipped += 1
+                        continue
+
+                    cur.execute("""
+                        insert into volunteer_schedule_signups (
+                            volunteer_id,
+                            name,
+                            signup_date,
+                            role,
+                            start_time,
+                            end_time,
+                            status,
+                            remarks,
+                            created_at
+                        )
+                        values (
+                            %s, %s, %s, %s, %s, %s,
+                            'pending',
+                            '管理员月预报名',
+                            now()
+                        )
+                    """, (
+                        volunteer_id,
+                        name,
+                        signup_date,
+                        role,
+                        role_start,
+                        role_end
+                    ))
+
+                    inserted += 1
+
+        conn.commit()
+
+    return f"""
+    <h1>✅ 月预报名已加入</h1>
+    <p>义工：{name}</p>
+    <p>成功加入：{inserted} 笔</p>
+    <p>跳过重复/无效：{skipped} 笔</p>
+    <a href="/schedule?mode=prebook">继续加入</a><br>
+    <a href="/schedule/admin">返回后台</a>
+    """    
+
+
+@schedule_bp.route("/volunteer/prebook", methods=["GET", "POST"])
+def volunteer_prebook():
+
+    if request.method == "GET":
+        today = date.today()
+
+        return render_template_string(
+            VOLUNTEER_PREBOOK_HTML,
+            default_year=today.year,
+            default_month=today.month,
+            times=TIME_OPTIONS
+        )
+
+    keyword = request.form.get("keyword", "").strip()
+    year = int(request.form.get("year"))
+    month = int(request.form.get("month"))
+    days = request.form.getlist("days")
+    role = request.form.get("role", "").strip()
+    start_time = request.form.get("start_time", "").strip()
+    end_time = request.form.get("end_time", "").strip()
+
+    if not days:
+        return "❌ 请选择至少一个日期<br><a href='/volunteer/prebook'>返回</a>"
+
+    matches = find_volunteer_by_keyword(keyword)
+
+    if not matches:
+        return "❌ 找不到义工，请检查编号 / 姓名<br><a href='/volunteer/prebook'>返回</a>"
+
+    if len(matches) > 1:
+        return "❌ 找到多个同名义工，请用义工编号报名<br><a href='/volunteer/prebook'>返回</a>"
+
+    vol = matches[0]
+    vol_id = str(vol["id"])
+    name = str(vol["name"])
+
+    if role == "值班":
+        s_min = time_to_minutes(start_time)
+        e_min = time_to_minutes(end_time)
+
+        if s_min is None or e_min is None:
+            return "❌ 时间格式错误，请重新选择<br><a href='/volunteer/prebook'>返回</a>"
+
+        if e_min <= s_min:
+            return "❌ 结束时间必须比开始时间迟<br><a href='/volunteer/prebook'>返回</a>"
+    else:
+        start_time = None
+        end_time = None
+
+    inserted = 0
+    updated = 0
+    skipped = 0
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+            for d in days:
+                try:
+                    signup_date = date(year, month, int(d))
+                except ValueError:
+                    skipped += 1
+                    continue
+
+                cur.execute("""
+                    select id
+                    from volunteer_schedule_signups
+                    where volunteer_id = %s
+                    and signup_date = %s
+                    and role = %s
+                    and coalesce(status, 'pending') <> 'cancelled'
+                    limit 1
+                """, (vol_id, signup_date, role))
+
+                existing = cur.fetchone()
+
+                if existing:
+                    cur.execute("""
+                        update volunteer_schedule_signups
+                        set start_time = %s,
+                            end_time = %s,
+                            status = 'pending',
+                            assigned_place = null,
+                            remarks = '义工多日报名更新'
+                        where id = %s
+                    """, (
+                        start_time,
+                        end_time,
+                        existing["id"]
+                    ))
+                    updated += 1
+
+                else:
+                    cur.execute("""
+                        insert into volunteer_schedule_signups
+                        (volunteer_id, name, signup_date, role, start_time, end_time, status, remarks)
+                        values (%s, %s, %s, %s, %s, %s, 'pending', '义工多日报名')
+                    """, (
+                        vol_id,
+                        name,
+                        signup_date,
+                        role,
+                        start_time,
+                        end_time
+                    ))
+                    inserted += 1
+
+            conn.commit()
+
+    return f"""
+    <h1>✅ 多日报名完成</h1>
+    <p>义工：{name}</p>
+    <p>岗位：{role}</p>
+    <p>新增：{inserted} 笔</p>
+    <p>更新：{updated} 笔</p>
+    <p>跳过无效日期：{skipped} 笔</p>
+    <a href="/volunteer/prebook">继续多日报名</a><br>
+    <a href="/volunteer">返回首页</a>
+    """
     
 @schedule_bp.route("/schedule/generate_day", methods=["POST"])
 def schedule_generate_day():
     if not session.get("schedule_login"):
-        return redirect(url_for("schedule.schedule"))
+        return redirect(url_for("schedule.schedule_admin"))
 
     date = (
         request.form.get("date")
@@ -562,6 +1573,15 @@ def schedule_generate_day():
     if not date:
         return "❌ 没有收到日期，请返回选择日期<br><a href='/schedule?mode=day'>返回</a>"
 
+    target_date = datetime.strptime(date, "%Y-%m-%d").date()
+
+    if target_date < datetime.today().date():
+        return """
+        <h1>❌ 当天排班已锁定</h1>
+        <p>今天或过去日期不能重新自动排班，只能使用「补入待安排」。</p>
+        <a href="/schedule?mode=day">返回</a>
+        """
+
     try:
         output = run_schedule_for_date(date)
     except Exception as e:
@@ -570,10 +1590,46 @@ def schedule_generate_day():
     return render_template_string(DAY_OUTPUT_HTML, output=output)
 
 
+@schedule_bp.route("/volunteer/my_schedule_search")
+def volunteer_my_schedule_search():
+    return render_template_string("""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>我的报名</title>
+<style>
+body { font-family:"Microsoft YaHei"; background:#f5f5f5; padding:20px; font-size:24px; }
+.box { background:white; max-width:700px; margin:auto; padding:25px; border-radius:15px; }
+input, button { font-size:28px; padding:14px; width:100%; box-sizing:border-box; margin:10px 0; }
+a { font-size:22px; }
+</style>
+</head>
+<body>
+<div class="box">
+
+<h1>🔍 我的报名</h1>
+
+<form method="get" action="/volunteer/my_schedule">
+    <label>义工编号 / 电话 / 姓名</label>
+    <input name="keyword" required placeholder="例如 CHE-108 / 108 / 姓名">
+    <button type="submit">查询我的报名</button>
+</form>
+
+<br>
+<a href="/volunteer">⬅ 返回首页</a>
+
+</div>
+</body>
+</html>
+""")
+
+
 @schedule_bp.route("/schedule/monthly_prebook", methods=["POST"])
 def schedule_monthly_prebook():
     if not session.get("schedule_login"):
-        return redirect(url_for("schedule.schedule"))
+        return redirect(url_for("schedule.schedule_admin"))
 
     year = request.form.get("year", "").strip()
     month = request.form.get("month", "").strip()
@@ -589,15 +1645,15 @@ def schedule_monthly_prebook():
 @schedule_bp.route("/schedule/clear", methods=["POST"])
 def schedule_clear():
     if not session.get("schedule_login"):
-        return redirect(url_for("schedule.schedule"))
+        return redirect(url_for("schedule.schedule_admin"))
 
     schedule_records.clear()
-    return redirect(url_for("schedule.schedule"))
+    return redirect(url_for("schedule.schedule_admin"))
 
 @schedule_bp.route("/schedule/delete/<int:index>", methods=["POST"])
 def schedule_delete(index):
     if not session.get("schedule_login"):
-        return redirect(url_for("schedule.schedule"))
+        return redirect(url_for("schedule.schedule_admin"))
 
     mode = request.form.get("mode", "day")
 
@@ -608,11 +1664,309 @@ def schedule_delete(index):
 
     return redirect(url_for("schedule.schedule", mode=mode))
 
+
+def load_assigned_places_for_date(date_str):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select
+                    id,
+                    signup_id,
+                    volunteer_id,
+                    name,
+                    assignment_date,
+                    role,
+                    shift_label,
+                    assigned_place,
+                    start_time,
+                    end_time,
+                    status,
+                    remarks
+                from volunteer_schedule_assignments
+                where assignment_date = %s
+                and coalesce(status, 'assigned') <> 'cancelled'
+                order by
+                    case
+                        when role = '卫生' then 1
+                        when role = '供台' then 2
+                        when role = '值班' then 3
+                        else 9
+                    end,
+                    case
+                        when shift_label = '绿班' then 1
+                        when shift_label = '橙班' then 2
+                        when shift_label = '黄班' then 3
+                        else 9
+                    end,
+                    assigned_place,
+                    start_time,
+                    name
+            """, (date_str,))
+
+            return cur.fetchall()
+        
+
+def load_pending_signups_for_date(date_str):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select
+                    id,
+                    volunteer_id,
+                    name,
+                    role,
+                    start_time,
+                    end_time
+                from volunteer_schedule_signups
+                where signup_date = %s
+                and coalesce(status, 'pending') = 'pending'
+                order by role, start_time, name
+            """, (date_str,))
+
+            return cur.fetchall()
+        
+
+def get_recent_cleaning_places(volunteer_id, before_date, limit=5):
+    if not volunteer_id:
+        return []
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select assigned_place
+                from volunteer_schedule_assignments
+                where volunteer_id = %s
+                and assignment_date < %s
+                and role = '卫生'
+                and assigned_place in ('佛堂卫生', '二楼卫生', '楼梯卫生')
+                and coalesce(status, 'assigned') <> 'cancelled'
+                order by assignment_date desc, id desc
+                limit %s
+            """, (volunteer_id, before_date, limit))
+
+            rows = cur.fetchall()
+
+    return [r["assigned_place"] for r in rows if r.get("assigned_place")]
+
+
+def fill_pending_volunteers(date_str):
+    assigned_rows = load_assigned_places_for_date(date_str)
+    pending_rows = load_pending_signups_for_date(date_str)
+
+    if not pending_rows:
+        return "✅ 没有待安排报名"
+
+    place_count = {
+        "佛堂卫生": 0,
+        "二楼卫生": 0,
+        "楼梯卫生": 0,
+        "设师父供台": 0,
+        "绿观音堂": 0,
+        "绿活动中心": 0,
+        "橙观音堂": 0,
+        "橙活动中心": 0,
+        "黄观音堂": 0,
+        "黄活动中心": 0,
+    }
+
+    for r in assigned_rows:
+        shift_label = r.get("shift_label") or ""
+        place = r.get("assigned_place") or ""
+
+        key = f"{shift_label}{place}" if shift_label else place
+
+        if key in place_count:
+            place_count[key] += 1
+        elif place in place_count:
+            place_count[place] += 1
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+
+            for r in pending_rows:
+                signup_id = r["id"]
+                volunteer_id = r.get("volunteer_id")
+                name = r["name"]
+                role = r["role"]
+                start_time = r.get("start_time")
+                end_time = r.get("end_time")
+
+                assigned_place = None
+                shift_label = None
+
+                if role == "卫生":
+                    cleaning_places = ["佛堂卫生", "二楼卫生", "楼梯卫生"]
+
+                    recent_places = get_recent_cleaning_places(
+                        volunteer_id,
+                        date_str,
+                        limit=5
+                    )
+
+                    def cleaning_score(place):
+                        score = place_count.get(place, 0) * 10
+
+                        if recent_places:
+                            if place == recent_places[0]:
+                                score += 100
+
+                            if place in recent_places[:3]:
+                                score += 30
+
+                            if place in recent_places:
+                                score += 10
+
+                        return score
+
+                    assigned_place = min(
+                        cleaning_places,
+                        key=cleaning_score
+                    )
+
+                elif role == "供台":
+                    assigned_place = "设师父供台"
+
+                elif role == "值班":
+                    duty_places = [
+                        ("绿班", "观音堂", "绿观音堂"),
+                        ("绿班", "活动中心", "绿活动中心"),
+                        ("橙班", "观音堂", "橙观音堂"),
+                        ("橙班", "活动中心", "橙活动中心"),
+                        ("黄班", "观音堂", "黄观音堂"),
+                        ("黄班", "活动中心", "黄活动中心"),
+                    ]
+
+                    shift_label, assigned_place, key = min(
+                        duty_places,
+                        key=lambda x: place_count[x[2]]
+                    )
+
+                else:
+                    assigned_place = role
+
+                key = f"{shift_label.replace('班', '')}{assigned_place}" if shift_label else assigned_place
+                if key in place_count:
+                    place_count[key] += 1
+
+                # 写入真正排班表
+                cur.execute("""
+                    insert into volunteer_schedule_assignments (
+                        signup_id,
+                        volunteer_id,
+                        name,
+                        assignment_date,
+                        role,
+                        shift_label,
+                        assigned_place,
+                        start_time,
+                        end_time,
+                        status,
+                        remarks,
+                        created_at
+                    )
+                    values (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, 'assigned', %s, now()
+                    )
+                """, (
+                    signup_id,
+                    volunteer_id,
+                    name,
+                    date_str,
+                    role,
+                    shift_label,
+                    assigned_place,
+                    start_time,
+                    end_time,
+                    "负责人补入待安排"
+                ))
+
+                # 报名表只改状态
+                cur.execute("""
+                    update volunteer_schedule_signups
+                    set
+                        status = 'assigned',
+                        remarks = '负责人补入待安排'
+                    where id = %s
+                """, (signup_id,))
+
+            conn.commit()
+
+    return f"✅ 已补入 {len(pending_rows)} 位待安排义工"
+
+
+@schedule_bp.route("/schedule/save_day_flags", methods=["POST"])
+def save_day_flags():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    date_str = request.form.get("date", "").strip()
+
+    need_setup = request.form.get("need_setup_master_table") == "1"
+    need_remove = request.form.get("need_remove_master_table") == "1"
+
+    setup_people = request.form.get("setup_people", "").strip()
+    remove_people = request.form.get("remove_people", "").strip()
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                insert into schedule_day_flags (
+                    flag_date,
+                    need_setup_master_table,
+                    need_remove_master_table,
+                    setup_people,
+                    remove_people,
+                    updated_at
+                )
+                values (%s, %s, %s, %s, %s, now())
+                on conflict (flag_date)
+                do update set
+                    need_setup_master_table = excluded.need_setup_master_table,
+                    need_remove_master_table = excluded.need_remove_master_table,
+                    setup_people = excluded.setup_people,
+                    remove_people = excluded.remove_people,
+                    updated_at = now()
+            """, (
+                date_str,
+                need_setup,
+                need_remove,
+                setup_people,
+                remove_people
+            ))
+
+            conn.commit()
+
+    return redirect(url_for(
+        "schedule.schedule_admin",
+        mode="day",
+        override_date=date_str
+    ))
+
+
+@schedule_bp.route("/schedule/fill_pending", methods=["POST"])
+def schedule_fill_pending():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    date_str = request.form.get("date", "").strip()
+
+    if not date_str:
+        return "❌ 没有日期<br><a href='/schedule/admin'>返回</a>"
+
+    msg = fill_pending_volunteers(date_str)
+
+    return f"""
+    <h1>{msg}</h1>
+    <a href="/schedule?mode=day&override_date={date_str}">返回当天值班安排</a><br>
+    <a href="/schedule/signups?date={date_str}">查看报名管理</a>
+    """
+
+
 @schedule_bp.route("/schedule/parse_raw", methods=["POST"])
 def schedule_parse_raw():
 
     if not session.get("schedule_login"):
-        return redirect(url_for("schedule.schedule"))
+        return redirect(url_for("schedule.schedule_admin"))
 
     single_date = request.form.get("single_date", "").strip()
     raw_signup = request.form.get("raw_signup", "").strip()
@@ -687,7 +2041,7 @@ def schedule_parse_raw():
 @schedule_bp.route("/schedule/override", methods=["POST"])
 def schedule_override():
     if not session.get("schedule_login"):
-        return redirect(url_for("schedule.schedule"))
+        return redirect(url_for("schedule.schedule_admin"))
 
     date = request.form.get("date", "").strip()
 
@@ -700,6 +2054,9 @@ def schedule_override():
         original = str(original).strip()
         replacement = str(replacement).strip()
 
+        if replacement == "__REMOVE__":
+            continue
+
         if replacement:
             final_names.append(replacement)
         elif original:
@@ -708,6 +2065,1092 @@ def schedule_override():
     save_buddha_override(date, final_names)
 
     return redirect(url_for("schedule.schedule", mode="day", override_date=date))
+
+
+@schedule_bp.route("/schedule/signup_edit/<int:signup_id>", methods=["GET"])
+def schedule_signup_edit(signup_id):
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select *
+                from volunteer_schedule_signups
+                where id = %s
+            """, (signup_id,))
+            row = cur.fetchone()
+
+    if not row:
+        return "❌ 找不到报名记录<br><a href='/schedule/signups'>返回</a>"
+
+    return render_template_string("""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>修改报名</title>
+<style>
+body { font-family:"Microsoft YaHei", Arial; background:#f5f5f5; padding:20px; }
+.box { background:white; max-width:700px; margin:auto; padding:25px; border-radius:15px; }
+input, select, button { font-size:22px; padding:8px; margin:8px 0; }
+label { display:block; font-size:22px; margin-top:12px; }
+</style>
+</head>
+<body>
+<div class="box">
+
+<h1>✏️ 修改报名</h1>
+
+<p><b>{{ row.name }}</b>（{{ row.volunteer_id }}）</p>
+
+<form method="post" action="/schedule/signup_edit/{{ row.id }}">
+
+    <label>日期</label>
+    <input type="date" name="signup_date" value="{{ row.signup_date }}" required>
+
+    <label>岗位</label>
+    <select name="role" required>
+        <option value="值班">值班</option>
+        <option value="卫生">卫生</option>
+        <option value="设师父供台">设师父供台</option>
+        <option value="收师父供台">收师父供台</option>
+    </select>
+
+    <label>开始时间</label>
+    <select name="start_time">
+        {% for t in times %}
+        <option value="{{ t }}" {% if row.start_time == t %}selected{% endif %}>{{ t }}</option>
+        {% endfor %}
+    </select>
+
+    <label>结束时间</label>
+    <select name="end_time">
+        {% for t in times %}
+        <option value="{{ t }}" {% if row.end_time == t %}selected{% endif %}>{{ t }}</option>
+        {% endfor %}
+    </select>
+
+    <br><br>
+
+    <button type="submit">💾 保存修改</button>
+</form>
+
+<br>
+<a href="/schedule/signups">⬅ 返回报名管理</a>
+
+</div>
+</body>
+</html>
+""", row=row, roles=ROLE_OPTIONS, times=TIME_OPTIONS)
+
+
+@schedule_bp.route("/schedule/view_assigned", methods=["POST"])
+def schedule_view_assigned():
+
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    date_str = request.form.get("date", "").strip()
+
+    rows = load_assigned_places_for_date(date_str)
+
+    cleaning_groups = {
+        "佛堂卫生": [],
+        "二楼卫生": [],
+        "楼梯卫生": [],
+    }
+
+    offering_group = []
+
+    duty_groups = {
+        "绿": {
+            "观音堂": [],
+            "活动中心": [],
+        },
+        "橙": {
+            "观音堂": [],
+            "活动中心": [],
+        },
+        "黄": {
+            "观音堂": [],
+            "活动中心": [],
+        },
+    }
+
+    other_groups = {}
+
+    for r in rows:
+        item = {
+            "id": r["id"],
+            "name": r["name"],
+            "role": r.get("role"),
+            "shift_label": r.get("shift_label"),
+            "assigned_place": r.get("assigned_place"),
+            "start_time": r.get("start_time"),
+            "end_time": r.get("end_time"),
+        }
+
+        place = r.get("assigned_place") or "未安排"
+        role = r.get("role")
+        shift = r.get("shift_label")
+
+        if role == "卫生" and place in cleaning_groups:
+            cleaning_groups[place].append(item)
+
+        elif role == "供台" or place == "设师父供台":
+            offering_group.append(item)
+
+        elif role == "值班":
+            shift_key = str(shift or "").replace("班", "")
+
+            if shift_key in duty_groups and place in duty_groups[shift_key]:
+                duty_groups[shift_key][place].append(item)
+            else:
+                other_groups.setdefault(place, []).append(item)
+
+        else:
+            other_groups.setdefault(place, []).append(item)
+
+    return render_template_string("""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>排班结果</title>
+<style>
+body {
+    font-family: "Microsoft YaHei", Arial;
+    background:#f5f5f5;
+    padding:20px;
+}
+.box {
+    background:white;
+    max-width:900px;
+    margin:auto;
+    padding:25px;
+    border-radius:15px;
+}
+h1, h2, h3 {
+    margin-top:18px;
+}
+.section {
+    border:1px solid #ccc;
+    padding:15px;
+    margin:15px 0;
+    border-radius:12px;
+    background:#fafafa;
+}
+.person {
+    font-size:22px;
+    padding:8px 0;
+}
+button {
+    font-size:22px;
+    padding:10px;
+    margin:6px 0;
+}
+a {
+    font-size:20px;
+}
+</style>
+</head>
+<body>
+<div class="box">
+
+<h1>📅 {{ date_str }} 排班结果</h1>
+
+<a href="/schedule?mode=day&override_date={{ date_str }}">⬅ 返回当天值班安排</a>
+
+<hr>
+
+<h2>🧹 卫生</h2>
+
+{% for place, names in cleaning_groups.items() %}
+    <div class="section">
+        <h3>{{ place }}</h3>
+
+        {% if names %}
+            {% for item in names %}
+                <div class="person">
+                    {{ item.name }}
+                    <a href="/schedule/edit_assigned/{{ item.id }}">✏️调整</a>
+                </div>
+            {% endfor %}
+        {% else %}
+            <p>暂无安排</p>
+        {% endif %}
+    </div>
+{% endfor %}
+
+<h2>🙏 供台</h2>
+
+<div class="section">
+{% if offering_group %}
+    {% for item in offering_group %}
+        <div class="person">
+            {{ item.name }}
+            <a href="/schedule/edit_assigned/{{ item.id }}">✏️调整</a>
+        </div>
+    {% endfor %}
+{% else %}
+    <p>暂无安排</p>
+{% endif %}
+</div>
+
+<h2>🏠 值班</h2>
+
+{% for shift, places in duty_groups.items() %}
+
+    {% if shift == "绿" %}
+        <h3>🟢 绿班</h3>
+    {% elif shift == "橙" %}
+        <h3>🟠 橙班</h3>
+    {% elif shift == "黄" %}
+        <h3>🟡 黄班</h3>
+    {% else %}
+        <h3>{{ shift }}</h3>
+    {% endif %}
+
+    {% for place, names in places.items() %}
+        <div class="section">
+            <h3>{{ place }}</h3>
+
+            {% if names %}
+                {% for item in names %}
+                    <div class="person">
+                        {{ item.name }}
+                        {% if item.start_time and item.end_time %}
+                            （{{ item.start_time }}~{{ item.end_time }}）
+                        {% endif %}
+                        <a href="/schedule/edit_assigned/{{ item.id }}">✏️调整</a>
+                    </div>
+                {% endfor %}
+            {% else %}
+                <p>暂无安排</p>
+            {% endif %}
+        </div>
+    {% endfor %}
+
+{% endfor %}
+
+{% if other_groups %}
+    <h2>其他</h2>
+
+    {% for place, names in other_groups.items() %}
+        <div class="section">
+            <h3>{{ place }}</h3>
+            {% for item in names %}
+                <div class="person">
+                    {{ item.name }}
+                    {% if item.start_time and item.end_time %}
+                        （{{ item.start_time }}~{{ item.end_time }}）
+                    {% endif %}
+                    <a href="/schedule/edit_assigned/{{ item.id }}">✏️调整</a>
+                </div>
+            {% endfor %}
+        </div>
+    {% endfor %}
+{% endif %}
+
+<hr>
+
+<form method="post" action="/schedule/copy_whatsapp">
+    <input type="hidden" name="date" value="{{ date_str }}">
+    <button type="submit">📋 生成 WhatsApp 文字</button>
+</form>
+
+</div>
+</body>
+</html>
+""",
+        date_str=date_str,
+        cleaning_groups=cleaning_groups,
+        offering_group=offering_group,
+        duty_groups=duty_groups,
+        other_groups=other_groups,
+    )
+
+
+@schedule_bp.route("/schedule/signup_edit/<int:signup_id>", methods=["POST"])
+def schedule_signup_edit_save(signup_id):
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    signup_date = request.form.get("signup_date", "").strip()
+    role = request.form.get("role", "").strip()
+    start_time = request.form.get("start_time", "").strip()
+    end_time = request.form.get("end_time", "").strip()
+
+    if role == "值班":
+        if not start_time or not end_time:
+            return "❌ 值班必须选择开始和结束时间<br><a href='/volunteer/signup'>返回</a>"
+
+        if end_time <= start_time:
+            return "❌ 结束时间必须比开始时间迟<br><a href='/volunteer/signup'>返回</a>"
+    else:
+        start_time = None
+        end_time = None
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                update volunteer_schedule_signups
+                set
+                    signup_date = %s,
+                    role = %s,
+                    start_time = %s,
+                    end_time = %s,
+                    status = 'pending',
+                    assigned_place = null,
+                    remarks = '负责人修改报名'
+                where id = %s
+            """, (
+                signup_date,
+                role,
+                start_time,
+                end_time,
+                signup_id
+            ))
+
+            conn.commit()
+
+    return redirect("/schedule/signups")
+
+
+@schedule_bp.route("/schedule/signup_place/<int:signup_id>", methods=["GET"])
+def schedule_signup_place(signup_id):
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+            cur.execute("""
+                select *
+                from volunteer_schedule_signups
+                where id = %s
+            """, (signup_id,))
+            signup = cur.fetchone()
+
+            if not signup:
+                return "❌ 找不到报名记录<br><a href='/schedule/signups'>返回</a>"
+
+            cur.execute("""
+                select id
+                from volunteer_schedule_assignments
+                where signup_id = %s
+                and coalesce(status, 'assigned') <> 'cancelled'
+                order by start_time, id
+            """, (signup_id,))
+            assignments = cur.fetchall()
+
+    if len(assignments) == 1:
+        assignment_id = assignments[0]["id"]
+        return redirect(f"/schedule/edit_assigned/{assignment_id}")
+
+    if len(assignments) > 1:
+        return f"""
+        <h1>⚠️ 这位义工有多段安排</h1>
+        <p>{signup['name']} 在 {signup['signup_date']} 有多段排班。</p>
+        <p>请到当天排班结果页面逐段调整。</p>
+
+        <form method="post" action="/schedule/view_assigned">
+            <input type="hidden" name="date" value="{signup['signup_date']}">
+            <button type="submit">查看当天排班结果</button>
+        </form>
+
+        <br>
+        <a href="/schedule/signups">返回报名管理</a>
+        """
+
+    return f"""
+    <h1>❌ 还没有真正排班记录</h1>
+    <p>{signup['name']} 目前在 assignments 里没有安排。</p>
+    <p>请先自动排班，或到排班结果页面补入。</p>
+    <a href="/schedule/signups">返回报名管理</a>
+    """
+
+
+@schedule_bp.route("/schedule/attendance_status")
+def schedule_attendance_status():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    date_str = request.args.get("date", date.today().strftime("%Y-%m-%d"))
+
+    def group_by_person(rows, source="assignment"):
+        grouped = {}
+
+        for r in rows:
+            key = r.get("volunteer_id") or r.get("name")
+
+            if not key:
+                continue
+
+            if key not in grouped:
+                grouped[key] = {
+                    "name": r.get("name"),
+                    "volunteer_id": r.get("volunteer_id"),
+                    "roles": [],
+                    "places": [],
+                }
+
+            role = r.get("role") or r.get("actual_role") or ""
+            if role and role not in grouped[key]["roles"]:
+                grouped[key]["roles"].append(role)
+
+            if source == "log":
+                place = r.get("actual_place") or ""
+                shift = ""
+            else:
+                place = r.get("assigned_place") or ""
+                shift = r.get("shift_label") or ""
+
+            place_text = f"{shift} {place}".strip()
+
+            if place_text and place_text not in grouped[key]["places"]:
+                grouped[key]["places"].append(place_text)
+
+        result = []
+
+        for g in grouped.values():
+            result.append({
+                "name": g["name"],
+                "volunteer_id": g["volunteer_id"],
+                "role_text": " / ".join(g["roles"]),
+                "place_text": " / ".join(g["places"]),
+            })
+
+        return result
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+            cur.execute("""
+                select *
+                from volunteer_schedule_assignments
+                where assignment_date = %s
+                and coalesce(status, 'assigned') <> 'cancelled'
+                order by role, shift_label, assigned_place, start_time, name
+            """, (date_str,))
+            assignments = cur.fetchall()
+
+            cur.execute("""
+                select *
+                from volunteer_attendance_logs
+                where attendance_date = %s
+                order by check_in_time, name
+            """, (date_str,))
+            logs = cur.fetchall()
+
+    signed_assignment_ids = {
+        r["assignment_id"]
+        for r in logs
+        if r.get("assignment_id")
+    }
+
+    checked_in_raw = []
+    not_checked_in_raw = []
+    walk_ins_raw = []
+    not_checked_out_raw = []
+
+    for a in assignments:
+        if a["id"] in signed_assignment_ids:
+            checked_in_raw.append(a)
+        else:
+            not_checked_in_raw.append(a)
+
+    for l in logs:
+        if l.get("walk_in"):
+            walk_ins_raw.append(l)
+
+        if not l.get("check_out_time"):
+            not_checked_out_raw.append(l)
+
+    checked_in = group_by_person(checked_in_raw, source="assignment")
+    not_checked_in = group_by_person(not_checked_in_raw, source="assignment")
+    walk_ins = group_by_person(walk_ins_raw, source="log")
+    not_checked_out = group_by_person(not_checked_out_raw, source="log")
+
+    return render_template_string("""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>签到情况</title>
+<style>
+body {
+    font-family:"Microsoft YaHei";
+    background:#f5f5f5;
+    padding:20px;
+}
+.box {
+    background:white;
+    max-width:1000px;
+    margin:auto;
+    padding:25px;
+    border-radius:15px;
+}
+.section {
+    border:1px solid #ddd;
+    padding:15px;
+    margin:15px 0;
+    border-radius:10px;
+}
+li {
+    font-size:22px;
+    margin:8px 0;
+}
+input, button {
+    font-size:22px;
+    padding:8px;
+}
+.summary {
+    display:flex;
+    flex-wrap:wrap;
+    gap:12px;
+    margin:18px 0;
+}
+.card {
+    flex:1;
+    min-width:180px;
+    padding:15px;
+    border-radius:12px;
+    font-size:24px;
+    font-weight:bold;
+    text-align:center;
+}
+.green { background:#e8fff0; }
+.red { background:#ffe8e8; }
+.blue { background:#e8f2ff; }
+.yellow { background:#fff8d6; }
+</style>
+</head>
+
+<body>
+<div class="box">
+
+<h1>📋 {{ date_str }} 签到情况</h1>
+
+<form method="get">
+    <input type="date" name="date" value="{{ date_str }}">
+    <button type="submit">查询</button>
+</form>
+
+<a href="/schedule/admin">⬅ 返回负责人首页</a>
+
+<div class="summary">
+    <div class="card green">✅ 已签到<br>{{ checked_in|length }}</div>
+    <div class="card red">❌ 未签到<br>{{ not_checked_in|length }}</div>
+    <div class="card blue">🚶 临时报到<br>{{ walk_ins|length }}</div>
+    <div class="card yellow">⏳ 未签退<br>{{ not_checked_out|length }}</div>
+</div>
+
+<div class="section">
+<h2>✅ 已签到：{{ checked_in|length }}</h2>
+<ul>
+{% for r in checked_in %}
+<li>{{ r.name }}｜{{ r.role_text }}｜{{ r.place_text }}</li>
+{% endfor %}
+</ul>
+</div>
+
+<div class="section">
+<h2>❌ 已排班未签到：{{ not_checked_in|length }}</h2>
+<ul>
+{% for r in not_checked_in %}
+<li>{{ r.name }}｜{{ r.role_text }}｜{{ r.place_text }}</li>
+{% endfor %}
+</ul>
+</div>
+
+<div class="section">
+<h2>🚶 临时报到：{{ walk_ins|length }}</h2>
+<ul>
+{% for r in walk_ins %}
+<li>{{ r.name }}｜{{ r.role_text }}｜{{ r.place_text }}</li>
+{% endfor %}
+</ul>
+</div>
+
+<div class="section">
+<h2>⏳ 未签退：{{ not_checked_out|length }}</h2>
+<ul>
+{% for r in not_checked_out %}
+<li>{{ r.name }}｜{{ r.role_text }}｜{{ r.place_text }}</li>
+{% endfor %}
+</ul>
+</div>
+
+</div>
+</body>
+</html>
+""",
+        date_str=date_str,
+        checked_in=checked_in,
+        not_checked_in=not_checked_in,
+        walk_ins=walk_ins,
+        not_checked_out=not_checked_out,
+    )
+
+
+@schedule_bp.route("/schedule/signups")
+def schedule_signups_manage():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    status = request.args.get("status", "all")
+    date_filter = request.args.get("date", "").strip()
+    role_filter = request.args.get("role", "all")
+    show_history = request.args.get("show_history") == "1"
+
+    sql = """
+        select
+            id,
+            volunteer_id,
+            name,
+            signup_date,
+            role,
+            start_time,
+            end_time,
+            coalesce(status, 'pending') as status,
+            assigned_place,
+            remarks
+        from volunteer_schedule_signups
+        where 1=1
+    """
+
+    if not show_history:
+        sql += """
+            and signup_date >= current_date
+            and coalesce(status,'pending') <> 'cancelled'
+        """
+
+    params = []
+
+    if status != "all":
+        sql += " and coalesce(status, 'pending') = %s"
+        params.append(status)
+
+    if date_filter:
+        sql += " and signup_date = %s"
+        params.append(date_filter)
+
+    if role_filter != "all":
+        sql += " and role = %s"
+        params.append(role_filter)
+
+    sql += " order by signup_date, role, start_time, name"
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+            signup_ids = [r["id"] for r in rows]
+            assignment_map = {}
+
+            if signup_ids:
+                cur.execute("""
+                    select
+                        signup_id,
+                        shift_label,
+                        assigned_place,
+                        start_time,
+                        end_time
+                    from volunteer_schedule_assignments
+                    where signup_id = any(%s)
+                    and coalesce(status, 'assigned') <> 'cancelled'
+                    order by start_time, shift_label, assigned_place
+                """, (signup_ids,))
+
+                assignment_rows = cur.fetchall()
+
+                for a in assignment_rows:
+                    sid = a["signup_id"]
+
+                    shift = a.get("shift_label") or ""
+                    place = a.get("assigned_place") or ""
+                    start = a.get("start_time") or ""
+                    end = a.get("end_time") or ""
+
+                    text = ""
+
+                    if shift:
+                        text += shift
+
+                    if place:
+                        if text:
+                            text += " "
+                        text += place
+
+                    if start and end:
+                        text += f"<br><small>{start} ~ {end}</small>"
+
+                    assignment_map.setdefault(sid, []).append(text)
+
+            for r in rows:
+                r["final_assignment"] = assignment_map.get(r["id"], [])
+
+    summary = {
+        "total": len(rows),
+        "pending": sum(1 for r in rows if r["status"] == "pending"),
+        "assigned": sum(1 for r in rows if r["status"] == "assigned"),
+        "cancelled": sum(1 for r in rows if r["status"] == "cancelled"),
+    }
+
+    today = date.today().strftime("%Y-%m-%d")
+    tomorrow = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    role_summary = {}
+
+    for r in rows:
+        role = r["role"] or "未填写"
+        role_summary[role] = role_summary.get(role, 0) + 1
+
+    return render_template_string("""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>报名管理</title>
+
+<style>
+body {
+    font-family: "Microsoft YaHei", Arial;
+    background:#f5f5f5;
+    padding:20px;
+}
+
+.box {
+    background:white;
+    max-width:1200px;
+    margin:auto;
+    padding:25px;
+    border-radius:15px;
+}
+
+button, input, select {
+    font-size:20px;
+    padding:8px;
+    margin:5px;
+}
+
+table {
+    width:100%;
+    border-collapse:collapse;
+    font-size:20px;
+}
+
+th, td {
+    border:1px solid #999;
+    padding:8px;
+    text-align:center;
+}
+
+.table-wrap {
+    overflow-x:auto;
+}
+
+.pending {
+    background:#fff8d6;
+}
+
+.assigned {
+    background:#e8fff0;
+}
+
+.cancelled {
+    background:#eee;
+    color:#777;
+}
+
+.summary-box {
+    background:#eef7ff;
+    padding:12px;
+    border-radius:10px;
+    font-size:22px;
+    margin:12px 0;
+}
+
+.role-summary-box {
+    background:#fff8d6;
+    padding:12px;
+    border-radius:10px;
+    font-size:22px;
+    margin:12px 0;
+}
+
+.filter-box {
+    background:#fafafa;
+    border:1px solid #ddd;
+    padding:15px;
+    border-radius:12px;
+    margin:15px 0;
+    font-size:20px;
+}
+
+.op-form {
+    margin:5px 0;
+}
+
+.op-btn {
+    width:120px;
+}
+
+.floating-back {
+    position: fixed;
+    right: 25px;
+    bottom: 25px;
+    background: #2196F3;
+    color: white;
+    padding: 16px 24px;
+    border-radius: 50px;
+    text-decoration: none;
+    font-size: 22px;
+    font-weight: bold;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+    z-index: 9999;
+}
+
+.floating-back:hover {
+    background: #0b7dda;
+}
+</style>
+</head>
+
+<body>
+
+<div class="box">
+
+<h1>📋 义工报名管理</h1>
+
+<a href="/schedule/admin">⬅ 返回负责人首页</a>
+
+<hr>
+
+<div class="summary-box">
+    当前查询：<b>{{ summary.total }}</b> 条　
+    未安排：<b>{{ summary.pending }}</b>　
+    已安排：<b>{{ summary.assigned }}</b>　
+    已取消：<b>{{ summary.cancelled }}</b>
+</div>
+
+<div class="role-summary-box">
+    <b>岗位统计：</b>
+    {% if role_summary %}
+        {% for role, count in role_summary.items() %}
+            {{ role }}：<b>{{ count }}</b> 人　
+        {% endfor %}
+    {% else %}
+        没有记录
+    {% endif %}
+</div>
+
+<div class="filter-box">
+<form method="get">
+
+    日期：
+    <input type="date" name="date" value="{{ date_filter }}">
+
+    <a href="/schedule/signups?date={{ today }}&status={{ status }}&role={{ role_filter }}">
+        <button type="button">今天</button>
+    </a>
+
+    <a href="/schedule/signups?date={{ tomorrow }}&status={{ status }}&role={{ role_filter }}">
+        <button type="button">明天</button>
+    </a>
+
+    <a href="/schedule/signups">
+        <button type="button">全部</button>
+    </a>
+
+    <br><br>
+
+    状态：
+    <select name="status" style="width:160px;">
+
+    <option value="all"
+    {% if status=="all" %}selected{% endif %}>
+    全部状态
+    </option>
+
+    <option value="pending"
+    {% if status=="pending" %}selected{% endif %}>
+    未安排
+    </option>
+
+    <option value="assigned"
+    {% if status=="assigned" %}selected{% endif %}>
+    已安排
+    </option>
+
+    <option value="cancelled"
+    {% if status=="cancelled" %}selected{% endif %}>
+    已取消
+    </option>
+
+    </select>
+
+    岗位：
+    <select name="role" style="width:160px;">
+
+    <option value="all"
+    {% if role_filter=="all" %}selected{% endif %}>
+    全部岗位
+    </option>
+
+    {% for role in roles %}
+    <option value="{{ role }}"
+    {% if role_filter==role %}selected{% endif %}>
+    {{ role }}
+    </option>
+    {% endfor %}
+
+    </select>
+        <option value="all" {% if role_filter == "all" %}selected{% endif %}>全部</option>
+        {% for role in roles %}
+            <option value="{{ role }}" {% if role_filter == role %}selected{% endif %}>
+                {{ role }}
+            </option>
+        {% endfor %}
+    </select>
+
+    <label style="font-size:18px;">
+        <input
+            type="checkbox"
+            name="show_history"
+            value="1"
+            {% if show_history %}checked{% endif %}
+        >
+        显示过去记录
+    </label>
+
+    <button type="submit">
+        🔍 查询
+    </button>
+
+</form>
+</div>
+
+<hr>
+
+<div class="table-wrap">
+<table>
+<tr>
+    <th>日期</th>
+    <th>编号</th>
+    <th>姓名</th>
+    <th>岗位</th>
+    <th>时间</th>
+    <th>状态</th>
+    <th>系统安排</th>
+    <th>备注</th>
+    <th>操作</th>
+</tr>
+
+{% for r in rows %}
+<tr class="{{ r.status }}">
+    <td>{{ r.signup_date }}</td>
+    <td>{{ r.volunteer_id }}</td>
+    <td>{{ r.name }}</td>
+    <td>{{ r.role }}</td>
+    <td>
+        {% if r.start_time or r.end_time %}
+            {{ r.start_time or "" }} ~ {{ r.end_time or "" }}
+        {% else %}
+            -
+        {% endif %}
+    </td>
+    <td>
+        {% if r.status == "pending" %}
+            未安排
+        {% elif r.status == "assigned" %}
+            已安排
+        {% elif r.status == "cancelled" %}
+            已取消
+        {% else %}
+            {{ r.status }}
+        {% endif %}
+    </td>
+    <td>
+        {% if r.final_assignment %}
+            {% for item in r.final_assignment %}
+                <div>{{ item|safe }}</div>
+            {% endfor %}
+        {% else %}
+            -
+        {% endif %}
+    </td>
+    <td>{{ r.remarks or "" }}</td>
+
+    <td>
+
+        <form class="op-form" method="get" action="/schedule/signup_edit/{{ r.id }}">
+            <button class="op-btn" type="submit">✏️ 修改</button>
+        </form>
+
+        {% if r.status == "assigned" %}
+            <form class="op-form" method="get" action="/schedule/signup_place/{{ r.id }}">
+                <button class="op-btn" type="submit">🔧 调整</button>
+            </form>
+        {% endif %}
+
+        {% if r.status == "pending" %}
+            <form class="op-form"
+                  method="post"
+                  action="/schedule/signup_cancel/{{ r.id }}"
+                  onsubmit="return confirm('确定取消报名？');">
+                <button class="op-btn" type="submit">❌ 取消</button>
+            </form>
+
+        {% elif r.status == "cancelled" %}
+            <form class="op-form"
+                  method="post"
+                  action="/schedule/signup_restore/{{ r.id }}"
+                  onsubmit="return confirm('确定恢复报名？');">
+                <button class="op-btn" type="submit">↩️ 恢复</button>
+            </form>
+
+        {% elif r.status == "assigned" %}
+            <div style="font-size:18px; color:#666;">已安排</div>
+
+        {% else %}
+            -
+        {% endif %}
+
+    </td>
+</tr>
+{% endfor %}
+</table>
+</div>
+
+{% if not rows %}
+<p style="font-size:22px;">没有记录。</p>
+{% endif %}
+
+</div>
+                                  
+<a href="/schedule/admin" class="floating-back">
+    ⬅ 返回首页
+</a>
+                                  
+</body>
+</html>
+""",
+        rows=rows,
+        status=status,
+        date_filter=date_filter,
+        role_filter=role_filter,
+        roles=ROLE_OPTIONS,
+        summary=summary,
+        role_summary=role_summary,
+        today=today,
+        tomorrow=tomorrow
+    )
 
 
 LOGIN_HTML = """
@@ -719,7 +3162,7 @@ LOGIN_HTML = """
 <title>负责人排班系统</title>
 <style>
 body { font-family: "Microsoft YaHei", Arial; background:#f5f5f5; padding:20px; font-size:24px; }
-.box { background:white; max-width:600px; margin:auto; padding:30px; border-radius:15px; text-align:center; }
+.box { background:white; max-width:1200px; margin:auto; padding:30px; border-radius:15px; text-align:center; }
 input, button { font-size:30px; padding:18px; margin:10px; width:90%; border-radius:12px; }
 </style>
 </head>
@@ -754,8 +3197,8 @@ SCHEDULE_HTML = """
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>负责人排班系统</title>
-<style>
 
+<style>
 body {
     font-family: "Microsoft YaHei", Arial;
     background: #f5f5f5;
@@ -770,10 +3213,21 @@ body {
     border-radius: 15px;
 }
 
+.top-bar {
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:15px;
+    flex-wrap:wrap;
+}
+
 .big-btn {
-    font-size: 28px;
-    padding: 16px 30px;
+    font-size: 34px;
+    padding: 24px 40px;
     margin: 10px;
+    border-radius: 15px;
+    min-width: 250px;
+    font-weight: bold;
 }
 
 input,
@@ -785,78 +3239,123 @@ button {
     margin: 6px 0;
 }
 
-.role-box label,
-.day-box label {
+.role-box label {
     display: inline-block;
     margin: 8px;
-    font-size: 22px;
+    font-size: 24px;
 }
 
-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin-top: 15px;
-    font-size: 22px;
+.info-box {
+    background:#eef7ff;
+    padding:15px;
+    border-radius:12px;
+    font-size:22px;
+    margin:15px 0;
 }
 
-th,
-td {
-    border: 1px solid #999;
-    padding: 10px;
-    text-align: center;
+.warn-box {
+    border:2px solid #f5b5b5;
+    background:#fff5f5;
+    padding:15px;
+    margin:15px 0;
+    border-radius:12px;
+    font-size:22px;
 }
 
+.section {
+    border-top:1px solid #ccc;
+    padding-top:22px;
+    margin-top:22px;
+}
+
+.action-row {
+    display:flex;
+    gap:15px;
+    flex-wrap:wrap;
+    align-items:center;
+}
+
+.action-btn {
+    font-size:26px;
+    padding:15px 25px;
+    border-radius:10px;
+}
+
+.date-input {
+    font-size:26px;
+    padding:12px;
+}
+
+textarea {
+    width:100%;
+    box-sizing:border-box;
+}
 </style>
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {
 
     function syncDates() {
-
         const mainDate = document.getElementById("main_date");
+
         const rawDate = document.getElementById("raw_single_date");
         const genDate = document.getElementById("generate_day_date");
+        const fillDate = document.getElementById("fill_pending_date");
+        const viewAssignedDate = document.getElementById("view_assigned_date");
+        const overrideDate = document.getElementById("override_date");
+        const prebookDate = document.getElementById("prebook_single_date");
 
-        if (mainDate && rawDate) {
-            rawDate.value = mainDate.value;
-        }
+        if (!mainDate) return;
 
-        if (mainDate && genDate) {
-            genDate.value = mainDate.value;
-        }
+        if (rawDate) rawDate.value = mainDate.value;
+        if (genDate) genDate.value = mainDate.value;
+        if (fillDate) fillDate.value = mainDate.value;
+        if (viewAssignedDate) viewAssignedDate.value = mainDate.value;
+        if (overrideDate) overrideDate.value = mainDate.value;
+        if (prebookDate) prebookDate.value = mainDate.value;
     }
 
     syncDates();
 
     const mainDate = document.getElementById("main_date");
-
     if (mainDate) {
         mainDate.addEventListener("change", syncDates);
     }
-
 });
 </script>
 
 </head>
 
 <body>
-
 <div class="box">
 
-<h1>📅 负责人排班系统</h1>
+<div class="top-bar">
+    <h1>📅 负责人排班系统</h1>
+
+    <a href="/schedule/logout">
+        <button type="button">🚪 退出登录</button>
+    </a>
+</div>
+
+<div class="warn-box">
+    <h3 style="margin-top:0;">🔴 未安排报名提醒</h3>
+    <p>今日未安排：<b>{{ pending_counts.today }}</b> 人</p>
+    <p>明日未安排：<b>{{ pending_counts.tomorrow }}</b> 人</p>
+    <p>本月未安排：<b>{{ pending_counts.month }}</b> 人</p>
+</div>
 
 <div style="text-align:center;">
 
-    <a href="/schedule?mode=day">
-        <button type="button" class="big-btn">
-            📋 生成当天排班
-        </button>
+    <a href="/schedule/signups">
+        <button type="button" class="big-btn">📋 报名管理</button>
     </a>
 
-    <a href="/schedule?mode=prebook">
-        <button type="button" class="big-btn">
-            📢 生成月预报名表
-        </button>
+    <a href="/schedule?mode=day">
+        <button type="button" class="big-btn">📅 当天值班安排</button>
+    </a>
+
+    <a href="/volunteer">
+        <button type="button" class="big-btn">👥 义工报名</button>
     </a>
 
 </div>
@@ -865,212 +3364,227 @@ document.addEventListener("DOMContentLoaded", function () {
 
 {% if mode == "day" %}
 
+<h2>📅 当天值班安排</h2>
 
-<h2>📋 当天排班模式</h2>
+<div class="info-box">
+    <b>当天报名统计：</b><br>
+    已报名：<b>{{ day_summary.total }}</b> 人　
+    待安排：<b>{{ day_summary.pending }}</b> 人　
+    已安排：<b>{{ day_summary.assigned }}</b> 人　
+    已取消：<b>{{ day_summary.cancelled }}</b> 人
+</div>
 
-<form method="post" action="/schedule/add">
+<div class="section">
     <h3>1. 选择日期</h3>
-    <input type="date" id="main_date" name="single_date" value="{{ tomorrow }}" required>
 
-    <h3>2. 输入义工编号 / 姓名</h3>
-    <input name="vol_id" placeholder="输入义工编号 / 姓名" required>
+    <div class="action-row">
+        <input
+            type="date"
+            id="main_date"
+            class="date-input"
+            value="{{ override_date }}"
+            required
+        >
 
-    <h3>3. 选择岗位</h3>
-    <div class="role-box">
-    {% for role in roles %}
-    <label>
-        <input type="checkbox" name="roles" value="{{ role }}"> {{ role }}
-    </label>
-    {% endfor %}
+        <a href="/schedule?mode=day&override_date={{ override_date }}">
+            <button type="button" class="action-btn">📅 当前日期：{{ override_date }}</button>
+        </a>
     </div>
 
-    <h3>4. 选择时间（只给值班用）</h3>
-    开始：
-    <select name="start_time">
-    {% for t in times %}
-    <option value="{{ t }}">{{ t }}</option>
-    {% endfor %}
-    </select>
+    <p style="font-size:20px; color:#666;">
+        选日期后，下方所有操作都会使用这个日期。
+    </p>
+</div>
 
-    结束：
-    <select name="end_time">
-    {% for t in times %}
-    <option value="{{ t }}">{{ t }}</option>
-    {% endfor %}
-    </select>
+<div class="section">
+    <h3>2. 负责人代报名</h3>
 
-    <input type="hidden" name="mode" value="day">
+    <form method="post" action="/schedule/prebook_add">
+        <input type="hidden" name="mode" value="day">
+        <input type="hidden" name="single_date" id="prebook_single_date" value="{{ override_date }}">
 
-    <br><br>
-    <button type="submit">➕ 加入当天名单</button>
-</form>
+        <p>义工编号 / 姓名</p>
+        <input name="vol_id" placeholder="输入义工编号 / 姓名" required>
+
+        <p>岗位</p>
+        <div class="role-box">
+        {% for role in roles %}
+        <label>
+            <input type="checkbox" name="roles" value="{{ role }}"> {{ role }}
+        </label>
+        {% endfor %}
+        </div>
+
+        <p>时间（只给值班用）</p>
+
+        开始：
+        <select name="start_time">
+        {% for t in times %}
+            <option value="{{ t }}">{{ t }}</option>
+        {% endfor %}
+        </select>
+
+        结束：
+        <select name="end_time">
+        {% for t in times %}
+            <option value="{{ t }}">{{ t }}</option>
+        {% endfor %}
+        </select>
+
+        <br><br>
+
+        <button type="submit" class="action-btn">➕ 代报名</button>
+    </form>
+</div>
+
+<div class="section">
+    <h3>3. 贴上 WhatsApp 报名</h3>
+
+    <form method="post" action="/schedule/parse_raw">
+        <input type="hidden" name="single_date" id="raw_single_date" value="{{ override_date }}">
+
+        <textarea
+            name="raw_signup"
+            rows="8"
+            style="font-size:22px;"
+            placeholder="输入姓名 / 时间，例如：&#10;张三 10:00am-2:00pm&#10;李四 8:00am-12:00pm"
+        ></textarea>
+
+        <br><br>
+
+        <button type="submit" class="action-btn">📥 解析加入报名</button>
+    </form>
+</div>
+
+<div class="section">
+    <h3>4. 排班操作</h3>
+
+    <a href="/schedule/attendance_status">
+        <button type="button" class="action-btn">
+            📋 今日签到情况
+        </button>
+    </a>
+
+    {% if is_today_or_past %}
+
+    <p style="font-size:22px; color:#b00020;">
+        今天或过去日期已锁定，只能补入待安排义工。
+    </p>
+
+    <form method="post" action="/schedule/fill_pending">
+        <input type="hidden" name="date" id="fill_pending_date" value="{{ override_date }}">
+        <button type="submit" class="action-btn">➕ 补入待安排</button>
+    </form>
+
+    {% else %}
+
+    <p style="font-size:22px; color:#006600;">
+        未来日期可以自动排班或重新排班。
+    </p>
+
+    <form method="post" action="/schedule/generate_day">
+        <input type="hidden" name="date" id="generate_day_date" value="{{ override_date }}">
+        <button type="submit" class="action-btn">⚡ 自动排班 / 重新排班</button>
+    </form>
+
+    {% endif %}
+
+    <form method="post" action="/schedule/view_assigned">
+        <input type="hidden" name="date" id="view_assigned_date" value="{{ override_date }}">
+        <button type="submit" class="action-btn">👀 查看排班结果</button>
+    </form>
+</div>
+
 <hr>
 
-<form method="post" action="/schedule/parse_raw">
-    <input type="hidden" name="single_date" id="raw_single_date">
+<h3>5. 师父供台设置</h3>
 
-    <h3>📋 贴上 WhatsApp 报名</h3>
+<form method="post" action="/schedule/save_day_flags">
 
-    <textarea name="raw_signup" rows="8" style="width:100%; font-size:22px;"
-placeholder="
-输入姓名 / 时间"></textarea>
-
-    <br><br>
-
-    <button type="submit">📥 解析加入名单</button>
-</form>
-
-<hr>
-
-<form method="post" action="/schedule/generate_day">
-    <input type="hidden" name="date" id="generate_day_date">
-    <button type="submit">⚡ 生成 WhatsApp 值班表</button>
-</form>
-
-<hr>
-
-<h2>🙏 佛台请假 / 换人</h2>
-
-日期：
-<input type="date" name="date" value="{{ override_date }}" readonly>
-
-<h3>原本佛台：</h3>
-
-<form method="post" action="/schedule/override">
     <input type="hidden" name="date" value="{{ override_date }}">
 
-    {% if fixed_buddha_today %}
-        {% for old_name in fixed_buddha_today %}
-            <div style="font-size:22px; margin:10px 0;">
-                {{ old_name }}
-                <input type="hidden" name="original_name" value="{{ old_name }}">
-
-                换成：
-                <select name="replacement_name">
-                    <option value="">不换，保留原本</option>
-                    {% for n in buddha_names %}
-                    <option value="{{ n }}">{{ n }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-        {% endfor %}
-
-        <button type="submit">💾 保存佛台请假 / 换人</button>
-    {% else %}
-        <p>这一天没有固定佛台。</p>
-    {% endif %}
-</form>
-
-<hr>
-
-{% elif mode == "prebook" %}
-
-<h2>📢 月预报名模式</h2>
-
-<form method="post" action="/schedule/add">
-
-    <div style="background:#fff2cc; padding:15px; border-radius:12px; margin-bottom:18px;">
-        <h3>📅 选择月份</h3>
-
-        年份：
-        <input name="year" value="{{ default_year }}" style="width:120px;" required>
-
-        月份：
-        <select name="month">
-            {% for m in range(1, 13) %}
-            <option value="{{ m }}" {% if m == default_month %}selected{% endif %}>
-                {{ m }}月
-            </option>
-            {% endfor %}
-        </select>
-    </div>
-
-    <h3>1. 输入义工编号 / 姓名 </h3>
-    <input name="vol_id" placeholder="输入编号 / 姓名 /" required>
-
-    <h3>2. 多选日期</h3>
-    <div class="day-box">
-    {% for d in range(1, 32) %}
-    <label>
-        <input type="checkbox" name="days" value="{{ d }}"> {{ d }}
+    <label style="font-size:22px;">
+        <input
+            type="checkbox"
+            name="need_setup_master_table"
+            value="1"
+            {% if day_flags.need_setup_master_table %}checked{% endif %}
+        >
+        明日需要设师父供台
     </label>
-    {% endfor %}
-    </div>
 
-    <h3>3. 选择岗位</h3>
-    <div class="role-box">
-    {% for role in roles %}
-    <label>
-        <input type="checkbox" name="roles" value="{{ role }}"> {{ role }}
-    </label>
-    {% endfor %}
-    </div>
-
-    <h3>4. 选择时间（只给值班用）</h3>
-    开始：
-    <select name="start_time">
-    {% for t in times %}
-    <option value="{{ t }}">{{ t }}</option>
-    {% endfor %}
-    </select>
-
-    结束：
-    <select name="end_time">
-    {% for t in times %}
-    <option value="{{ t }}">{{ t }}</option>
-    {% endfor %}
-    </select>
-
-    <input type="hidden" name="mode" value="prebook">
+    <p>设供台人员：</p>
+    <textarea
+        name="setup_people"
+        rows="3"
+        style="width:100%; font-size:22px;"
+        placeholder="例如：张三&#10;李四"
+    >{{ day_flags.setup_people }}</textarea>
 
     <br><br>
 
-    <button type="submit" name="action" value="add">➕ 加入预报名</button>
-    <button type="submit" name="action" value="generate_monthly">📢 生成月预报名表</button>
+    <label style="font-size:22px;">
+        <input
+            type="checkbox"
+            name="need_remove_master_table"
+            value="1"
+            {% if day_flags.need_remove_master_table %}checked{% endif %}
+        >
+        明日需要收师父供台
+    </label>
+
+    <p>收供台人员：</p>
+    <textarea
+        name="remove_people"
+        rows="3"
+        style="width:100%; font-size:22px;"
+        placeholder="例如：张三"
+    >{{ day_flags.remove_people }}</textarea>
+
+    <br><br>
+
+    <button type="submit">💾 保存供台设置</button>
 
 </form>
+
+<div class="section">
+    <h3>6. 佛台请假 / 换人</h3>
+
+    <p>日期：{{ override_date }}</p>
+
+    <form method="post" action="/schedule/override">
+        <input type="hidden" name="date" id="override_date" value="{{ override_date }}">
+
+        {% if fixed_buddha_today %}
+            {% for old_name in fixed_buddha_today %}
+                <div style="font-size:22px; margin:10px 0;">
+                    {{ old_name }}
+                    <input type="hidden" name="original_name" value="{{ old_name }}">
+
+                    换成：
+                    <select name="replacement_name">
+                        <option value="">不换，保留原本</option>
+                        <option value="__REMOVE__">请假，不找替补</option>
+
+                        {% for n in buddha_names %}
+                        <option value="{{ n }}">{{ n }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            {% endfor %}
+
+            <button type="submit" class="action-btn">💾 保存佛台请假 / 换人</button>
+        {% else %}
+            <p style="font-size:22px;">这一天没有固定佛台。</p>
+        {% endif %}
+    </form>
+</div>
 
 {% else %}
 
 <h2 style="text-align:center;">请选择要做的功能</h2>
 
 {% endif %}
-
-<hr>
-
-<form method="post" action="/schedule/clear">
-<button type="submit">🗑 清空下方显示名单</button>
-</form>
-
-<h2>已加入名单</h2>
-
-<table>
-<tr>
-    <th>日期</th>
-    <th>编号</th>
-    <th>姓名</th>
-    <th>岗位</th>
-    <th>时间</th>
-    <th>操作</th>
-</tr>
-
-{% for r in records %}
-<tr>
-    <td>{{ r["日期"] }}</td>
-    <td>{{ r["编号"] }}</td>
-    <td>{{ r["姓名"] }}</td>
-    <td>{{ r["岗位"] }}</td>
-    <td>{{ r["开始时间"] }} ~ {{ r["结束时间"] }}</td>
-
-    <td>
-        <form method="post" action="/schedule/delete/{{ loop.index0 }}">
-            <input type="hidden" name="mode" value="{{ mode }}">
-            <button type="submit">❌</button>
-        </form>
-    </td>
-</tr>
-{% endfor %}
-</table>
 
 </div>
 </body>
@@ -1154,21 +3668,432 @@ MONTHLY_PREBOOK_HTML = """
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>月预报名表</title>
+
 <style>
-body { font-family: "Microsoft YaHei", Arial; background:#f5f5f5; padding:20px; }
-.box { background:white; max-width:900px; margin:auto; padding:25px; border-radius:15px; }
-textarea { width:100%; height:650px; font-size:20px; padding:15px; box-sizing:border-box; }
-a, button { font-size:22px; padding:10px 18px; margin:8px; }
+body {
+    font-family: "Microsoft YaHei", Arial;
+    background:#f5f5f5;
+    padding:20px;
+}
+
+.box {
+    background:white;
+    max-width:900px;
+    margin:auto;
+    padding:25px;
+    border-radius:15px;
+}
+
+textarea {
+    width:100%;
+    height:650px;
+    font-size:20px;
+    padding:15px;
+    box-sizing:border-box;
+}
+
+a, button {
+    font-size:22px;
+    padding:10px 18px;
+    margin:8px;
+    cursor:pointer;
+}
+</style>
+
+<script>
+function copyOutput(btn) {
+
+    const text =
+        document.getElementById("output").value;
+
+    navigator.clipboard.writeText(text);
+
+    btn.innerText = "✅ 已复制";
+
+    setTimeout(() => {
+        btn.innerText = "📋 一键复制";
+    }, 2000);
+}
+</script>
+
+</head>
+
+<body>
+
+<div class="box">
+
+<h1>📢 月预报名表</h1>
+
+<a href="/schedule?mode=prebook">⬅ 返回月预报名</a>
+
+<button onclick="copyOutput(this)">
+📋 一键复制
+</button>
+
+<br><br>
+
+<textarea id="output" readonly>{{ output }}</textarea>
+
+</div>
+
+</body>
+</html>
+"""
+
+VOLUNTEER_SIGNUP_HTML = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>义工报名系统</title>
+
+<style>
+body {
+    font-family:"Microsoft YaHei", Arial;
+    background:#f5f5f5;
+    padding:20px;
+    font-size:24px;
+}
+
+.box {
+    background:white;
+    max-width:1200px;
+    margin:auto;
+    padding:25px;
+    border-radius:15px;
+}
+
+.top-actions {
+    display:flex;
+    justify-content:center;
+    gap:20px;
+    flex-wrap:wrap;
+    margin-bottom:18px;
+}
+
+.top-btn {
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    width:280px;
+    min-height:100px;
+    border-radius:15px;
+    color:white;
+    text-decoration:none;
+    font-size:28px;
+    font-weight:bold;
+    text-align:center;
+    padding:10px;
+    box-sizing:border-box;
+}
+
+.green { background:#4CAF50; }
+.blue { background:#2196F3; }
+.orange { background:#FF9800; }
+
+.notice {
+    background:#fff3cd;
+    color:#856404;
+    border:1px solid #ffeeba;
+    padding:15px 18px;
+    border-radius:10px;
+    margin:0 auto 25px auto;
+    max-width:900px;
+    font-size:22px;
+    line-height:1.6;
+}
+
+.admin {
+    text-align:right;
+    font-size:18px;
+    margin-bottom:20px;
+}
+
+input, select, button {
+    font-size:24px;
+    padding:12px;
+    margin:8px 0 18px 0;
+    width:100%;
+    box-sizing:border-box;
+}
+
+button {
+    cursor:pointer;
+    background:#4CAF50;
+    color:white;
+    border:0;
+    border-radius:10px;
+    font-weight:bold;
+    padding:16px;
+}
 </style>
 </head>
+
 <body>
 <div class="box">
-<h1>📢 月预报名表</h1>
-<a href="/schedule?mode=prebook">⬅ 返回月预报名</a>
-<br><br>
-<textarea readonly>{{ output }}</textarea>
+
+<div class="top-actions">
+    <a class="top-btn green" href="/volunteer/today_schedule">
+        📋 明日值班<br>报名情况
+    </a>
+
+    <a class="top-btn blue" href="/volunteer/prebook">
+        📅 多日报名
+    </a>
+
+    <a class="top-btn orange" href="/volunteer/my_schedule_search">
+        🔍 我的报名
+    </a>
+</div>
+
+<div class="notice">
+    ⚠️ 当前为报名状态，最终岗位安排请以负责人公布的正式值班表为准。
+</div>
+
+<div class="admin">
+    <a href="/schedule/admin">🔐 管理员入口</a>
+</div>
+
+<h1>义工报名系统</h1>
+
+<form method="post" action="/volunteer/signup">
+
+<label>义工编号 / 电话 / 姓名</label>
+<input name="keyword" required placeholder="例如 CHE-108 / 108 / 姓名">
+
+<label>日期</label>
+<input type="date" name="signup_date" value="{{ default_date }}" required>
+
+<label>岗位</label>
+<select name="role" required>
+    <option value="值班">值班</option>
+    <option value="卫生">卫生</option>
+    <option value="供台">供台</option>
+</select>
+
+<label>开始时间</label>
+<select name="start_time">
+{% for t in times %}
+<option value="{{ t }}">{{ t }}</option>
+{% endfor %}
+</select>
+
+<label>结束时间</label>
+<select name="end_time">
+{% for t in times %}
+<option value="{{ t }}">{{ t }}</option>
+{% endfor %}
+</select>
+
+<button type="submit">提交报名</button>
+
+</form>
+
 </div>
 </body>
 </html>
 """
 
+VOLUNTEER_PREBOOK_HTML = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>多日报名</title>
+
+<style>
+body {
+    font-family:"Microsoft YaHei", Arial;
+    background:#f5f5f5;
+    padding:20px;
+    font-size:24px;
+}
+
+.box {
+    background:white;
+    max-width:750px;
+    margin:auto;
+    padding:25px;
+    border-radius:15px;
+}
+
+input, select, button {
+    font-size:24px;
+    padding:12px;
+    margin:8px 0;
+    width:100%;
+    box-sizing:border-box;
+}
+
+.calendar {
+    display:grid;
+    grid-template-columns:repeat(7, 1fr);
+    gap:10px;
+    margin:15px 0;
+}
+
+.week-title {
+    text-align:center;
+    font-weight:bold;
+    font-size:20px;
+    color:#555;
+}
+
+.day-card {
+    display:block;
+    text-align:center;
+    border:2px solid #ccc;
+    border-radius:12px;
+    padding:14px 0;
+    font-size:24px;
+    background:white;
+    cursor:pointer;
+}
+
+.day-card input {
+    display:none;
+}
+
+.day-card span {
+    display:block;
+}
+
+.day-card.checked {
+    background:#2196F3;
+    color:white;
+    border-color:#2196F3;
+    font-weight:bold;
+}
+
+.empty-day {
+    height:55px;
+}
+
+a {
+    font-size:22px;
+}
+</style>
+
+<script>
+function updateCalendar() {
+    const year = parseInt(document.getElementById("year").value);
+    const month = parseInt(document.getElementById("month").value);
+    const calendarDays = document.getElementById("calendar-days");
+
+    calendarDays.innerHTML = "";
+
+    if (!year || !month) return;
+
+    const firstDay = new Date(year, month - 1, 1).getDay();
+    const lastDate = new Date(year, month, 0).getDate();
+
+    for (let i = 0; i < firstDay; i++) {
+        const empty = document.createElement("div");
+        empty.className = "empty-day";
+        calendarDays.appendChild(empty);
+    }
+
+    for (let d = 1; d <= lastDate; d++) {
+        const label = document.createElement("label");
+        label.className = "day-card";
+
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.name = "days";
+        input.value = d;
+
+        const span = document.createElement("span");
+        span.innerText = d;
+
+        input.addEventListener("change", function () {
+            if (input.checked) {
+                label.classList.add("checked");
+            } else {
+                label.classList.remove("checked");
+            }
+        });
+
+        label.appendChild(input);
+        label.appendChild(span);
+        calendarDays.appendChild(label);
+    }
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+    updateCalendar();
+
+    document.getElementById("year").addEventListener("change", updateCalendar);
+    document.getElementById("month").addEventListener("change", updateCalendar);
+});
+</script>
+
+</head>
+
+<body>
+<div class="box">
+
+<h1>📅 多日报名</h1>
+
+<form method="post" action="/volunteer/prebook">
+
+<label>义工编号 / 电话 / 姓名</label>
+<input name="keyword" required placeholder="例如 CHE-108 / 108 / 姓名">
+
+<label>年份</label>
+<input id="year" name="year" value="{{ default_year }}" required>
+
+<label>月份</label>
+<select id="month" name="month">
+{% for m in range(1, 13) %}
+<option value="{{ m }}" {% if m == default_month %}selected{% endif %}>{{ m }}月</option>
+{% endfor %}
+</select>
+
+<h3>选择日期</h3>
+
+<div class="calendar">
+    <div class="week-title">日</div>
+    <div class="week-title">一</div>
+    <div class="week-title">二</div>
+    <div class="week-title">三</div>
+    <div class="week-title">四</div>
+    <div class="week-title">五</div>
+    <div class="week-title">六</div>
+</div>
+
+<div id="calendar-days" class="calendar"></div>
+
+<label>岗位</label>
+<select name="role" required>
+    <option value="值班">值班</option>
+    <option value="卫生">卫生</option>
+    <option value="供台">供台</option>
+</select>
+
+<label>开始时间（值班才需要）</label>
+<select name="start_time">
+{% for t in times %}
+<option value="{{ t }}">{{ t }}</option>
+{% endfor %}
+</select>
+
+<label>结束时间（值班才需要）</label>
+<select name="end_time">
+{% for t in times %}
+<option value="{{ t }}">{{ t }}</option>
+{% endfor %}
+</select>
+
+<button type="submit">提交多日报名</button>
+
+</form>
+
+<br>
+<a href="/volunteer">返回</a>
+
+</div>
+</body>
+</html>
+"""

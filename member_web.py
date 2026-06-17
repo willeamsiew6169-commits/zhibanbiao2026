@@ -301,6 +301,32 @@ def member_home():
                             real_member_id
                         )
 
+                        if summary and summary["paid_until"]:
+
+                            today = date.today()
+                            paid_until_date = summary["paid_until"]
+
+                            late_months = (
+                                (today.year - paid_until_date.year) * 12
+                                + (today.month - paid_until_date.month)
+                            )
+
+                            summary["late_months"] = late_months
+
+                            if late_months <= 0:
+                                summary["payment_status"] = "🟢 正常"
+
+                            elif late_months <= 3:
+                                summary["payment_status"] = f"🟡 已过期 {late_months} 个月"
+
+                            else:
+                                summary["payment_status"] = f"🔴 停供参考 {late_months} 个月"
+
+                        else:
+                            if summary:
+                                summary["late_months"] = None
+                                summary["payment_status"] = "⚪ 暂无缴费记录"
+
         except Exception as e:
             error = f"系统错误：{e}"
 
@@ -2056,7 +2082,42 @@ def finance_upload():
                         member_no = int(row["编号 No/"])
                         member_id = f"CHE-{member_no}"
 
-                        name = str(row["捐款人\n姓名\nName"]).strip()
+                        member_info = db_query("""
+                            select name
+                            from members
+                            where member_id = %s
+                        """, (member_id,), fetchone=True)
+
+                        if not member_info:
+                            print("会员不存在：", member_id)
+                            skipped += 1
+                            continue
+                        
+                        member_info = db_query("""
+                            select name
+                            from members
+                            where member_id = %s
+                        """, (member_id,), fetchone=True)
+
+                        if not member_info:
+                            print("会员不存在：", member_id)
+                            skipped += 1
+                            continue
+
+                        system_name = member_info["name"]
+
+                        excel_name = str(
+                            row["捐款人\n姓名\nName"]
+                        ).strip()
+
+                        if excel_name != system_name:
+                            print(
+                                f"姓名不一致：{member_id} | "
+                                f"Excel={excel_name} | "
+                                f"Members={system_name}"
+                            )
+
+                        name = system_name
 
                         payment_date = pd.to_datetime(row["日期\nDate"]).date()
                         start_month = pd.to_datetime(row["START MONTH"]).date()
@@ -2728,9 +2789,9 @@ button{
     margin-bottom:8px;
 }
 .member-title small{
-    font-size:18px;
-    color:#666;
-    font-weight:normal;
+    font-size:22px;
+    color:#222;
+    font-weight:600;
 }
 .member-info{
     font-size:17px;
@@ -2887,6 +2948,13 @@ th{
                     {% endif %}
                 </div>
             </div>
+
+            <div class="summary-box">
+                <div class="summary-title">月费状态</div>
+                <div class="summary-value">
+                    {{ summary.payment_status or "-" }}
+                </div>
+            </div>
         </div>
 
         <div class="last-payment-box">
@@ -3034,9 +3102,9 @@ button{
     margin-bottom:8px;
 }
 .member-title small{
-    font-size:18px;
-    color:#666;
-    font-weight:normal;
+    font-size:22px;
+    color:#222;
+    font-weight:600;
 }
 .member-info{
     font-size:17px;
@@ -3161,7 +3229,7 @@ th{
     <div class="error">{{ error }}</div>
     {% endif %}
 
-    <form method="post">
+    <form method="post" action="/member/admin">
 
     {% if not session.get("member_admin") %}
 
