@@ -7,7 +7,7 @@ import pandas as pd
 from db import get_db
 from opencc import OpenCC
 from openpyxl import load_workbook
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from psycopg2.extras import RealDictCursor
 from sqlalchemy import create_engine, text
 
@@ -645,10 +645,13 @@ def schedule_copy_whatsapp():
 
 @schedule_bp.route("/volunteer")
 def volunteer_home():
-    now = datetime.now()
-    change_time = now.replace(hour=19, minute=0, second=0, microsecond=0)
 
-    if now >= change_time:
+    MY_TZ = timezone(timedelta(hours=8))
+    now = datetime.now(MY_TZ)
+
+    print("DEBUG Malaysia Time =", now)
+
+    if now.hour >= 19:
         default_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     else:
         default_date = now.strftime("%Y-%m-%d")

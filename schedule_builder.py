@@ -18,7 +18,7 @@ PREBOOK_FILE = os.path.join(BASE_DIR, "prebook_schedule.xlsx")
 OUTPUT_FILE = os.path.join(BASE_DIR, "schedule_output.txt")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True) if DATABASE_URL else None
-VOLUNTEER_SIGNUP_URL = "https://你的系统网址.onrender.com/volunteer"
+VOLUNTEER_SIGNUP_URL = "https://gyt-checkin.onrender.com/volunteer"
 
 
 def build_master_table_section(arranged):
