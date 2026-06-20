@@ -200,6 +200,90 @@ def volunteer_cancel_signup(signup_id):
     """
 
 
+def load_schedule_admin_dashboard_data(override_date):
+    from datetime import date, timedelta
+    from psycopg2.extras import RealDictCursor
+
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    month_start = today.replace(day=1)
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+            # 未安排统计
+            cur.execute("""
+                select
+                    count(*) filter (
+                        where signup_date = %s
+                    ) as today_count,
+
+                    count(*) filter (
+                        where signup_date = %s
+                    ) as tomorrow_count,
+
+                    count(*) filter (
+                        where signup_date >= %s
+                    ) as month_count
+                from volunteer_schedule_signups
+                where coalesce(status, 'pending') = 'pending'
+                and signup_date >= %s
+            """, (today, tomorrow, month_start, month_start))
+
+            pending_row = cur.fetchone()
+
+            pending_counts = {
+                "today": pending_row["today_count"] or 0,
+                "tomorrow": pending_row["tomorrow_count"] or 0,
+                "month": pending_row["month_count"] or 0,
+            }
+
+            # 当天概况
+            cur.execute("""
+                select
+                    count(*) as total,
+                    count(*) filter (
+                        where coalesce(status, 'pending') = 'pending'
+                    ) as pending,
+                    count(*) filter (
+                        where coalesce(status, '') = 'assigned'
+                    ) as assigned,
+                    count(*) filter (
+                        where coalesce(status, '') = 'cancelled'
+                    ) as cancelled
+                from volunteer_schedule_signups
+                where signup_date = %s
+            """, (override_date,))
+
+            day_summary = cur.fetchone()
+
+            # 供台设置
+            cur.execute("""
+                select
+                    flag_date,
+                    coalesce(need_setup_master_table, false) as need_setup_master_table,
+                    coalesce(need_remove_master_table, false) as need_remove_master_table,
+                    coalesce(setup_people, '') as setup_people,
+                    coalesce(remove_people, '') as remove_people,
+                    remarks
+                from schedule_day_flags
+                where flag_date = %s
+            """, (override_date,))
+
+            day_flags = cur.fetchone()
+
+    if not day_flags:
+        day_flags = {
+            "need_setup_master_table": False,
+            "need_remove_master_table": False,
+            "setup_people": "",
+            "remove_people": "",
+            "remarks": "",
+        }
+
+    return pending_counts, day_summary, day_flags
+
+
 def get_pending_signup_counts():
     from datetime import date, timedelta
     from db import db_query
@@ -208,31 +292,34 @@ def get_pending_signup_counts():
     tomorrow = today + timedelta(days=1)
     month_start = today.replace(day=1)
 
-    today_count = db_query("""
-        select count(*) as count
-        from volunteer_schedule_signups
-        where signup_date = %s
-        and coalesce(status, 'pending') = 'pending'
-    """, (today,), fetchone=True)["count"]
+    row = db_query("""
+        select
+            count(*) filter (
+                where signup_date = %s
+            ) as today_count,
 
-    tomorrow_count = db_query("""
-        select count(*) as count
-        from volunteer_schedule_signups
-        where signup_date = %s
-        and coalesce(status, 'pending') = 'pending'
-    """, (tomorrow,), fetchone=True)["count"]
+            count(*) filter (
+                where signup_date = %s
+            ) as tomorrow_count,
 
-    month_count = db_query("""
-        select count(*) as count
+            count(*) filter (
+                where signup_date >= %s
+            ) as month_count
+
         from volunteer_schedule_signups
-        where signup_date >= %s
-        and coalesce(status, 'pending') = 'pending'
-    """, (month_start,), fetchone=True)["count"]
+        where coalesce(status, 'pending') = 'pending'
+        and signup_date >= %s
+    """, (
+        today,
+        tomorrow,
+        month_start,
+        month_start
+    ), fetchone=True)
 
     return {
-        "today": today_count or 0,
-        "tomorrow": tomorrow_count or 0,
-        "month": month_count or 0,
+        "today": row["today_count"] or 0,
+        "tomorrow": row["tomorrow_count"] or 0,
+        "month": row["month_count"] or 0,
     }
 
 
@@ -1316,16 +1403,8 @@ def schedule_admin():
     print("get_fixed_buddha_for_date:", round(time.time() - t2, 2))
 
     t3 = time.time()
-    pending_counts = get_pending_signup_counts()
-    print("get_pending_signup_counts:", round(time.time() - t3, 2))
-
-    t4 = time.time()
-    day_summary = get_signup_summary_for_date(override_date)
-    print("get_signup_summary_for_date:", round(time.time() - t4, 2))
-
-    t5 = time.time()
-    day_flags = load_day_flags(override_date)
-    print("load_day_flags:", round(time.time() - t5, 2))
+    pending_counts, day_summary, day_flags = load_schedule_admin_dashboard_data(override_date)
+    print("load_schedule_admin_dashboard_data:", round(time.time() - t3, 2))
 
     selected_date_obj = datetime.strptime(override_date, "%Y-%m-%d").date()
     is_today_or_past = selected_date_obj < date.today()
