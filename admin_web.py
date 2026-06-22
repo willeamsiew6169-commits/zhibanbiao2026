@@ -3,14 +3,17 @@
 import io
 import pandas as pd
 
-from flask import Blueprint, request, redirect, url_for, render_template_string, flash, send_file
-from datetime import datetime
 
+from datetime import datetime
+from io import BytesIO
 from db import db_query
 from utils import get_text
+from openpyxl import Workbook
 from utils import now_date_str
 from utils import get_display_today_code
+from psycopg2.extras import RealDictCursor
 from utils import MY_TZ, get_today_code, now_date_str, calc_hours
+from flask import Blueprint, request, redirect, url_for, render_template_string, flash, send_file
 
 
 admin_bp = Blueprint("admin", __name__)
@@ -103,22 +106,21 @@ def admin_add_record():
 
 @admin_bp.route("/download_data")
 def download_data():
-    
+
     try:
-        att_rows = db_query("""
+        att_logs = db_query("""
             select
-                date as "日期",
+                attendance_date as "日期",
                 volunteer_id as "编号",
                 name as "姓名",
-                signup as "报名",
-                signin as "签到",
-                role as "岗位",
-                start_time as "开始时间",
-                end_time as "结束时间",
-                hours as "时数",
-                remark as "备注"
-            from attendance
-            order by date, start_time
+                actual_role as "岗位",
+                actual_place as "地点",
+                to_char(check_in_time, 'HH12:MIam') as "签到时间",
+                to_char(check_out_time, 'HH12:MIam') as "签退时间",
+                case when walk_in then '是' else '' end as "临时报到",
+                remarks as "备注"
+            from volunteer_attendance_logs
+            order by attendance_date, name, check_in_time
         """, fetchall=True)
 
         vol_rows = db_query("""
@@ -147,9 +149,23 @@ def download_data():
         output = io.BytesIO()
 
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            pd.DataFrame(att_rows).to_excel(writer, index=False, sheet_name="attendance")
-            pd.DataFrame(vol_rows).to_excel(writer, index=False, sheet_name="volunteers")
-            pd.DataFrame(reading_rows).to_excel(writer, index=False, sheet_name="reading")
+            pd.DataFrame(att_logs).to_excel(
+                writer,
+                index=False,
+                sheet_name="att_logs"
+            )
+
+            pd.DataFrame(vol_rows).to_excel(
+                writer,
+                index=False,
+                sheet_name="volunteers"
+            )
+
+            pd.DataFrame(reading_rows).to_excel(
+                writer,
+                index=False,
+                sheet_name="reading"
+            )
 
         output.seek(0)
 
@@ -325,7 +341,7 @@ def admin_report():
 <p>{t["today_code_warning"]}</p>
 
 <a href="/download_data" style="display:block;margin-top:12px;font-size:24px;">
-    {t["download_data"]}
+    📥 下载签到日志 Excel
 </a>
 
 <a href="/admin_add_record?pin={pin}" style="display:block;margin-top:12px;font-size:24px;">
@@ -445,9 +461,17 @@ h1{
 
 <div class="card">
 <h2>📥 数据下载</h2>
+
 <a class="btn" href="{{ url_for('admin.download_data') }}">
-下载签到数据 Excel
+下载旧签到数据 Excel
 </a>
+
+<br>
+
+<a class="btn" href="{{ url_for('admin.download_att_logs') }}">
+下载新签到日志 att_logs
+</a>
+
 </div>
 
 </div>
@@ -462,3 +486,43 @@ def admin_home():
         ADMIN_HOME_HTML,
         today_code=get_today_code()
     )
+
+@admin_bp.route("/download_att_logs")
+def download_att_logs():
+
+    try:
+        att_logs = db_query("""
+            select
+                attendance_date as "日期",
+                volunteer_id as "编号",
+                name as "姓名",
+                actual_role as "岗位",
+                actual_place as "地点",
+                to_char(check_in_time, 'HH12:MIam') as "签到时间",
+                to_char(check_out_time, 'HH12:MIam') as "签退时间",
+                case when walk_in then '是' else '' end as "临时报到",
+                remarks as "备注"
+            from volunteer_attendance_logs
+            order by attendance_date, name, check_in_time
+        """, fetchall=True)
+
+        output = io.BytesIO()
+
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            pd.DataFrame(att_logs).to_excel(
+                writer,
+                index=False,
+                sheet_name="att_logs"
+            )
+
+        output.seek(0)
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name="att_logs.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    except Exception as e:
+        return f"下载签到日志失败：{e}"

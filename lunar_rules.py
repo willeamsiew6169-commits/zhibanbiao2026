@@ -1,3 +1,5 @@
+# lunar_rules.py
+
 from datetime import timedelta
 
 try:
@@ -123,6 +125,15 @@ def get_special_day_info(date_obj):
         "remove_next_day": False,
     }
 
+    result["template_text"] = {
+        "normal": "平时值班模板",
+        "lunar_1_15": "初一十五值班模板",
+        "buddhist_festival": "佛诞大日子模板",
+    }.get(
+        result["template_type"],
+        result["template_type"]
+    )
+
     key_exact = (lunar.month, lunar.day)
     key_any = ("any", lunar.day)
 
@@ -146,6 +157,8 @@ def get_special_day_info(date_obj):
 def get_next_day_remove_info(date_obj):
     yesterday = date_obj - timedelta(days=1)
     info = get_special_day_info(yesterday)
+
     return {
-        "need_remove_today_after_12": info["remove_next_day"]
+        "need_remove_today_after_12": info["remove_next_day"],
+        "remove_confirmed": False,
     }

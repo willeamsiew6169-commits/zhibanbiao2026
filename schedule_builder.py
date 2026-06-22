@@ -1,3 +1,5 @@
+# schedule_builder.py
+
 import os
 import re
 import pandas as pd
@@ -19,6 +21,52 @@ OUTPUT_FILE = os.path.join(BASE_DIR, "schedule_output.txt")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True) if DATABASE_URL else None
 VOLUNTEER_SIGNUP_URL = "https://gyt-checkin.onrender.com/volunteer"
+
+
+DUTY_TARGETS = {
+    "normal": {
+        "卫生": 2,
+        "绿观音堂": 1,
+        "绿活动中心": 1,
+        "橙观音堂": 1,
+        "橙活动中心": 1,
+        "黄观音堂": 1,
+        "黄活动中心": 1,
+    },
+
+    "lunar_1_15": {
+        "卫生": 3,
+        "绿观音堂": 1,
+        "绿活动中心": 1,
+        "橙观音堂": 2,
+        "橙活动中心": 2,
+        "黄观音堂": 2,
+        "黄活动中心": 2,
+    },
+
+    "buddhist_festival": {
+        "卫生": 3,
+        "绿观音堂": 2,
+        "绿活动中心": 2,
+        "橙观音堂": 2,
+        "橙活动中心": 2,
+        "黄观音堂": 2,
+        "黄活动中心": 2,
+    },
+}
+
+
+def get_duty_targets(template_type="normal"):
+    return DUTY_TARGETS.get(
+        template_type,
+        DUTY_TARGETS["normal"]
+    )
+
+def get_shortage_targets(template_type):
+    return DUTY_TARGETS.get(
+        template_type,
+        DUTY_TARGETS["normal"]
+    )
 
 
 def build_master_table_section(arranged):
@@ -425,8 +473,6 @@ def get_weekday_name(date_obj):
     return WEEKDAY_MAP[date_obj.weekday()]
 
 
-
-
 def load_fixed_schedule():
     xls = pd.ExcelFile(FIXED_FILE)
     sheets = xls.sheet_names
@@ -463,7 +509,6 @@ def fix_time_range(text):
 
     return text
 
-import re
 
 def fix_time_format(text):
     text = str(text)
@@ -879,90 +924,70 @@ def auto_assign_cleaning_roles(result, signup_df):
             if name and name not in cleaning_people:
                 cleaning_people.append(name)
 
-    if not cleaning_people:
-        return result
-
-    last_job_map = load_last_assignment()
-
-    def pick_job(name, options):
-        last = last_job_map.get(name)
-        for o in options:
-            if o != last:
-                return o
-        return options[0]
-
-    # 先清空，避免重复
     result["佛堂卫生"] = []
     result["二楼卫生"] = []
     result["楼梯卫生"] = []
 
-    # ===== 1人 =====
+    if not cleaning_people:
+        return result
+
+    # 叶荔铢不排佛堂卫生
+    special_name = "葉荔銖"
+
+    # ===== 1人：三处同一人 =====
     if len(cleaning_people) == 1:
         name = cleaning_people[0]
 
-        if name == "葉荔銖":
-            job = pick_job(name, ["二楼卫生", "楼梯卫生"])
+        if name == special_name:
+            result["二楼卫生"] = [name]
+            result["楼梯卫生"] = [name]
         else:
-            job = pick_job(name, ["佛堂卫生", "二楼卫生", "楼梯卫生"])
+            result["佛堂卫生"] = [name]
+            result["二楼卫生"] = [name]
+            result["楼梯卫生"] = [name]
 
-        result[job] = [name]
         return result
 
-    # ===== 2人 =====
+    # ===== 2人：佛堂1人，二楼1人，楼梯两人共同 =====
     if len(cleaning_people) == 2:
         p1, p2 = cleaning_people
 
-        # 葉荔銖不排佛堂卫生
-        if p1 == "葉荔銖" or p2 == "葉荔銖":
-            late_person = "葉荔銖"
-            other = p2 if p1 == "葉荔銖" else p1
+        if special_name in cleaning_people:
+            other = p2 if p1 == special_name else p1
 
             result["佛堂卫生"] = [other]
-            result["二楼卫生"] = [late_person]
-            result["楼梯卫生"] = [other, late_person]
-            return result
+            result["二楼卫生"] = [special_name]
+            result["楼梯卫生"] = [other, special_name]
 
-        # 普通2人：一人佛堂，一人二楼，楼梯联合
-        job1 = pick_job(p1, ["佛堂卫生", "二楼卫生"])
-        job2 = "二楼卫生" if job1 == "佛堂卫生" else "佛堂卫生"
+        else:
+            result["佛堂卫生"] = [p1]
+            result["二楼卫生"] = [p2]
+            result["楼梯卫生"] = [p1, p2]
 
-        result[job1] = [p1]
-        result[job2] = [p2]
-        result["楼梯卫生"] = [p1, p2]
         return result
 
-    # ===== 3人或以上 =====
-    remaining = cleaning_people[:]
+    # ===== 3人以上：最多取前3人分配 =====
+    people = cleaning_people[:3]
 
-    # 葉荔銖特殊规则：优先二楼，不排佛堂
-    if "葉荔銖" in remaining:
-        result["二楼卫生"] = ["葉荔銖"]
-        remaining.remove("葉荔銖")
+    if special_name in people:
+        others = [p for p in people if p != special_name]
 
-    # 佛堂卫生
-    if remaining:
-        fotang_person = remaining.pop(0)
-        result["佛堂卫生"] = [fotang_person]
+        result["二楼卫生"] = [special_name]
+
+        if others:
+            result["佛堂卫生"] = [others[0]]
+
+        if len(others) >= 2:
+            result["楼梯卫生"] = [others[1]]
+        elif others:
+            result["楼梯卫生"] = [others[0]]
+        else:
+            result["楼梯卫生"] = [special_name]
+
     else:
-        fotang_person = None
-
-    # 二楼卫生（如果还没安排）
-    if not result["二楼卫生"] and remaining:
-        second_floor_person = remaining.pop(0)
-        result["二楼卫生"] = [second_floor_person]
-    else:
-        second_floor_person = result["二楼卫生"][0] if result["二楼卫生"] else None
-
-    # 楼梯卫生：有第三人就给第三人单独做
-    if remaining:
-        result["楼梯卫生"] = [remaining.pop(0)]
-    else:
-        # 理论上不会进来，因为这里是3人或以上
-        stair_fallback = []
-        for p in cleaning_people:
-            if p not in [fotang_person, second_floor_person]:
-                stair_fallback.append(p)
-        result["楼梯卫生"] = stair_fallback[:1]
+        result["佛堂卫生"] = [people[0]]
+        result["二楼卫生"] = [people[1]]
+        result["楼梯卫生"] = [people[2]]
 
     return result
 
@@ -1503,30 +1528,38 @@ def build_normal_message(date_obj, arranged, special_info, remove_info):
     weekday = get_weekday_name(date_obj)
     date_text = f"{date_obj.day}/{date_obj.month}/{date_obj.year}"
 
-    setup_master = format_people_inline(
-        arranged.get("设师父供台", [])
-    )
+    setup_people = arranged.get("设师父供台", [])
+    remove_people = arranged.get("收师父供台", [])
 
-    remove_master = format_people_inline(
-        arranged.get("收师父供台", [])
-    )
+    setup_master = format_people_inline(setup_people)
+    remove_master = format_people_inline(remove_people)
 
     master_section = ""
 
-    if setup_master:
-        master_section += f"""
-6:00am~8:00am
-设师父供台:
-{setup_master}
-"""
+    # 自动判断需要设供台
+    if special_info.get("setup_shifu"):
 
-    if remove_master:
+        if not setup_master:
+            setup_master = "待安排"
+
         master_section += f"""
-12:00pm~2:00pm
-收师父供台:
-{remove_master}
-12pm的香结束之后，请下供桌。
-"""
+    6:00am~8:00am
+    设师父供台:
+    {setup_master}
+    """
+
+    # 自动判断需要收供台
+    if remove_info.get("need_remove_today_after_12"):
+
+        if not remove_master:
+            remove_master = "待安排"
+
+        master_section += f"""
+    12:00pm~2:00pm
+    收师父供台:
+    {remove_master}
+    12pm的香结束之后，请下供桌。
+    """
 
     green_section = ""
 
