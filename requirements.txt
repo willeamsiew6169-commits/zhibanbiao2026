@@ -11,3 +11,4 @@ sqlalchemy
 psycopg2-binary
 opencc-python-reimplemented
 python-dotenv
+supabase
