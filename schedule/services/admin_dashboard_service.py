@@ -21,12 +21,18 @@ from schedule.services.publish_service import is_schedule_published
 from schedule.services.settings_service import get_schedule_settings
 
 def load_admin_dashboard_data(mode, override_date):
+    import time
+
+    t0 = time.time()
+
     selected_date_obj = datetime.strptime(
         override_date,
         "%Y-%m-%d"
     ).date()
 
+    t = time.time()
     special_day_info = get_special_day_info(selected_date_obj)
+    print("special_day_info:", round(time.time() - t, 2))
 
     template_text = {
         "normal": "平时值班模板",
@@ -39,26 +45,42 @@ def load_admin_dashboard_data(mode, override_date):
         special_day_info["template_type"]
     )
 
+    t = time.time()
     remove_info = get_next_day_remove_info(selected_date_obj)
-    shortage_summary = build_shortage_summary_for_admin(override_date)
-    supply_signups = load_supply_signups_for_date(override_date)
+    print("remove_info:", round(time.time() - t, 2))
 
+    t = time.time()
+    shortage_summary = build_shortage_summary_for_admin(override_date)
+    print("shortage_summary:", round(time.time() - t, 2))
+
+    t = time.time()
+    supply_signups = load_supply_signups_for_date(override_date)
+    print("supply_signups:", round(time.time() - t, 2))
+
+    t = time.time()
     settings = get_schedule_settings()
+    print("settings:", round(time.time() - t, 2))
 
     try:
         supply_alert_days = int(settings.get("supply_alert_days", 7))
     except:
         supply_alert_days = 7
 
+    t = time.time()
     supply_alerts = load_upcoming_supply_signup_alerts(
         days_ahead=supply_alert_days
     )
+    print("supply_alerts:", round(time.time() - t, 2))
 
+    t = time.time()
     published = is_schedule_published(override_date)
+    print("published:", round(time.time() - t, 2))
 
+    t = time.time()
     pending_counts, day_summary, day_flags = load_schedule_admin_dashboard_data(
         override_date
     )
+    print("dashboard_counts:", round(time.time() - t, 2))
 
     now = malaysia_now()
     today = now.date()
@@ -72,12 +94,16 @@ def load_admin_dashboard_data(mode, override_date):
         next_year = today.year
         next_month = today.month + 1
 
+    t = time.time()
     display_records = load_display_records(
         mode=mode,
         target_date=override_date if mode == "day" else None,
         year=next_year if mode == "prebook" else None,
         month=next_month if mode == "prebook" else None,
     )
+    print("display_records:", round(time.time() - t, 2))
+
+    print("load_admin_dashboard_data TOTAL:", round(time.time() - t0, 2))
 
     return {
         "special_day_info": special_day_info,
