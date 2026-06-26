@@ -1230,7 +1230,7 @@ def schedule_prebook_add():
     inserted = 0
     skipped = 0
 
-    with get_db() as conn:
+    with get_conn() as conn:
         with conn.cursor() as cur:
 
             for role in roles:

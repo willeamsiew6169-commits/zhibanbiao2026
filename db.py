@@ -2,6 +2,7 @@
 
 import os
 import psycopg2
+from contextlib import contextmanager
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import SimpleConnectionPool
 from dotenv import load_dotenv
@@ -30,8 +31,20 @@ pool = SimpleConnectionPool(
 def get_db():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
+@contextmanager
 def get_conn():
-    return psycopg2.connect(DATABASE_URL) 
+    conn = pool.getconn()
+
+    try:
+        yield conn
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        pool.putconn(conn) 
 
 def db_query(sql, params=None, fetchone=False, fetchall=False):
     import psycopg2

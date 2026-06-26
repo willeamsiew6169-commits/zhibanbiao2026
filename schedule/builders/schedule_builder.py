@@ -8,7 +8,7 @@ import traceback
 import psycopg2
 
 from datetime import datetime
-from db import get_db, db_query
+from db import get_db, db_query, get_conn
 from psycopg2.extras import RealDictCursor
 from sqlalchemy import create_engine, text
 from lunar_rules import get_special_day_info, get_next_day_remove_info
@@ -580,7 +580,7 @@ def load_supabase_signups(target_date_str):
 def update_assigned_places(target_date, assigned_rows):
     date_str = str(target_date)
 
-    with get_db() as conn:
+    with get_conn() as conn:
         with conn.cursor() as cur:
 
             cur.execute("""

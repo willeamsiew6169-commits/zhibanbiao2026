@@ -3,7 +3,7 @@
 import os
 import psycopg2
 
-from db import get_db
+from db import get_conn
 from psycopg2.extras import RealDictCursor
 from psycopg2.extras import RealDictCursor
 
@@ -13,7 +13,7 @@ def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
 def get_schedule_setting(key, default_value=""):
-    with get_db() as conn:
+    with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 select value
@@ -41,7 +41,7 @@ def get_schedule_settings():
 
     settings = defaults.copy()
 
-    with get_db() as conn:
+    with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 select key, value
@@ -56,7 +56,7 @@ def get_schedule_settings():
 
 
 def save_schedule_setting(key, value):
-    with get_db() as conn:
+    with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 insert into schedule_settings (key, value, updated_at)

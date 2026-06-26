@@ -3,14 +3,14 @@
 import os
 import pandas as pd
 
-from db import get_db
+from db import get_conn
 from psycopg2.extras import RealDictCursor
 from schedule.constants import PREBOOK_FILE
 from datetime import datetime, date, timedelta
 
 
 def load_assigned_places_for_date(date_str):
-    with get_db() as conn:
+    with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 select
@@ -92,7 +92,7 @@ def load_schedule_admin_dashboard_data(override_date):
     tomorrow = today + timedelta(days=1)
     month_start = today.replace(day=1)
 
-    with get_db() as conn:
+    with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
             # 未安排统计

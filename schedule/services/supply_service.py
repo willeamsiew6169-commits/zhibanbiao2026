@@ -1,6 +1,6 @@
 # supply_service.py
 
-from db import get_db
+from db import get_conn
 from psycopg2.extras import RealDictCursor
 from lunar_rules import get_special_day_info
 from datetime import (
@@ -11,7 +11,7 @@ from datetime import (
 
 
 def load_supply_signups_for_date(date_str):
-    with get_db() as conn:
+    with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 select volunteer_id, name
@@ -46,7 +46,7 @@ def load_upcoming_supply_signup_alerts(days_ahead=60, limit=2):
     if not special_dates:
         return []
 
-    with get_db() as conn:
+    with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for item in special_dates:
                 cur.execute("""
@@ -65,7 +65,7 @@ def load_upcoming_supply_signup_alerts(days_ahead=60, limit=2):
 
 
 def load_day_flags(date_str):
-    with get_db() as conn:
+    with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 select

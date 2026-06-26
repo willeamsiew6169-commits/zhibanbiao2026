@@ -1,10 +1,10 @@
 # publish_service.py
 
-from db import get_db
+from db import get_conn
 from psycopg2.extras import RealDictCursor
 
 def is_schedule_published(target_date):
-    with get_db() as conn:
+    with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 select coalesce(is_published, false) as is_published
@@ -18,7 +18,7 @@ def is_schedule_published(target_date):
 
 def publish_schedule_for_date(target_date, published_by="Admin"):
 
-    with get_db() as conn:
+    with get_conn() as conn:
         with conn.cursor() as cur:
 
             cur.execute("""
@@ -54,7 +54,7 @@ def publish_schedule_for_date(target_date, published_by="Admin"):
 
 def unpublish_schedule_for_date(target_date):
 
-    with get_db() as conn:
+    with get_conn() as conn:
         with conn.cursor() as cur:
 
             cur.execute("""
