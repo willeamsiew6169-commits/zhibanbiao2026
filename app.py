@@ -32,7 +32,7 @@ from member_web import member_bp
 from pypinyin import lazy_pinyin
 from reading_web import reading_bp
 from finance_web import finance_bp
-from schedule_web import schedule_bp
+from schedule.schedule_web import schedule_bp
 from utils import get_text, get_lang
 from sqlalchemy import create_engine, text
 from psycopg2.extras import RealDictCursor
@@ -88,7 +88,7 @@ ATTENDANCE_HEADERS = [
 ]
 
 # 系统内部岗位永远用中文；英文只用于网页显示
-ROLES = ["值班", "卫生", "佛台", "供台", "供花", "供果", "膳食", "佛学班"]
+ROLES = ["值班", "卫生", "佛台", "供台", "供花", "供果", "膳食组", "佛学班"]
 
 ROLE_TEXT = {
     "值班": {"zh": "值班", "en": "Duty"},
@@ -97,7 +97,7 @@ ROLE_TEXT = {
     "供台": {"zh": "供台", "en": "Offering Table"},
     "供花": {"zh": "供花", "en": "Flowers"},
     "供果": {"zh": "供果", "en": "Fruit Offering"},
-    "膳食": {"zh": "膳食", "en": "Meal"},
+    "膳食组": {"zh": "膳食组", "en": "Meal Team"},
     "佛学班": {"zh": "佛学班", "en": "Buddhist Class"},
 }
 
@@ -717,7 +717,7 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "") -> tuple[
         "",
         None,
         card_no,
-        "临时报到 / 未排班签到"
+        f"现场签到：{role}"
     ))
 
     db_query("""
@@ -731,21 +731,24 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "") -> tuple[
             walk_in,
             remarks
         )
-        values (null, %s, %s, %s, %s, %s, true, '未排班临时报到')
+        values (null, %s, %s, %s, %s, %s, true, %s)
     """, (
         volunteer["编号"],
         volunteer["姓名"],
         now_date_str(),
         role,
         role,
+        f"现场签到：{role}"
     ))
 
     return True, f"""{volunteer['姓名']} 已签到
 
-今天没有正式排班记录。
-已记录为临时报到：{role}
+    今天没有正式排班记录。
 
-完成后请记得签退。"""
+    已登记：
+    {role}
+
+    完成后请记得签退。"""
 
 def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
     raw_id = str(volunteer_id or "").strip()
@@ -2032,3 +2035,5 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
+    

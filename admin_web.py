@@ -108,6 +108,22 @@ def admin_add_record():
 def download_data():
 
     try:
+        old_att_rows = db_query("""
+            select
+                date as "日期",
+                volunteer_id as "编号",
+                name as "姓名",
+                signup as "报名",
+                signin as "签到",
+                role as "岗位",
+                start_time as "开始时间",
+                end_time as "结束时间",
+                hours as "时数",
+                remark as "备注"
+            from attendance
+            order by date, name, start_time
+        """, fetchall=True)
+
         att_logs = db_query("""
             select
                 attendance_date as "日期",
@@ -117,7 +133,7 @@ def download_data():
                 actual_place as "地点",
                 to_char(check_in_time, 'HH12:MIam') as "签到时间",
                 to_char(check_out_time, 'HH12:MIam') as "签退时间",
-                case when walk_in then '是' else '' end as "临时报到",
+                case when walk_in then '是' else '' end as "现场签到",
                 remarks as "备注"
             from volunteer_attendance_logs
             order by attendance_date, name, check_in_time
@@ -146,10 +162,55 @@ def download_data():
             order by date, time
         """, fetchall=True)
 
+        old_df = pd.DataFrame(old_att_rows)
+        logs_df = pd.DataFrame(att_logs)
+
+        if not logs_df.empty:
+            new_att_df = pd.DataFrame({
+                "日期": logs_df.get("日期", ""),
+                "编号": logs_df.get("编号", ""),
+                "姓名": logs_df.get("姓名", ""),
+                "报名": logs_df["现场签到"].apply(lambda x: 0 if str(x).strip() == "是" else 1),
+                "签到": 1,
+                "岗位": logs_df.get("岗位", ""),
+                "开始时间": logs_df.get("签到时间", ""),
+                "结束时间": logs_df.get("签退时间", ""),
+                "时数": "",
+                "备注": logs_df.get("备注", ""),
+            })
+        else:
+            new_att_df = pd.DataFrame(columns=[
+                "日期", "编号", "姓名", "报名", "签到",
+                "岗位", "开始时间", "结束时间", "时数", "备注"
+            ])
+
+        attendance_df = pd.concat(
+            [old_df, new_att_df],
+            ignore_index=True
+        )
+
+        if not attendance_df.empty:
+            attendance_df = attendance_df.drop_duplicates(
+                subset=["日期", "编号", "姓名", "岗位", "开始时间"],
+                keep="last"
+            )
+
+            attendance_df = attendance_df.sort_values(
+                by=["日期", "姓名", "开始时间"],
+                ascending=[True, True, True]
+            )
+
         output = io.BytesIO()
 
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            pd.DataFrame(att_logs).to_excel(
+
+            attendance_df.to_excel(
+                writer,
+                index=False,
+                sheet_name="attendance"
+            )
+
+            logs_df.to_excel(
                 writer,
                 index=False,
                 sheet_name="att_logs"

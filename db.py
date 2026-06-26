@@ -30,6 +30,9 @@ pool = SimpleConnectionPool(
 def get_db():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
+def get_conn():
+    return psycopg2.connect(DATABASE_URL) 
+
 def db_query(sql, params=None, fetchone=False, fetchall=False):
     import psycopg2
 
