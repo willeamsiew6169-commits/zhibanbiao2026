@@ -2,8 +2,8 @@
 
 import re
 
-from datetime import datetime
-
+from datetime import datetime, timedelta, timezone
+MY_TZ = timezone(timedelta(hours=8))
 
 def parse_min(t):
         if not t:
@@ -142,3 +142,9 @@ def fix_time_format(text):
 
 def time_to_minutes(t):
     return parse_min(t)
+
+def malaysia_now():
+    return datetime.now(MY_TZ)
+
+def malaysia_today():
+    return malaysia_now().date()

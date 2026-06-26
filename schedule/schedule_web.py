@@ -4,20 +4,23 @@ import os
 import calendar
 import psycopg2
 import pandas as pd
-import schedule.routes
 
 from opencc import OpenCC
 from dotenv import load_dotenv
-from db import get_db, get_conn
+from db import get_db, get_conn, db_query
 from supabase import create_client
 from openpyxl import load_workbook
 from psycopg2.extras import RealDictCursor
 from sqlalchemy import create_engine, text
+
 from schedule.blueprint import schedule_bp
+import schedule.routes
+
+from schedule.builders.time_utils import malaysia_today, malaysia_now
 from datetime import datetime, timedelta, date, timezone
 from schedule.services.admin_dashboard_service import load_admin_dashboard_data
 from lunar_rules import get_special_day_info, get_next_day_remove_info
-from flask import Blueprint, request, session, redirect, url_for, render_template_string, flash
+from flask import request, session, redirect, url_for, render_template_string, flash
 from schedule.builders.schedule_builder import (
     run_schedule_for_date,
     patch_schedule_for_date,
@@ -79,6 +82,7 @@ from schedule.services.whatsapp_service import (
     build_whatsapp_from_assigned
 )
 
+
 load_dotenv()
 
 cc = OpenCC('t2s')  # 繁 → 简
@@ -124,10 +128,9 @@ def display_report_name(filename):
 
 
 def get_pending_signup_counts():
-    from datetime import date, timedelta
-    from db import db_query
+    
+    today = malaysia_today()
 
-    today = date.today()
     tomorrow = today + timedelta(days=1)
     month_start = today.replace(day=1)
 
@@ -899,7 +902,7 @@ def schedule_admin():
 
     t0 = time.time()
 
-    now = datetime.now()
+    now = malaysia_now()
 
     switch_time = get_schedule_setting(
         "default_day_switch_time",
@@ -926,13 +929,20 @@ def schedule_admin():
     mode = request.args.get("mode", "")
 
     override_date = request.args.get("override_date") or default_schedule_date
+    t1 = time.time()
     dashboard = load_admin_dashboard_data(
         mode=mode,
         override_date=override_date,
     )
+    print("dashboard:", round(time.time() - t1, 2))
 
+    t2 = time.time()
     buddha_names = load_buddha_name_options()
+    print("buddha_names:", round(time.time() - t2, 2))
+
+    t3 = time.time()
     fixed_buddha_today = get_fixed_buddha_for_date(override_date)
+    print("fixed_buddha_today:", round(time.time() - t3, 2))
 
     print("schedule_admin total:", round(time.time() - t0, 2))
 
@@ -1567,17 +1577,15 @@ def fill_pending_volunteers(date_str):
     return f"✅ 已补入 {len(pending_rows)} 位待安排义工"
 
 
-from datetime import date, datetime, timedelta
-from psycopg2.extras import RealDictCursor
-
-
 @schedule_bp.route("/schedule/reports")
 def schedule_reports():
 
     if not session.get("schedule_login"):
         return redirect(url_for("schedule.schedule_admin"))
 
-    ym = request.args.get("ym", date.today().strftime("%Y-%m"))
+    today = malaysia_today()
+
+    ym = request.args.get("ym", today.strftime("%Y-%m"))
 
     start_date = f"{ym}-01"
 
@@ -2644,7 +2652,12 @@ def schedule_attendance_status():
     if not session.get("schedule_login"):
         return redirect(url_for("schedule.schedule_admin"))
 
-    date_str = request.args.get("date", date.today().strftime("%Y-%m-%d"))
+    today = malaysia_today()
+
+    date_str = request.args.get(
+        "date",
+        today.strftime("%Y-%m-%d")
+    )
 
     def group_by_person(rows, source="assignment"):
         grouped = {}
@@ -3048,8 +3061,10 @@ def schedule_signups_manage():
         "cancelled": sum(1 for r in rows if r["status"] == "cancelled"),
     }
 
-    today = date.today().strftime("%Y-%m-%d")
-    tomorrow = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+    today_date = malaysia_today()
+
+    today = today_date.strftime("%Y-%m-%d")
+    tomorrow = (today_date + timedelta(days=1)).strftime("%Y-%m-%d")
 
     role_summary = {}
 

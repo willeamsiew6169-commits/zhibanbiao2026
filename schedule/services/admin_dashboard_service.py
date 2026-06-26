@@ -1,7 +1,7 @@
 # admin_dashboard_service.py
 
-from datetime import datetime, date
-
+from datetime import datetime, timedelta, date, timezone
+from schedule.builders.time_utils import malaysia_today, malaysia_now
 from lunar_rules import (
     get_special_day_info,
     get_next_day_remove_info,
@@ -60,9 +60,10 @@ def load_admin_dashboard_data(mode, override_date):
         override_date
     )
 
-    is_today_or_past = selected_date_obj < date.today()
+    now = malaysia_now()
+    today = now.date()
 
-    today = date.today()
+    is_today_or_past = selected_date_obj < today
 
     if today.month == 12:
         next_year = today.year + 1

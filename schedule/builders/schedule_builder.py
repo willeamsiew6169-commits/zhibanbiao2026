@@ -24,7 +24,7 @@ from schedule.builders.flatten_builder import (
     flatten_arranged_for_db
 )
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DATA_DIR = os.path.join(BASE_DIR, "data")
 

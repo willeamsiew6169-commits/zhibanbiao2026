@@ -17,7 +17,7 @@ from schedule.helpers import (
 from lunar_rules import get_special_day_info
 from schedule.constants import TIME_OPTIONS
 from schedule.builders.schedule_builder import patch_schedule_for_date
-from schedule.builders.time_utils import time_to_minutes
+from schedule.builders.time_utils import time_to_minutes, malaysia_today, malaysia_now
 from schedule.services.publish_service import is_schedule_published
 from schedule.services.whatsapp_service import build_whatsapp_from_assigned
 from schedule.services.shortage_service import build_signup_shortage_notice
@@ -29,10 +29,8 @@ from schedule.volunteer_templates import (
 @schedule_bp.route("/volunteer")
 def volunteer_home():
 
-    MY_TZ = timezone(timedelta(hours=8))
-    now = datetime.now(MY_TZ)
-
-    today = date.today()
+    now = malaysia_now()
+    today = now.date()
 
     if today.month == 12:
         prebook_year = today.year + 1
@@ -490,8 +488,7 @@ def volunteer_cancel_signup(signup_id):
 @schedule_bp.route("/volunteer/today_schedule")
 def volunteer_today_schedule():
 
-    MY_TZ = timezone(timedelta(hours=8))
-    now = datetime.now(MY_TZ)
+    now = malaysia_now()
 
     if now.hour >= 18:
         target_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -544,7 +541,7 @@ def volunteer_day_schedule():
 
 @schedule_bp.route("/volunteer/monthly_signup_list")
 def volunteer_monthly_signup_list():
-    today = date.today()
+    today = malaysia_today()
 
     year = request.args.get("year", today.year)
     month = request.args.get("month", today.month)
@@ -631,7 +628,7 @@ def volunteer_monthly_signup_list():
 def volunteer_prebook():
 
     if request.method == "GET":
-        today = date.today()
+        today = malaysia_today()
 
         year = int(request.args.get("year", today.year))
         month = int(request.args.get("month", today.month))
