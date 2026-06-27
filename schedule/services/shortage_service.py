@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, date, timezone
 
 from schedule.services.assignment_service import load_assigned_places_for_date
 from psycopg2.extras import RealDictCursor
-from schedule.builders.time_utils import time_to_minutes
+from schedule.builders.time_utils import time_to_minutes, malaysia_today
 from db import get_db, get_conn
 from lunar_rules import (
     get_special_day_info,
@@ -182,7 +182,7 @@ def build_signup_shortage_notice(date_str):
 """
 
     target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-    today = date.today()
+    today = malaysia_today()
 
     if target_date == today:
         title = "📢 今日仍需要义工："

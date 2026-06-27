@@ -16,16 +16,16 @@ from schedule.builders.schedule_builder import (
     build_buddhist_festival_message,
 )
 
-def build_whatsapp_from_assigned(date_str):
-    from datetime import datetime
 
+def build_whatsapp_from_assigned(date_str):
     rows = load_assigned_places_for_date(date_str)
 
     if not rows:
         return f"📅 {date_str}\n\n暂时没有已安排的值班资料。"
 
-    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-    special_info = get_special_day_info(date_obj)
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+    special_day_info = get_special_day_info(date_obj)
     remove_info = get_next_day_remove_info(date_obj)
 
     day_flags = load_day_flags(date_str)
@@ -57,6 +57,9 @@ def build_whatsapp_from_assigned(date_str):
         "黄活动中心": [],
     }
 
+    template_type = special_day_info["template_type"]
+    is_lunar_day = template_type == "lunar_1_15"
+
     for r in rows:
         name = r.get("name")
         role = r.get("role")
@@ -85,8 +88,6 @@ def build_whatsapp_from_assigned(date_str):
         elif role == "值班":
             shift_key = str(shift or "").replace("班", "")
 
-            is_lunar_day = special_info["template_type"] == "lunar_1_15"
-
             if shift_key == "绿" and not is_lunar_day:
                 shift_key = "黄"
 
@@ -94,11 +95,25 @@ def build_whatsapp_from_assigned(date_str):
                 key = f"{shift_key}{place}"
                 arranged[key].append((name, start, end))
 
-    if special_info["template_type"] == "normal":
-        return build_normal_message(date_obj, arranged, special_info, remove_info)
+    if template_type == "normal":
+        return build_normal_message(
+            date_obj,
+            arranged,
+            special_day_info,
+            remove_info
+        )
 
-    elif special_info["template_type"] == "lunar_1_15":
-        return build_lunar_1_15_message(date_obj, arranged, special_info, remove_info)
+    if template_type == "lunar_1_15":
+        return build_lunar_1_15_message(
+            date_obj,
+            arranged,
+            special_day_info,
+            remove_info
+        )
 
-    else:
-        return build_buddhist_festival_message(date_obj, arranged, special_info, remove_info)
+    return build_buddhist_festival_message(
+        date_obj,
+        arranged,
+        special_day_info,
+        remove_info
+    )

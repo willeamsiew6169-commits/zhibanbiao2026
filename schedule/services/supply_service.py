@@ -3,6 +3,7 @@
 from db import get_conn
 from psycopg2.extras import RealDictCursor
 from lunar_rules import get_special_day_info
+from schedule.builders.time_utils import malaysia_today
 from datetime import (
     datetime,
     timedelta,
@@ -25,7 +26,7 @@ def load_supply_signups_for_date(date_str):
         
 
 def load_upcoming_supply_signup_alerts(days_ahead=60, limit=2):
-    today = date.today()
+    today = malaysia_today()
     end_date = today + timedelta(days=days_ahead)
 
     special_dates = []

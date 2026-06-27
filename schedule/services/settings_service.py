@@ -1,33 +1,12 @@
 # settings_service.py
 
-import os
-import psycopg2
+from functools import lru_cache
 
 from db import get_conn
 from psycopg2.extras import RealDictCursor
-from psycopg2.extras import RealDictCursor
-
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
-def get_conn():
-    return psycopg2.connect(DATABASE_URL)
-
-def get_schedule_setting(key, default_value=""):
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                select value
-                from schedule_settings
-                where key = %s
-            """, (key,))
-            row = cur.fetchone()
-
-    if row:
-        return row["value"]
-
-    return default_value
 
 
+@lru_cache(maxsize=1)
 def get_schedule_settings():
     defaults = {
         "default_day_switch_time": "18:00",
@@ -55,6 +34,11 @@ def get_schedule_settings():
     return settings
 
 
+def get_schedule_setting(key, default_value=""):
+    settings = get_schedule_settings()
+    return settings.get(key, default_value)
+
+
 def save_schedule_setting(key, value):
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -66,4 +50,6 @@ def save_schedule_setting(key, value):
                     value = excluded.value,
                     updated_at = now()
             """, (key, value))
-        conn.commit()
+
+    # 清除缓存，下次重新读取数据库
+    get_schedule_settings.cache_clear()

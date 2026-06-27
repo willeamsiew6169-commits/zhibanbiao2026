@@ -7,6 +7,7 @@ from db import get_conn
 from psycopg2.extras import RealDictCursor
 from schedule.constants import PREBOOK_FILE
 from datetime import datetime, date, timedelta
+from schedule.builders.time_utils import malaysia_today
 
 
 def load_assigned_places_for_date(date_str):
@@ -88,7 +89,7 @@ def load_display_records(mode, target_date=None, year=None, month=None):
 
 def load_schedule_admin_dashboard_data(override_date):
     
-    today = date.today()
+    today = malaysia_today()
     tomorrow = today + timedelta(days=1)
     month_start = today.replace(day=1)
 
