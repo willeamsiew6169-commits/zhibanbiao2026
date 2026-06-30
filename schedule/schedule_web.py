@@ -12,7 +12,7 @@ from supabase import create_client
 from openpyxl import load_workbook
 from psycopg2.extras import RealDictCursor
 from sqlalchemy import create_engine, text
-
+from utils import apply_branch_prefix
 from schedule.blueprint import schedule_bp
 import schedule.routes
 
@@ -272,7 +272,7 @@ def schedule_signup_cancel(signup_id):
 
     
 def load_buddha_name_options():
-    file = os.path.join(BASE_DIR, "fixed_schedule.xlsx")
+    file = os.path.join(BASE_DIR, "data", "fixed_schedule.xlsx")
 
     if not os.path.exists(file):
         return []
@@ -295,7 +295,8 @@ def load_buddha_name_options():
         return []
 
 def get_fixed_buddha_for_date(date_str):
-    file = os.path.join(BASE_DIR, "fixed_schedule.xlsx")
+    file = os.path.join(BASE_DIR, "data", "fixed_schedule.xlsx")
+    print("fixed_schedule file =", file, os.path.exists(file))
 
     if not os.path.exists(file):
         return []
@@ -881,6 +882,137 @@ def build_shortage_notice(date_str):
 感恩大家🙏🙏🙏
 """
 
+def build_signup_notice_whatsapp(date_str):
+
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+    weekday_map = {
+        0: "星期一",
+        1: "星期二",
+        2: "星期三",
+        3: "星期四",
+        4: "星期五",
+        5: "星期六",
+        6: "星期日",
+    }
+
+    date_text = f"{date_obj.day}/{date_obj.month}/{date_obj.year} ({weekday_map[date_obj.weekday()]})"
+
+    fixed_buddha = get_fixed_buddha_for_date(date_str)
+
+    groups = {
+        "佛堂卫生": [],
+        "二楼卫生": [],
+        "楼梯卫生": [],
+        "橙观音堂": [],
+        "橙活动中心": [],
+        "黄观音堂": [],
+        "黄活动中心": [],
+    }
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select *
+                from volunteer_schedule_assignments
+                where assignment_date = %s
+                and coalesce(status, 'assigned') <> 'cancelled'
+                order by start_time, name
+            """, (date_str,))
+            rows = cur.fetchall()
+
+    for r in rows:
+        place = r.get("assigned_place")
+        shift = r.get("shift_label")
+        key = None
+
+        if place in ["佛堂卫生", "二楼卫生", "楼梯卫生"]:
+            key = place
+        elif shift and place:
+            key = f"{shift}{place}"
+
+        if key in groups:
+            groups[key].append(r)
+
+    def format_people(rows):
+        if not rows:
+            return ""
+
+        lines = []
+        for r in rows:
+            name = r.get("name") or ""
+            start = r.get("start_time") or ""
+            end = r.get("end_time") or ""
+
+            lines.append(str(name))
+
+            if start and end:
+                lines.append(f"{start}~{end}")
+
+        return "\n".join(lines)
+
+    buddha_text = "\n".join(fixed_buddha) if fixed_buddha else ""
+
+    text = f"""师兄们大家好！
+
+{date_text}
+
+十点正请安
+
+8:00am~10:00am  或      
+8:00am~完成佛台工作 
+整理佛台: 
+{buddha_text}
+
+
+8:00am~10:00am 或 
+8:00am~完成卫生工作 
+佛堂卫生: 
+{format_people(groups["佛堂卫生"])}
+二楼卫生: 
+{format_people(groups["二楼卫生"])}
+楼梯卫生: 
+{format_people(groups["楼梯卫生"])}
+每日卫生义工请注意：清理完卫生之后，请把卫生用具包括吸尘机放回原位（活动中心store里面的小房间）
+
+
+
+10:00am~2:00pm 
+🟠 观音堂: 
+{format_people(groups["橙观音堂"])}
+🟠 活动中心: 
+{format_people(groups["橙活动中心"])}
+
+2:00pm~6:00pm 
+🟡 观音堂: 
+{format_people(groups["黄观音堂"])}
+
+🟡 活动中心: 
+{format_people(groups["黄活动中心"])}
+
+
+观音堂早晚香 由值班义工带领上香。
+
+观音堂续香
+佛友可以续香（黑色无烟香），但是要跟着请安词，必须燃烧完了一支香才续香。如有多位佛友要续香，请先让给先到达观音堂的佛友，轮流续香。
+
+值班义工请注意
+1）下雨天记得关上烧送小房子的窗口。
+2）在离开观音堂之前，请确保把所有的窗口关上。
+3）观音堂第一架的冷气坚决不能调。第二架和第三架可以轮流。
+
+另外，请大家多留意义工群信息，以便大家能够团结一致的护持好观音堂。佛子齐心，普度众生。
+
+义工报名请点击以下链接：
+https://gyt-checkin.onrender.com/volunteer
+
+非常感恩大家！
+大家功德无量！
+🙏🙏🙏
+"""
+
+    return text
+
 
 @schedule_bp.route("/schedule", methods=["GET", "POST"])
 @schedule_bp.route("/schedule/admin", methods=["GET", "POST"])
@@ -935,6 +1067,10 @@ def schedule_admin():
         override_date=override_date,
     )
     print("dashboard:", round(time.time() - t1, 2))
+    print("NOW =", now)
+    print("SWITCH =", switch_time)
+    print("DEFAULT =", default_schedule_date)
+    print("OVERRIDE =", override_date)
 
     t2 = time.time()
     buddha_names = load_buddha_name_options()
@@ -994,7 +1130,10 @@ def schedule_add():
 
     mode = request.form.get("mode", "").strip()
 
-    vol_keyword = request.form.get("vol_id", "").strip()
+    vol_keyword = request.form.get("keyword", "").strip()
+
+    branch = request.form.get("branch", "CHE").strip().upper()
+    vol_keyword = apply_branch_prefix(vol_keyword, branch)
     roles = request.form.getlist("roles")
     start_time = request.form.get("start_time", "").strip()
     end_time = request.form.get("end_time", "").strip()
@@ -1332,12 +1471,20 @@ def schedule_generate_day():
     if not date:
         return "❌ 没有收到日期，请返回选择日期<br><a href='/schedule?mode=day'>返回</a>"
 
+    if is_schedule_published(date):
+        return """
+        <h1>🔒 已发布，不能重新自动排班</h1>
+        <p>这一天已经发布正式值班表。</p>
+        <p>发布后新报名义工会自动补排，不需要重新自动排班。</p>
+        <a href="/schedule?mode=day">返回负责人首页</a>
+        """
+
     target_date = datetime.strptime(date, "%Y-%m-%d").date()
 
-    if target_date < datetime.today().date():
+    if target_date < malaysia_today():
         return """
         <h1>❌ 当天排班已锁定</h1>
-        <p>今天或过去日期不能重新自动排班，只能使用「补入待安排」。</p>
+        <p>过去日期不能重新自动排班，只能使用「补入待安排」。</p>
         <a href="/schedule?mode=day">返回</a>
         """
 
@@ -1835,6 +1982,24 @@ def schedule_fill_pending():
     """
 
 
+def normalize_whatsapp_keyword(text):
+    text = str(text or "").strip().upper().replace(" ", "")
+
+    if text.startswith("STW-"):
+        return text
+
+    if text.startswith("STW") and text[3:].isdigit():
+        return f"STW-{int(text[3:])}"
+
+    if text.startswith("CHE-"):
+        return text
+
+    if text.startswith("CHE") and text[3:].isdigit():
+        return f"CHE-{int(text[3:])}"
+
+    return text
+
+
 @schedule_bp.route("/schedule/parse_raw", methods=["POST"])
 def schedule_parse_raw():
 
@@ -1879,7 +2044,7 @@ def schedule_parse_raw():
                     skipped += 1
                     continue
 
-                name = parts[0]
+                name = normalize_whatsapp_keyword(parts[0])
 
                 time_text = parts[-1]
 
@@ -2512,6 +2677,188 @@ def public_reports():
     </html>
     """,
     report_files=report_files)
+
+
+@schedule_bp.route("/schedule/notice_center")
+def schedule_notice_center():
+
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    now = malaysia_now()
+
+    if now.hour >= 18:
+        default_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    else:
+        default_date = now.strftime("%Y-%m-%d")
+
+    date_str = request.args.get("date") or default_date
+
+    return render_template_string("""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{
+    font-family:"Microsoft YaHei";
+    background:#f5f5f5;
+    padding:20px;
+    font-size:26px;
+}
+.box{
+    max-width:900px;
+    margin:auto;
+    background:white;
+    border-radius:20px;
+    padding:30px;
+}
+.notice-btn{
+    display:flex;
+    flex-direction:column;
+    justify-content:center;
+    align-items:center;
+
+    text-align:center;
+
+    font-size:34px;
+    font-weight:bold;
+
+    height:110px;
+}
+
+.notice-btn small{
+    margin-top:8px;
+    font-size:20px;
+    font-weight:normal;
+    opacity:0.9;
+}
+.notice-btn{
+    display:block;
+    width:100%;
+    text-align:center;
+    text-decoration:none;
+    color:white;
+    border-radius:18px;
+    padding:28px;
+    margin:18px 0;
+    font-size:32px;
+    font-weight:bold;
+    box-sizing:border-box;
+}
+.blue{background:#2196F3;}
+.green{background:#25D366;}
+.orange{background:#FF9800;}
+.gray{background:#607D8B;}
+</style>
+</head>
+<body>
+<div class="box">
+
+<h1>📢 通知中心</h1>
+
+<p style="font-size:22px;color:#666;">
+负责人每天只需依照以下顺序发送 WhatsApp 信息。
+</p>
+
+<a class="notice-btn blue"
+   href="/schedule/signup_notice?date={{ date_str }}">
+
+    📢 报名通知<br>
+    <small>🕖 晚上 7:00 发群</small>
+
+</a>
+
+<form method="post" action="/schedule/copy_whatsapp">
+
+    <input type="hidden" name="date" value="{{ date_str }}">
+
+    <button class="notice-btn green" type="submit">
+
+        📋 正式值班表<br>
+        <small>🕙 晚上 10:00 发布</small>
+
+    </button>
+
+</form>
+
+<a class="notice-btn orange"
+   href="/schedule/generate_shortage_notice?date={{ date_str }}">
+
+    📣 缺义工通知<br>
+    <small>📌 缺人时发送</small>
+
+</a>
+
+<a class="notice-btn gray" href="/schedule?mode=day&override_date={{ date_str }}">
+   ⬅ 返回负责人首页
+</a>
+
+</div>
+</body>
+</html>
+""", date_str=date_str)
+
+
+@schedule_bp.route("/schedule/signup_notice")
+def schedule_signup_notice():
+
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    now = malaysia_now()
+
+    if now.hour >= 18:
+        default_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    else:
+        default_date = now.strftime("%Y-%m-%d")
+
+    date_str = default_date
+
+    text = build_signup_notice_whatsapp(date_str)
+
+    return render_template_string("""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:"Microsoft YaHei"; background:#f5f5f5; padding:20px;}
+.box{max-width:900px; margin:auto; background:white; border-radius:20px; padding:30px;}
+textarea{width:100%; height:650px; font-size:24px; padding:18px; box-sizing:border-box;}
+button,a{display:block; width:100%; box-sizing:border-box; text-align:center; font-size:28px; padding:18px; margin:15px 0; border-radius:15px; text-decoration:none;}
+button{background:#2196F3; color:white; border:0; font-weight:bold;}
+a{background:#607D8B; color:white; font-weight:bold;}
+</style>
+</head>
+<body>
+<div class="box">
+
+<h1>📢 今晚义工报名 WhatsApp</h1>
+
+<textarea id="noticeText" readonly>{{ text }}</textarea>
+
+<button onclick="copyText()">📋 复制 WhatsApp</button>
+
+<a href="/schedule/notice_center?date={{ date_str }}">⬅ 返回通知中心</a>
+
+</div>
+
+<script>
+function copyText(){
+    const t = document.getElementById("noticeText");
+    t.select();
+    t.setSelectionRange(0, 999999);
+    document.execCommand("copy");
+    alert("已复制，可以贴去 WhatsApp 群");
+}
+</script>
+
+</body>
+</html>
+""", text=text, date_str=date_str)
 
 
 @schedule_bp.route("/schedule/signup_edit/<int:signup_id>", methods=["POST"])
@@ -3516,10 +3863,15 @@ body {
     font-size: 22px;
 }
 
-.main-menu,
-.quick-actions {
+.main-menu {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+}
+
+.quick-actions {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
     gap: 14px;
 }
 
@@ -3663,6 +4015,31 @@ textarea {
     color:#fff;
 }
 
+.notice-btn{
+    background:#2563eb;
+    color:#fff;
+}
+
+.status-note{
+    grid-column:1 / -1;
+    background:#f8fafc;
+    border:2px solid #e2e8f0;
+    border-radius:16px;
+    padding:18px;
+    text-align:center;
+    font-size:24px;
+    font-weight:bold;
+    color:#334155;
+}
+
+.helper-text{
+    display:block;
+    font-size:18px;
+    font-weight:normal;
+    opacity:0.9;
+    margin-top:5px;
+}
+
 .publish-btn{
     background:#2e7d32;
     color:white;
@@ -3681,6 +4058,18 @@ textarea {
 
 button {
     font-family: inherit;
+}
+
+.small-btn{
+    display:block;
+    text-align:center;
+    padding:16px;
+    margin-top:25px;
+    border-radius:12px;
+    background:#888;
+    color:white;
+    text-decoration:none;
+    font-size:22px;
 }
 
 a {
@@ -3754,6 +4143,9 @@ function showSpecial(id) {
 
     if (target) {
         target.style.display = "block";
+        setTimeout(function () {
+            target.scrollIntoView({ behavior: "smooth", block: "start" });
+        }, 80);
     }
 }
 </script>
@@ -3777,12 +4169,12 @@ function showSpecial(id) {
             <button type="button" class="big-btn">📋 报名管理</button>
         </a>
 
-        <a href="/schedule?mode=day">
+        <a href="/schedule?mode=day&override_date={{ override_date }}">
             <button type="button" class="big-btn">📅 当天安排</button>
         </a>
 
-        <a href="/volunteer">
-            <button type="button" class="big-btn">👥 义工报名</button>
+        <a href="/schedule/notice_center?date={{ override_date }}">
+            <button type="button" class="big-btn">📢 通知中心</button>
         </a>
 
         <a href="/schedule/settings">
@@ -3791,6 +4183,10 @@ function showSpecial(id) {
 
         <a href="/reports">
             <button type="button" class="big-btn">📚 资料中心</button>
+        </a>
+
+        <a href="/volunteer" class="small-btn">
+            👥 打开义工报名页面
         </a>
     </div>
 </div>
@@ -3903,67 +4299,71 @@ function showSpecial(id) {
 </div>
 
 <div class="section quick-panel">
-    <h3 class="section-title">⚡ 快捷操作</h3>
+    <h3 class="section-title">⚡ 今日操作</h3>
 
     <div class="quick-actions">
 
         <form method="post" action="/schedule/publish" style="grid-column:1 / -1;">
             <input type="hidden" name="date" id="publish_date" value="{{ override_date }}">
+
             <button
                 type="submit"
                 class="quick-btn {% if is_published %}published-btn{% else %}publish-btn{% endif %}"
             >
                 {% if is_published %}
-                    ✅ 已发布（重新发布）
+                    ✅ 已发布
+                    <span class="helper-text">正式值班表已生效，新报名会自动补排</span>
                 {% else %}
                     🟢 发布正式值班表
+                    <span class="helper-text">确认排班无误后再发布</span>
                 {% endif %}
             </button>
         </form>
 
-        {% if not is_today_or_past %}
-        <form method="post" action="/schedule/generate_day">
-            <input type="hidden" name="date" id="generate_day_date" value="{{ override_date }}">
-            <button type="submit" class="quick-btn auto-btn">
-                ⚡ 自动排班
-            </button>
-        </form>
-        {% else %}
-        <form method="post" action="/schedule/fill_pending">
-            <input type="hidden" name="date" id="fill_pending_date" value="{{ override_date }}">
-            <button type="submit" class="quick-btn auto-btn">
-                ➕ 补入待安排
-            </button>
-        </form>
+        {% if not is_published %}
+            {% if not is_today_or_past %}
+            <form method="post" action="/schedule/generate_day">
+                <input type="hidden" name="date" id="generate_day_date" value="{{ override_date }}">
+                <button type="submit" class="quick-btn auto-btn">
+                    🔄 重新自动排班
+                    <span class="helper-text">发布前可重复执行</span>
+                </button>
+            </form>
+            {% else %}
+            <form method="post" action="/schedule/fill_pending">
+                <input type="hidden" name="date" id="fill_pending_date" value="{{ override_date }}">
+                <button type="submit" class="quick-btn auto-btn">
+                    ➕ 补入待安排
+                    <span class="helper-text">今天或过去日期使用</span>
+                </button>
+            </form>
+            {% endif %}
         {% endif %}
 
         <form method="post" action="/schedule/view_assigned">
             <input type="hidden" name="date" id="view_assigned_date" value="{{ override_date }}">
             <button type="submit" class="quick-btn view-btn">
                 👀 查看排班
+                <span class="helper-text">查看 / 调整正式安排</span>
             </button>
         </form>
 
-        <form method="post" action="/schedule/copy_whatsapp">
-            <input type="hidden" name="date" id="copy_whatsapp_date" value="{{ override_date }}">
-            <button type="submit" class="quick-btn whatsapp-btn">
-                📋 WhatsApp
-            </button>
-        </form>
+        <a href="/schedule/notice_center?date={{ override_date }}"
+           class="quick-btn notice-btn">
+            📢 通知中心
+            <span class="helper-text">报名通知 / WhatsApp / 缺义工通知</span>
+        </a>
 
-        <form method="post" action="/schedule/generate_shortage_notice">
-            <input type="hidden" name="date" id="notice_date" value="{{ override_date }}">
-            <button type="submit" class="quick-btn shortage-btn">
-                📢 缺义工通知
-            </button>
-        </form>
-
+        {% if is_published %}
         <a href="/schedule/attendance_status" class="quick-btn attendance-btn">
             📋 签到情况
+            <span class="helper-text">查看义工签到纪录</span>
         </a>
+        {% endif %}
 
         <a href="/reports" class="quick-btn report-btn">
             📚 资料中心
+            <span class="helper-text">月报 / 年报 / 文件</span>
         </a>
 
     </div>
@@ -3981,8 +4381,25 @@ function showSpecial(id) {
                 <input type="hidden" name="mode" value="day">
                 <input type="hidden" name="single_date" id="prebook_single_date" value="{{ override_date }}">
 
-                <p>义工编号 / 姓名</p>
-                <input name="vol_id" placeholder="输入义工编号 / 姓名" required>
+                <label>义工编号 / 姓名</label>
+
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <button
+                        type="button"
+                        id="admin_branch_btn"
+                        onclick="toggleAdminBranch()"
+                        style="width:95px;height:58px;font-size:20px;font-weight:bold;background:#28a745;color:white;border:none;border-radius:12px;cursor:pointer;flex-shrink:0;">
+                        CHE
+                    </button>
+
+                    <input type="hidden" id="admin_branch" name="branch" value="CHE">
+
+                    <input
+                        name="keyword"
+                        id="admin_keyword"
+                        placeholder="例如：108 / 姓名"
+                        style="flex:1;">
+                </div>
 
                 <p>岗位</p>
                 <div class="role-box">
@@ -4038,11 +4455,12 @@ function showSpecial(id) {
 </div>
 
     <div class="card">
-        <h3>🛕 特殊设置</h3>
+        <h3>🛕 佛台设置</h3>
 
         <div class="quick-actions">
             <button type="button" class="quick-btn" onclick="showSpecial('master-table')">
                 🛕 师父供台
+                <span class="helper-text">点击后自动跳到设置区</span>
             </button>
 
             <button type="button" class="quick-btn" onclick="showSpecial('extra-buddha')">
@@ -4086,6 +4504,7 @@ function showSpecial(id) {
                 <p style="color:#666;font-size:20px;">通常 1 至 2 位佛台组人员即可。</p>
 
                 <select name="setup_person1">
+
                     <option value="">请选择</option>
 
                     {% for p in supply_signups %}
@@ -4095,11 +4514,13 @@ function showSpecial(id) {
                         </option>
                     {% endfor %}
 
-                    {% for name in volunteer_names %}
-                        <option value="{{ name }}">
-                            {{ name }}
+                    {% for n in buddha_names %}
+                        <option value="{{ n }}"
+                            {% if day_flags.setup_person1 == n %}selected{% endif %}>
+                            {{ n }}
                         </option>
                     {% endfor %}
+
                 </select>
 
                 <select name="setup_person_2">
@@ -4230,6 +4651,22 @@ function showSpecial(id) {
 {% endif %}
 
 </div>
+<script>
+function toggleAdminBranch(){
+    const btn = document.getElementById("admin_branch_btn");
+    const branch = document.getElementById("admin_branch");
+
+    if(branch.value === "CHE"){
+        branch.value = "STW";
+        btn.innerText = "STW";
+        btn.style.background = "#dc3545";
+    }else{
+        branch.value = "CHE";
+        btn.innerText = "CHE";
+        btn.style.background = "#28a745";
+    }
+}
+</script>
 </body>
 </html>
 """

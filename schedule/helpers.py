@@ -104,7 +104,7 @@ def build_monthly_signup_text(year, month):
                 select *
                 from volunteer_schedule_signups
                 where signup_date between %s and %s
-                and coalesce(status, 'pending') <> 'cancelled'
+                  and coalesce(status, 'pending') <> 'cancelled'
                 order by signup_date, start_time, name
             """, (first_day, last_day))
             rows = cur.fetchall()
@@ -120,7 +120,11 @@ def build_monthly_signup_text(year, month):
         by_date.setdefault(d, {
             "卫生": [],
             "供台": [],
-            "值班": [],
+            "膳食": [],
+            "值班": {
+                "观音堂": [],
+                "活动中心": [],
+            },
         })
 
         role = r.get("role") or ""
@@ -142,21 +146,35 @@ def build_monthly_signup_text(year, month):
                 by_date[d]["卫生"].append(text)
 
         elif role == "供台":
-            if name not in by_date[d]["供台"]:
-                by_date[d]["供台"].append(name)
-
-        else:
-            idx = duty_count.get(name, 0) % len(duty_places)
-            place = duty_places[idx]
-            duty_count[name] = duty_count.get(name, 0) + 1
-
-            text = f"{place}：{name}"
+            text = name
 
             if start_time and end_time:
                 text += f"（{start_time}-{end_time}）"
 
-            if text not in by_date[d]["值班"]:
-                by_date[d]["值班"].append(text)
+            if text not in by_date[d]["供台"]:
+                by_date[d]["供台"].append(text)
+
+        elif role == "膳食":
+            text = name
+
+            if start_time and end_time:
+                text += f"（{start_time}-{end_time}）"
+
+            if text not in by_date[d]["膳食"]:
+                by_date[d]["膳食"].append(text)
+
+        elif role == "值班":
+            idx = duty_count.get(name, 0) % len(duty_places)
+            place = duty_places[idx]
+            duty_count[name] = duty_count.get(name, 0) + 1
+
+            text = name
+
+            if start_time and end_time:
+                text += f"（{start_time}-{end_time}）"
+
+            if text not in by_date[d]["值班"][place]:
+                by_date[d]["值班"][place].append(text)
 
     lines = []
     lines.append(f"{year}年{month}月份预报名名单")
@@ -168,20 +186,46 @@ def build_monthly_signup_text(year, month):
         d = date(year, month, day)
         weekday = weekday_cn[d.weekday()]
 
-        lines.append(f"{day}/{month}/{year}  {weekday}")
-
         data = by_date.get(d, {
             "卫生": [],
             "供台": [],
-            "值班": [],
+            "膳食": [],
+            "值班": {
+                "观音堂": [],
+                "活动中心": [],
+            },
         })
 
-        lines.append("卫生：" + "、".join(data["卫生"]))
+        lines.append(f"{day}/{month}/{year}  {weekday}")
+
+        lines.append("卫生：")
+        if data["卫生"]:
+            for i, item in enumerate(data["卫生"], start=1):
+                lines.append(f"{i}）{item}")
+        else:
+            lines.append("")
 
         if data["供台"]:
-            lines.append("供台：" + "、".join(data["供台"]))
+            lines.append("供台：")
+            for i, item in enumerate(data["供台"], start=1):
+                lines.append(f"{i}）{item}")
 
-        lines.append("值班：" + "、".join(data["值班"]))
+        if data["膳食"]:
+            lines.append("膳食：")
+            for i, item in enumerate(data["膳食"], start=1):
+                lines.append(f"{i}）{item}")
+
+        lines.append("值班：")
+
+        for place in duty_places:
+            people = data["值班"].get(place, [])
+
+            if people:
+                lines.append(f"{place}：")
+
+                for i, item in enumerate(people, start=1):
+                    lines.append(f"{i}）{item}")
+
         lines.append("")
 
     return "\n".join(lines)

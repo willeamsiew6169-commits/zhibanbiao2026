@@ -22,7 +22,7 @@ member_bp = Blueprint("member", __name__, url_prefix="/member")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-MEMBER_ADMIN_PIN = os.environ.get("MEMBER_ADMIN_PIN", "1234")
+MEMBER_ADMIN_PIN = os.environ.get("MEMBER_ADMIN_PIN", "123789")
 FINANCE_PIN = os.environ.get("FINANCE_PIN", "1234")
 
 PAYMENT_YEAR = 2026
@@ -207,6 +207,7 @@ def member_home():
     if request.method == "POST":
         raw_member_id = request.form.get("member_id", "").strip()
         selected_member_id = request.form.get("selected_member_id", "").strip()
+        branch = request.form.get("branch", "CHE").strip().upper()
         
 
         try:
@@ -229,7 +230,10 @@ def member_home():
 
                         # 情况 1：纯数字，而且 6 位或以下，当会员编号
                         if keyword.isdigit() and len(keyword) <= 6:
-                            member_id = normalize_member_id(keyword)
+                            if branch == "STW":
+                                member_id = normalize_member_id(f"STW-{keyword}")
+                            else:
+                                member_id = normalize_member_id(keyword)
 
                             cur.execute("""
                                 select *
@@ -355,6 +359,7 @@ def member_admin():
 
     admin_pin = request.form.get("admin_pin", "").strip()
     raw_member_id = request.values.get("member_id", "").strip()
+    branch = request.values.get("branch", "CHE").strip().upper()
 
     if request.method == "POST":
 
@@ -371,7 +376,14 @@ def member_admin():
 
     if raw_member_id and not error:
         keyword = raw_member_id.strip()
-        member_id = normalize_member_id(keyword)
+
+        if keyword.isdigit():
+            if branch == "STW":
+                member_id = normalize_member_id(f"STW-{keyword}")
+            else:
+                member_id = normalize_member_id(keyword)
+        else:
+            member_id = normalize_member_id(keyword)
 
         try:
             with get_conn() as conn:
@@ -1805,6 +1817,7 @@ def finance_upload():
     safety_issues = []
 
     q = request.args.get("q", "").strip()
+    branch = request.args.get("branch", "CHE").strip().upper()
     year = request.args.get("year", str(date.today().year)).strip()
     months = request.args.getlist("months")
     
@@ -2175,7 +2188,14 @@ def finance_upload():
     try:
         if q:
             keyword = q.strip()
-            member_id = normalize_member_id(keyword)
+
+            if keyword.isdigit():
+                if branch == "STW":
+                    member_id = normalize_member_id(f"STW-{keyword}")
+                else:
+                    member_id = normalize_member_id(keyword)
+            else:
+                member_id = normalize_member_id(keyword)
 
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -2534,7 +2554,41 @@ th{background:#eee;}
 
         <form method="get">
             <label>寻找编号 / 姓名 / 收据编号</label>
-            <input name="q" value="{{ q }}" placeholder="例如：108 / CHE-108 / 张三 / CHE0001493">
+
+            <div style="display:flex; gap:10px; align-items:center;">
+
+                <button
+                    type="button"
+                    id="search_branch_btn"
+                    onclick="toggleSearchBranch()"
+                    style="
+                        width:95px;
+                        height:58px;
+                        font-size:20px;
+                        font-weight:bold;
+                        background:#28a745;
+                        color:white;
+                        border:none;
+                        border-radius:12px;
+                        cursor:pointer;
+                        flex-shrink:0;
+                    ">
+                {{ branch }}
+                </button>
+
+                <input
+                    type="hidden"
+                    id="search_branch"
+                    name="branch"
+                    value="{{ branch }}">
+
+                <input
+                    name="q"
+                    value="{{ q }}"
+                    placeholder="例如：108 / 张三 / CHE0001493"
+                    style="flex:1;">
+
+            </div>
 
             <button type="submit">搜索记录</button>
         </form>
@@ -2672,6 +2726,27 @@ th{background:#eee;}
 
 </div>
 
+<script>
+
+function toggleSearchBranch(){
+
+    const btn = document.getElementById("search_branch_btn");
+    const branch = document.getElementById("search_branch");
+
+    if(branch.value==="CHE"){
+        branch.value="STW";
+        btn.innerText="STW";
+        btn.style.background="#dc3545";
+    }else{
+        branch.value="CHE";
+        btn.innerText="CHE";
+        btn.style.background="#28a745";
+    }
+
+}
+
+</script>
+
 </body>
 </html>
 """,
@@ -2680,6 +2755,7 @@ msg=msg,
 rows=rows,
 q=q,
 year=year,
+branch=branch,
 months=months,
 timedelta=timedelta,
 safety_issues=safety_issues,
@@ -2858,8 +2934,6 @@ th{
 <body>
 
 <div class="box">
-    <a class="back" href="/">← 返回签到首页</a>
-
     <div class="admin-link">
         <a href="/member/admin">⚙ 管理员入口</a>
     </div>
@@ -2872,12 +2946,27 @@ th{
     
     <form method="post">
         <label>月费编号 / 姓名 / 英文名 / 电话</label>
-        <input
-            name="member_id"
-            placeholder="例如：CHE-108 / 0108 / 张三 / 0123456789"
-            autocomplete="off"
-            required
-        >
+
+        <div style="display:flex; gap:10px; align-items:center;">
+            <button
+                type="button"
+                id="branch_btn"
+                onclick="toggleBranch()"
+                style="width:100px;height:70px;font-size:24px;font-weight:bold;background:#28a745;color:white;border:none;border-radius:14px;cursor:pointer;flex-shrink:0;">
+                CHE
+            </button>
+
+            <input type="hidden" id="branch" name="branch" value="CHE">
+
+            <input
+                id="member_id"
+                name="member_id"
+                placeholder="例如：108 / 张三 / 0123456789"
+                autocomplete="off"
+                required
+                style="flex:1;"
+            >
+        </div>
 
         <button type="submit">查询</button>
     </form>
@@ -2949,12 +3038,6 @@ th{
                 </div>
             </div>
 
-            <div class="summary-box">
-                <div class="summary-title">月费状态</div>
-                <div class="summary-value">
-                    {{ summary.payment_status or "-" }}
-                </div>
-            </div>
         </div>
 
         <div class="last-payment-box">
@@ -3005,7 +3088,22 @@ th{
     {% endif %}
 
 </div>
+<script>
+function toggleBranch() {
+    const btn = document.getElementById("branch_btn");
+    const branch = document.getElementById("branch");
 
+    if (branch.value === "CHE") {
+        branch.value = "STW";
+        btn.innerText = "STW";
+        btn.style.background = "#dc3545";
+    } else {
+        branch.value = "CHE";
+        btn.innerText = "CHE";
+        btn.style.background = "#28a745";
+    }
+}
+</script>
 </body>
 </html>
 """
@@ -3254,12 +3352,24 @@ th{
 
         <label>月费编号 / 姓名</label>
 
-        <input
-            name="member_id"
-            value="{{ raw_member_id }}"
-            placeholder="例如：CHE-108 / 张三 / zhangsan"
-            required
-        >
+        <div style="display:flex; gap:10px; align-items:center;">
+            <button
+                type="button"
+                id="branch_btn"
+                onclick="toggleBranch()"
+                style="width:100px;height:58px;font-size:24px;font-weight:bold;background:#28a745;color:white;border:none;border-radius:14px;cursor:pointer;flex-shrink:0;">
+                CHE
+            </button>
+
+            <input type="hidden" id="branch" name="branch" value="CHE">
+
+            <input
+                name="member_id"
+                placeholder="例如：108 / 张三 / zhangsan"
+                autocomplete="off"
+                style="flex:1;"
+            >
+        </div>
 
         <button type="submit">
             查找会员
@@ -3396,6 +3506,22 @@ th{
     </div>
     {% endif %}
 </div>
+<script>
+function toggleBranch() {
+    const btn = document.getElementById("branch_btn");
+    const branch = document.getElementById("branch");
+
+    if (branch.value === "CHE") {
+        branch.value = "STW";
+        btn.innerText = "STW";
+        btn.style.background = "#dc3545";
+    } else {
+        branch.value = "CHE";
+        btn.innerText = "CHE";
+        btn.style.background = "#28a745";
+    }
+}
+</script>
 
 </body>
 </html>

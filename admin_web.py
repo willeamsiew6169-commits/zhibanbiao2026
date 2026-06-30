@@ -9,12 +9,20 @@ from io import BytesIO
 from db import db_query
 from utils import get_text
 from openpyxl import Workbook
-from utils import now_date_str
+from utils import now_date_str, get_text
 from utils import get_display_today_code
 from psycopg2.extras import RealDictCursor
+from attendance_service import auto_signout_unfinished_today
 from utils import MY_TZ, get_today_code, now_date_str, calc_hours
-from flask import Blueprint, request, redirect, url_for, render_template_string, flash, send_file
-
+from flask import Blueprint, request, redirect, url_for, render_template_string, flash, send_file, session
+from attendance_service import (
+    role_label,
+    get_today_open_records,
+    get_today_records,
+    find_volunteer,
+    sign_in,
+    sign_out,
+)
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -103,6 +111,351 @@ def admin_add_record():
     now=datetime.now(MY_TZ).strftime("%I:%M%p").lower(),
     volunteers=db_query("select id, name from volunteers where status='在册'", fetchall=True)
     )
+
+@admin_bp.route("/admin_today_open")
+def admin_today_open():
+
+    return render_template_string("""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<style>
+body {
+    font-family:"Microsoft YaHei", Arial;
+    background:#f4f6f8;
+    margin:0;
+    padding:18px;
+    font-size:24px;
+}
+
+.wrap {
+    max-width:800px;
+    margin:auto;
+}
+
+.card {
+    background:white;
+    border-radius:20px;
+    padding:22px;
+    margin-bottom:18px;
+    box-shadow:0 4px 14px rgba(0,0,0,.08);
+}
+
+h1 {
+    font-size:34px;
+}
+
+.name {
+    font-size:32px;
+    font-weight:bold;
+    margin-bottom:12px;
+}
+
+.info {
+    line-height:1.8;
+    font-size:24px;
+}
+
+.btn-out {
+    width:100%;
+    background:#dc3545;
+    color:white;
+    border:0;
+    border-radius:16px;
+    padding:18px;
+    font-size:30px;
+    font-weight:bold;
+    margin-top:18px;
+}
+
+.btn-edit {
+    display:block;
+    text-align:center;
+    background:#0d6efd;
+    color:white;
+    text-decoration:none;
+    border-radius:16px;
+    padding:16px;
+    font-size:26px;
+    font-weight:bold;
+    margin-top:12px;
+}
+
+.back {
+    display:block;
+    text-align:center;
+    background:#6c757d;
+    color:white;
+    text-decoration:none;
+    border-radius:16px;
+    padding:18px;
+    font-size:28px;
+    font-weight:bold;
+    margin-top:20px;
+}
+
+.empty {
+    background:#d1e7dd;
+    color:#0f5132;
+    border-radius:18px;
+    padding:24px;
+    font-size:28px;
+    font-weight:bold;
+    text-align:center;
+}
+</style>
+</head>
+
+<body>
+<div class="wrap">
+
+<h1>🔴 今日进行中（未签退）</h1>
+
+{% if open_records %}
+
+    {% for r in open_records %}
+    <div class="card">
+
+        <div class="name">
+            {{ r.get('姓名','') }}
+        </div>
+
+        <div class="info">
+            岗位：<b>{{ role_label(r.get('岗位','')) }}</b><br>
+            签到时间：<b>{{ r.get('开始时间','') }}</b><br>
+
+            {% if r.get('编号') %}
+                义工编号：{{ r.get('编号','') }}<br>
+            {% endif %}
+
+            {% if r.get('card_no') %}
+                卡号：{{ r.get('card_no') }}<br>
+            {% endif %}
+        </div>
+
+        <form method="post"
+              action="{{ url_for('do_sign_out') }}"
+              onsubmit="return askSignOutPin(this);">
+
+            <input type="hidden" name="row_number" value="{{ r.get('_row') }}">
+            <input type="hidden" name="pin" value="">
+
+            <button class="btn-out" type="submit">
+                ⛔ 帮他签退
+            </button>
+        </form>
+
+        <a class="btn-edit"
+           href="{{ url_for('edit_page', row_number=r.get('_row')) }}">
+            ✏ 修改记录
+        </a>
+
+    </div>
+    {% endfor %}
+
+{% else %}
+
+    <div class="empty">
+        ✅ 现在没有未签退的义工
+    </div>
+
+{% endif %}
+
+<a class="back" href="/admin_report?pin={{ pin }}">
+    ⬅ 返回管理员
+</a>
+
+</div>
+
+<script>
+function askSignOutPin(form) {
+    const pin = prompt("请输入管理员 PIN");
+    if (pin === null) return false;
+
+    if (!pin.trim()) {
+        alert("PIN 不能为空");
+        return false;
+    }
+
+    form.querySelector('input[name="pin"]').value = pin.trim();
+    return true;
+}
+</script>
+
+</body>
+</html>
+""",
+    pin=request.args.get("pin",""),
+    open_records=get_today_open_records(),
+    role_label=role_label,
+    t=get_text())
+
+@admin_bp.route("/admin/auto_signout")
+def admin_auto_signout():
+    if not session.get("schedule_login"):
+        return redirect(url_for("index"))
+
+    result = auto_signout_unfinished_today()
+
+    flash(result["msg"], "ok" if result["ok"] else "bad")
+    return redirect(url_for("index"))
+
+@admin_bp.route("/admin_today_records")
+def admin_today_records():
+
+    return render_template_string("""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<style>
+body {
+    font-family:"Microsoft YaHei", Arial;
+    background:#f4f6f8;
+    margin:0;
+    padding:18px;
+    font-size:24px;
+}
+
+.wrap {
+    max-width:800px;
+    margin:auto;
+}
+
+.card {
+    background:white;
+    border-radius:20px;
+    padding:22px;
+    margin-bottom:18px;
+    box-shadow:0 4px 14px rgba(0,0,0,.08);
+}
+
+h1 {
+    font-size:34px;
+}
+
+.name {
+    font-size:32px;
+    font-weight:bold;
+    margin-bottom:12px;
+}
+
+.info {
+    line-height:1.8;
+    font-size:24px;
+}
+
+.time {
+    font-size:28px;
+    font-weight:bold;
+    color:#0d6efd;
+}
+
+.btn-edit {
+    display:block;
+    text-align:center;
+    background:#0d6efd;
+    color:white;
+    text-decoration:none;
+    border-radius:16px;
+    padding:16px;
+    font-size:26px;
+    font-weight:bold;
+    margin-top:14px;
+}
+
+.back {
+    display:block;
+    text-align:center;
+    background:#6c757d;
+    color:white;
+    text-decoration:none;
+    border-radius:16px;
+    padding:18px;
+    font-size:28px;
+    font-weight:bold;
+    margin-top:20px;
+}
+
+.empty {
+    background:#d1e7dd;
+    color:#0f5132;
+    border-radius:18px;
+    padding:24px;
+    font-size:28px;
+    font-weight:bold;
+    text-align:center;
+}
+</style>
+</head>
+
+<body>
+<div class="wrap">
+
+<h1>📋 今日签到记录</h1>
+
+{% if today_records %}
+
+    {% for r in today_records %}
+    <div class="card">
+
+        <div class="name">
+            {{ r.get('姓名','') }}
+        </div>
+
+        <div class="info">
+            岗位：<b>{{ role_label(r.get('岗位','')) }}</b><br>
+
+            时间：<br>
+            <span class="time">
+                {{ r.get('开始时间','') }}
+                {% if r.get('结束时间') %}
+                    ~ {{ r.get('结束时间','') }}
+                {% else %}
+                    ~ 未签退
+                {% endif %}
+            </span><br>
+
+            时数：<b>{{ r.get('时数','') or '-' }}</b><br>
+
+            {% if r.get('card_no') %}
+                卡号：{{ r.get('card_no') }}<br>
+            {% endif %}
+        </div>
+
+        <a class="btn-edit"
+           href="{{ url_for('edit_page', row_number=r.get('_row')) }}">
+            ✏ 修改记录
+        </a>
+
+    </div>
+    {% endfor %}
+
+{% else %}
+
+    <div class="empty">
+        今天还没有签到记录
+    </div>
+
+{% endif %}
+
+<a class="back" href="/admin_report?pin={{ pin }}">
+    ⬅ 返回管理员
+</a>
+
+</div>
+</body>
+</html>
+""",
+    pin=request.args.get("pin",""),
+    today_records=get_today_records(limit=200),
+    role_label=role_label,
+    t=get_text())
 
 @admin_bp.route("/download_data")
 def download_data():
@@ -392,30 +745,135 @@ def admin_report():
     code = get_display_today_code()
 
     return f"""
-<h1>{t["admin_title"]}</h1>
+    <!doctype html>
+    <html lang="zh">
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>管理员工具</title>
 
-<h2>{t["today_code_big"]}</h2>
-<div style="font-size:60px;font-weight:bold;color:#dc3545;">
-    {code}
-</div>
+    <style>
+    body {{
+        margin:0;
+        background:#f4f6f8;
+        font-family:"Microsoft YaHei", Arial, sans-serif;
+        font-size:22px;
+    }}
 
-<p>{t["today_code_warning"]}</p>
+    .wrap {{
+        max-width:760px;
+        margin:0 auto;
+        padding:24px;
+    }}
 
-<a href="/download_data" style="display:block;margin-top:12px;font-size:24px;">
-    📥 下载签到日志 Excel
-</a>
+    .card {{
+        background:white;
+        border-radius:20px;
+        padding:24px;
+        margin-bottom:18px;
+        box-shadow:0 4px 14px rgba(0,0,0,.08);
+    }}
 
-<a href="/admin_add_record?pin={pin}" style="display:block;margin-top:12px;font-size:24px;">
-  {t["admin_add_record"]}
-</a>
+    h1 {{
+        font-size:32px;
+        margin:0 0 18px;
+    }}
 
-<a href="/admin_records?pin={pin}" style="display:block;margin-top:12px;font-size:24px;">
-  {t["admin_records"]}
-</a>
+    h2 {{
+        font-size:24px;
+        margin:0 0 14px;
+    }}
 
-<br>
-<a href="/" style="font-size:20px;">⬅ {t["back_home"]}</a>
-"""
+    .code {{
+        font-size:64px;
+        font-weight:bold;
+        color:#dc3545;
+        text-align:center;
+        padding:20px;
+        background:#fff3cd;
+        border-radius:18px;
+    }}
+
+    .btn {{
+        display:block;
+        width:100%;
+        box-sizing:border-box;
+        text-align:center;
+        text-decoration:none;
+        font-size:26px;
+        font-weight:bold;
+        padding:18px;
+        border-radius:16px;
+        margin-top:14px;
+        color:white;
+    }}
+
+    .blue {{ background:#0d6efd; }}
+    .green {{ background:#198754; }}
+    .orange {{ background:#fd7e14; }}
+    .red {{ background:#dc3545; }}
+    .purple {{ background:#6f42c1; }}
+    .gray {{ background:#6c757d; }}
+
+    .note {{
+        color:#666;
+        font-size:18px;
+        margin-top:10px;
+    }}
+    </style>
+    </head>
+
+    <body>
+    <div class="wrap">
+
+    <div class="card">
+        <h1>🔐 {t["admin_title"]}</h1>
+    </div>
+
+    <div class="card">
+        <h2>{t["today_code_big"]}</h2>
+        <div class="code">{code}</div>
+        <div class="note">⚠ 请只写在观音堂现场，不要发群</div>
+    </div>
+
+    <div class="card">
+        <h2>📋 今日签到管理</h2>
+
+        <a class="btn red" href="/admin_today_open?pin={pin}">
+            ⛔ 今日进行中（未签退）
+        </a>
+
+        <a class="btn blue" href="/admin_today_records?pin={pin}">
+            📋 查看今日记录
+        </a>
+    </div>
+
+    <div class="card">
+        <h2>🛠 管理工具</h2>
+
+        <a class="btn green" href="/download_data">
+            📥 下载签到日志 Excel
+        </a>
+
+        <a class="btn orange" href="/admin_add_record?pin={pin}">
+            ✍️ 补录签到
+        </a>
+
+        <a class="btn purple" href="/admin_records?pin={pin}">
+            📝 修改 / 删除今日记录
+        </a>
+    </div>
+
+    <div class="card">
+        <a class="btn gray" href="/">
+            ⬅ 返回首页
+        </a>
+    </div>
+
+    </div>
+    </body>
+    </html>
+    """
 
 ADMIN_HOME_HTML = """
 <!doctype html>
@@ -493,8 +951,8 @@ h1{
 </div>
 
 <div class="card">
-<h2>📋 值班表生成系统</h2>
-<a class="btn" href="/schedule">
+<h2>📋 义工报名系统</h2>
+<a class="btn" href="/volunteer">
 进入系统
 </a>
 </div>
@@ -502,13 +960,6 @@ h1{
 <div class="card">
 <h2>💰 月费管理员系统</h2>
 <a class="btn" href="/member">
-进入系统
-</a>
-</div>
-
-<div class="card">
-<h2>💰 财政系统</h2>
-<a class="btn" href="/finance">
 进入系统
 </a>
 </div>

@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 from admin_web import admin_bp
-from db import db_query, get_db
+from db import db_query, get_conn
 from member_web import member_bp
 from pypinyin import lazy_pinyin
 from reading_web import reading_bp
@@ -46,6 +46,24 @@ from flask import (
     render_template_string, flash, jsonify,
     make_response, send_file, send_from_directory,
 )
+
+from attendance_service import (
+    ROLE_TEXT,
+    ROLES,
+    role_label,
+    sign_in,
+    sign_out,
+    find_volunteer,
+    verify_pin_for_volunteer,
+    load_attendance_rows,
+    get_today_open_records,
+    get_today_records,
+    only_digits,
+    get_assignment_id_candidates,
+    get_today_assignments,
+    ENABLE_SIGNIN_TIME_LIMIT,
+)
+
 from utils import (
     MY_TZ,
     TODAY_CODE_ENABLED,
@@ -87,19 +105,6 @@ ATTENDANCE_HEADERS = [
     "开始时间", "结束时间", "时数", "备注"
 ]
 
-# 系统内部岗位永远用中文；英文只用于网页显示
-ROLES = ["值班", "卫生", "佛台", "供台", "供花", "供果", "膳食组", "佛学班"]
-
-ROLE_TEXT = {
-    "值班": {"zh": "值班", "en": "Duty"},
-    "卫生": {"zh": "卫生", "en": "Cleaning"},
-    "佛台": {"zh": "佛台", "en": "Altar"},
-    "供台": {"zh": "供台", "en": "Offering Table"},
-    "供花": {"zh": "供花", "en": "Flowers"},
-    "供果": {"zh": "供果", "en": "Fruit Offering"},
-    "膳食组": {"zh": "膳食组", "en": "Meal Team"},
-    "佛学班": {"zh": "佛学班", "en": "Buddhist Class"},
-}
 
 app = Flask(__name__)
 app.secret_key = "change-this-simple-secret"
@@ -242,11 +247,6 @@ SAVE_INTERVAL_SEC = 5
 # =========================
 # 2) 语言工具
 # =========================
-def role_label(role: str, lang: str | None = None) -> str:
-    lang = lang or get_lang()
-    return ROLE_TEXT.get(role, {}).get(lang, role)
-
-
 @app.route("/set_lang/<lang>")
 def set_lang(lang):
     if lang not in TEXT:
@@ -259,8 +259,6 @@ def set_lang(lang):
 # =========================
 # 3) 工具函数
 # =========================
-def only_digits(value) -> str:
-    return "".join(ch for ch in str(value or "") if ch.isdigit())
 
 
 
@@ -302,75 +300,9 @@ def load_volunteers() -> list[dict]:
 
     return rows or []
 
-
-def find_volunteer(volunteer_id: str):
-    raw_id = str(volunteer_id or "").strip()
-
-    if not raw_id:
-        return None
-
-    ids = [raw_id]
-
-    # CHE-108 / STW-160 → 同时尝试数字部分
-    if "-" in raw_id:
-        branch, num = raw_id.split("-", 1)
-        branch = branch.strip().upper()
-        num = num.strip()
-
-        ids.append(num)
-
-        # STW-160 也尝试 0160
-        if branch == "STW" and num.isdigit():
-            ids.append("0" + num)
-
-    else:
-        # 108 → 尝试 CHE-108
-        ids.append(f"CHE-{raw_id}")
-
-        # 0160 → 尝试 STW-160
-        if raw_id.startswith("0") and raw_id[1:].isdigit():
-            ids.append(f"STW-{raw_id[1:]}")
-
-    # 去重
-    ids = list(dict.fromkeys(ids))
-
-    placeholders = ",".join(["%s"] * len(ids))
-
-    result = db_query(f"""
-        select
-            id as "编号",
-            name as "姓名",
-            status as "状态",
-            phone as "电话号码",
-            pin as "PIN",
-            branch as "分会"
-        from volunteers
-        where id in ({placeholders})
-        limit 1
-    """, tuple(ids), fetchone=True)
-
-    return result
-
 def to_member_id(volunteer):
     vol_id = str(volunteer.get("编号") or "").strip()
     return vol_id
-
-def verify_pin_for_volunteer(volunteer, pin):
-    input_pin = str(pin).strip()
-
-    # 1️⃣ 先用数据库 PIN（如果有）
-    real_pin = volunteer.get("PIN")
-
-    if real_pin:
-        return input_pin == str(real_pin).strip()
-
-    # 2️⃣ fallback → 电话后4位 or 0000
-    phone = only_digits(volunteer.get("电话号码", ""))
-
-    if not phone:
-        return input_pin == "0000"   # ✅ 关键在这里
-
-    return input_pin == phone[-4:]
 
 def get_member_paid_until(member_id):
     row = db_query("""
@@ -381,35 +313,9 @@ def get_member_paid_until(member_id):
 
     return row.get("paid_until") if row else ""
 
+
 def _load_attendance_rows_from_excel() -> list[dict]:
     return []
-
-def load_attendance_rows() -> list[dict]:
-    rows = db_query("""
-        select *
-        from attendance
-        order by id desc
-        limit 200
-    """, fetchall=True)
-
-    result = []
-    for r in rows:
-        result.append({
-            "日期": r.get("date"),
-            "编号": r.get("volunteer_id"),
-            "姓名": r.get("name"),
-            "报名": r.get("signup"),
-            "签到": r.get("signin"),
-            "岗位": r.get("role"),
-            "card_no": r.get("card_no", ""),
-            "开始时间": r.get("start_time"),
-            "结束时间": r.get("end_time") or "",
-            "时数": r.get("hours") or "",
-            "备注": r.get("remark") or "",
-            "_row": r.get("id"),
-        })
-
-    return result
 
 
 def mark_attendance_dirty() -> None:
@@ -442,89 +348,6 @@ def format_date_value(d) -> str:
         return d.strftime("%Y-%m-%d")
     return str(d or "").strip()
 
-
-def get_today_open_records() -> list[dict]:
-    today = now_date_str()
-
-    rows = db_query("""
-        select *
-        from attendance
-        where date = %s
-          and (end_time is null or end_time = '')
-        order by id desc
-    """, (today,), fetchall=True)
-
-    result = []
-    for r in rows:
-        result.append({
-            "日期": r.get("date"),
-            "编号": r.get("volunteer_id"),
-            "姓名": r.get("name"),
-            "报名": r.get("signup"),
-            "签到": r.get("signin"),
-            "岗位": r.get("role"),
-            "开始时间": r.get("start_time"),
-            "结束时间": r.get("end_time") or "",
-            "时数": r.get("hours") or "",
-            "备注": r.get("remark") or "",
-            "_row": r.get("id"),
-        })
-
-    return result
-
-
-def get_today_records(limit: int | None = None) -> list[dict]:
-    today = now_date_str()
-    out = []
-    for item in load_attendance_rows():
-        if format_date_value(item.get("日期")) == today:
-            out.append(item)
-    if limit is not None:
-        return out[-limit:]
-    return out
-
-def load_today_assignments_for_volunteer(volunteer, raw_id):
-
-    ids = get_assignment_id_candidates(volunteer, raw_id)
-
-    if not ids:
-        return []
-
-    return db_query("""
-        select
-            id,
-            volunteer_id,
-            name,
-            assignment_date,
-            role,
-            shift_label,
-            assigned_place,
-            start_time,
-            end_time
-        from volunteer_schedule_assignments
-        where volunteer_id = any(%s)
-        and assignment_date = %s
-        and coalesce(status,'assigned') <> 'cancelled'
-    """, (
-        ids,
-        now_date_str()
-    ), fetchall=True) or []
-
-
-def format_assignment_for_attendance(a):
-    role = a.get("role")
-    place = a.get("assigned_place") or ""
-    shift = a.get("shift_label") or ""
-    start = a.get("start_time") or ""
-    end = a.get("end_time") or ""
-
-    if role == "值班":
-        time_text = f"{start} ~ {end}" if start and end else ""
-        return f"{time_text} {shift} {place}".strip()
-
-    return place or role
-
-
 def check_in_assignment(assignment):
 
     db_query("""
@@ -548,18 +371,6 @@ def check_in_assignment(assignment):
         assignment["assigned_place"],
         "按排班签到"
     ))
-
-def get_assignment_id_candidates(volunteer, raw_id):
-    ids = []
-
-    if volunteer.get("编号"):
-        ids.append(str(volunteer["编号"]).strip())
-
-    if raw_id:
-        ids.append(str(raw_id).strip())
-
-    # 去重复
-    return list(dict.fromkeys(ids))
 
 
 def load_today_assignments_for_volunteer(volunteer, raw_id):
@@ -600,214 +411,7 @@ def format_assignment_for_attendance(a):
 
     return place or role
 
-# =========================
-# 5) 签到 / 签退 / 修改
-# =========================
-def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "") -> tuple[bool, str]:
 
-    raw_id = str(volunteer_id or "").strip()
-    role = str(role or "").strip()
-    card_no = str(card_no or "").strip()
-
-    if not raw_id:
-        return False, "请输入编号。"
-
-    if not pin:
-        return False, "请输入 PIN。"
-
-    volunteer = find_volunteer(raw_id)
-
-    if not volunteer:
-        return False, f"找不到编号：{raw_id}"
-
-    if volunteer.get("状态") not in ["在册", "", None]:
-        return False, f"此义工状态不是在册：{volunteer.get('状态')}"
-
-    if not verify_pin_for_volunteer(volunteer, pin):
-        return False, "PIN 不正确。"
-
-    opened = db_query("""
-        select id
-        from attendance
-        where date = %s
-          and volunteer_id = %s
-          and (end_time is null or end_time = '')
-        order by id desc
-        limit 1
-    """, (now_date_str(), volunteer["编号"]), fetchone=True)
-
-    if opened:
-        return False, f"{volunteer['姓名']} 今天已经签到，还没签退。请先签退。"
-
-    assignments = load_today_assignments_for_volunteer(volunteer, raw_id)
-
-    if assignments:
-        job_lines = [
-            format_assignment_for_attendance(a)
-            for a in assignments
-        ]
-
-        role_text = " / ".join(job_lines)
-
-        db_query("""
-            insert into attendance
-            (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
-            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            now_date_str(),
-            volunteer["编号"],
-            volunteer["姓名"],
-            1,
-            1,
-            role_text,
-            now_time_str(),
-            "",
-            None,
-            card_no,
-            "按排班签到"
-        ))
-
-        for a in assignments:
-            db_query("""
-                insert into volunteer_attendance_logs (
-                    assignment_id,
-                    volunteer_id,
-                    name,
-                    attendance_date,
-                    actual_role,
-                    actual_place,
-                    walk_in,
-                    remarks
-                )
-                values (%s, %s, %s, %s, %s, %s, false, '按排班签到')
-            """, (
-                a["id"],
-                a["volunteer_id"],
-                a["name"],
-                a["assignment_date"],
-                a["role"],
-                a["assigned_place"],
-            ))
-
-        jobs_display = "\n".join([f"・{x}" for x in job_lines])
-
-        return True, f"""{volunteer['姓名']} 已签到
-
-今天岗位：
-{jobs_display}
-
-完成后请记得签退。"""
-
-    # 没有排班，才需要义工选择岗位
-    if role not in ROLES:
-        return False, "今天没有排班记录，请选择实际协助岗位。"
-
-    db_query("""
-        insert into attendance
-        (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """, (
-        now_date_str(),
-        volunteer["编号"],
-        volunteer["姓名"],
-        0,
-        1,
-        role,
-        now_time_str(),
-        "",
-        None,
-        card_no,
-        f"现场签到：{role}"
-    ))
-
-    db_query("""
-        insert into volunteer_attendance_logs (
-            assignment_id,
-            volunteer_id,
-            name,
-            attendance_date,
-            actual_role,
-            actual_place,
-            walk_in,
-            remarks
-        )
-        values (null, %s, %s, %s, %s, %s, true, %s)
-    """, (
-        volunteer["编号"],
-        volunteer["姓名"],
-        now_date_str(),
-        role,
-        role,
-        f"现场签到：{role}"
-    ))
-
-    return True, f"""{volunteer['姓名']} 已签到
-
-    今天没有正式排班记录。
-
-    已登记：
-    {role}
-
-    完成后请记得签退。"""
-
-def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
-    raw_id = str(volunteer_id or "").strip()
-
-    if not raw_id:
-        return False, "请输入编号。"
-    if not pin:
-        return False, "请输入 PIN。"
-
-    volunteer = find_volunteer(raw_id)
-    if not volunteer:
-        return False, f"找不到编号：{raw_id}"
-
-    if not verify_pin_for_volunteer(volunteer, pin):
-        return False, "PIN 不正确。"
-
-    row = db_query("""
-        select *
-        from attendance
-        where date = %s
-          and volunteer_id = %s
-          and (end_time is null or end_time = '')
-        order by id desc
-        limit 1
-    """, (now_date_str(), volunteer["编号"]), fetchone=True)
-
-    if not row:
-        return False, f"{volunteer['姓名']} 今天没有未签退记录。"
-
-    end_time = now_time_str()
-
-    try:
-        start_dt = parse_time_to_datetime(row["start_time"])
-        end_dt = parse_time_to_datetime(end_time)
-        hours = round((end_dt - start_dt).total_seconds() / 3600, 2)
-        if hours < 0:
-            hours = 0
-    except Exception:
-        hours = None
-
-    db_query("""
-        update attendance
-        set end_time = %s,
-            hours = %s
-        where id = %s
-    """, (end_time, hours, row["id"]))
-
-    db_query("""
-        update volunteer_attendance_logs
-        set check_out_time = now()
-        where volunteer_id = %s
-        and attendance_date = %s
-        and check_out_time is null
-    """, (
-        volunteer["编号"],
-        now_date_str(),
-    ))
-
-    return True, f"{volunteer['姓名']} 已签退。"
 
 
 def update_record(row_number: int, role: str, card_no: str, start_time: str, end_time: str, remark: str) -> tuple[bool, str]:
@@ -973,170 +577,182 @@ PAGE = """
 
   <h1>{{ t.system_title }}</h1>
 
-  {% with messages = get_flashed_messages(with_categories=true) %}
+    <div style="
+    display:flex;
+    gap:12px;
+    justify-content:center;
+    margin:12px 0 20px 0;
+    flex-wrap:wrap;
+    ">
+
+        <div style="
+            background:#f8f9fa;
+            border-radius:12px;
+            padding:10px 22px;
+            text-align:center;
+            min-width:120px;
+            box-shadow:0 2px 6px rgba(0,0,0,.08);
+        ">
+            <div style="font-size:16px;color:#666;">👥 已签到</div>
+            <div style="font-size:30px;font-weight:bold;color:#0d6efd;">
+                {{ today_count }}
+            </div>
+        </div>
+
+        <div style="
+            background:#f8f9fa;
+            border-radius:12px;
+            padding:10px 22px;
+            text-align:center;
+            min-width:120px;
+            box-shadow:0 2px 6px rgba(0,0,0,.08);
+        ">
+            <div style="font-size:16px;color:#666;">⏳ 值班中</div>
+            <div style="font-size:30px;font-weight:bold;color:#fd7e14;">
+                {{ not_out }}
+            </div>
+        </div>
+
+        <div style="
+            background:#f8f9fa;
+            border-radius:12px;
+            padding:10px 22px;
+            text-align:center;
+            min-width:120px;
+            box-shadow:0 2px 6px rgba(0,0,0,.08);
+        ">
+            <div style="font-size:16px;color:#666;">🚪 已签退</div>
+            <div style="font-size:30px;font-weight:bold;color:#198754;">
+                {{ done_out }}
+            </div>
+        </div>
+
+    </div>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, message in messages %}
       <div class="msg {{ 'ok' if category == 'ok' else 'bad' }}">{{ message }}</div>
     {% endfor %}
   {% endwith %}
 
   <div class="card">
-    <h2>{{ t.today_stats }}</h2>
-
-    {{ t.today_checkin }}：{{ today_count }} {{ t.people_count }}<br>
-    {{ t.today_not_checkout }}：{{ not_out }} {{ t.people }}<br>
-    {{ t.today_checkout_done }}：{{ done_out }} {{ t.people }}
-  </div>
-
-  <div class="card">
     <h2>✅ {{ t.check_in }}</h2>
+
     <form method="post" action="{{ url_for('do_sign_in') }}" onsubmit="return quickSignIn();">
-      <div class="row">
-        <div>
-          <label>{{ t.enter_id }}</label>
-          <input id="volunteer_id" name="volunteer_id" inputmode="numeric" autocomplete="off" placeholder="{{ t.id_placeholder }}" required>
-        </div>
-        <div>
-          <label>{{ t.pin }}</label>
 
-          <input
-              id="pin"
-              name="pin"
-              type="password"
-              inputmode="numeric"
-              pattern="[0-9]*"
-              autocomplete="new-password"
-              autocorrect="off"
-              autocapitalize="off"
-              spellcheck="false"
-              value=""
-              placeholder="{{ t.pin_placeholder }}"
-              readonly
-              onfocus="this.removeAttribute('readonly');"
-              required
-          >
-        </div>
-      </div>
+        <div class="row">
 
-      {% if today_code_enabled %}
-      <div>
+        <div>
+            <label>{{ t.enter_id }}</label>
+
+            <div style="display:flex; gap:10px; align-items:center;">
+            <button
+                type="button"
+                id="branch_btn"
+                onclick="toggleBranch()"
+                style="width:100px;height:58px;font-size:24px;font-weight:bold;background:#28a745;color:white;border:none;border-radius:14px;cursor:pointer;flex-shrink:0;">
+                CHE
+            </button>
+
+            <input type="hidden" id="branch" name="branch" value="CHE">
+
+            <input
+                id="volunteer_id"
+                name="volunteer_id"
+                inputmode="numeric"
+                autocomplete="off"
+                placeholder="{{ t.id_placeholder }}"
+                required
+                style="flex:1;"
+            >
+            </div>
+        </div>
+
+        <div>
+            <label>{{ t.pin }}</label>
+            <input
+                id="pin"
+                name="pin"
+                type="password"
+                inputmode="numeric"
+                pattern="[0-9]*"
+                autocomplete="new-password"
+                autocorrect="off"
+                autocapitalize="off"
+                spellcheck="false"
+                value=""
+                placeholder="{{ t.pin_placeholder }}"
+                readonly
+                onfocus="this.removeAttribute('readonly');"
+                required
+            >
+        </div>
+
+        </div>
+
+        {% if today_code_enabled %}
+        <div style="margin-top:16px;">
         <label>{{ t.today_code }}</label>
-        <input 
-          id="today_code"
-          type="tel" 
-          name="today_code" 
-          inputmode="numeric" 
-          pattern="[0-9]*"
-          placeholder="{{ t.today_code_placeholder }}" 
-          required
-        
+        <input
+            id="today_code"
+            type="tel"
+            name="today_code"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            placeholder="{{ t.today_code_placeholder }}"
+            required
         >
-      </div>
-      {% endif %}
+        </div>
+        {% endif %}
 
-      <button type="button" class="btn-find" onclick="lookupVolunteer()">
+        <button type="button" class="btn-find" onclick="lookupVolunteer()">
         {{ t.find_volunteer }}
-      </button>
-      <div id="personBox" class="person" style="display:none;"></div>
+        </button>
 
-      <label style="margin-top:16px;">{{ t.role }}</label>
-      <select id="role" name="role" required>
+        <div id="personBox" class="person" style="display:none;"></div>
+
+        <label style="margin-top:16px;">{{ t.role }}</label>
+        <select id="role" name="role" required>
         {% for role in roles %}
-          <option value="{{ role }}">{{ role_label(role) }}</option>
+            <option value="{{ role }}">{{ role_label(role) }}</option>
         {% endfor %}
-      </select>
+        </select>
 
-      <label style="margin-top:16px;">
+        <label style="margin-top:16px;">
         {{ t.card_no_label }}
-      </label>
+        </label>
 
-      <input
+        <input
         type="text"
         id="card_no"
         name="card_no"
         placeholder="{{ t.card_no_placeholder }}"
-      />
+        />
 
-      <button id="signInBtn" class="btn-in" type="submit">
-          ✅ {{ t.check_in }}
-      </button>
+        <button id="signInBtn" class="btn-in" type="submit">
+            ✅ {{ t.check_in }}
+        </button>
+
     </form>
-  </div>
 
-  <div class="card">
-    <h2>⛔ {{ t.open_records }}</h2>
-    {% if open_records %}
-      <table>
-        <thead><tr><th>{{ t.name }}</th><th>{{ t.role }}</th><th>{{ t.start }}</th><th>{{ t.action }}</th></tr></thead>
-        <tbody>
-        {% for r in open_records %}
-          <tr>
-            <td>
-              <b>{{ r.get('姓名','') }}</b>
+    <div style="margin-top:16px;">
+        <form method="post"
+            action="{{ url_for('do_sign_out') }}"
+            onsubmit="return askQuickSignOut();">
 
-              {% if r.get('card_no') %}
-                  <br>
-                  <span style="color:#0d6efd;font-weight:bold;">
-                  🎫 卡号：{{ r.get('card_no') }}
-                  </span>
-              {% endif %}
+        <input type="hidden" id="signout_volunteer_id" name="volunteer_id">
+        <input type="hidden" id="signout_pin" name="pin">
 
-              {% if r.get('编号') %}
-                  <br>
-                  <span class="muted">
-                  {{ t.row_id }}：{{ r.get('编号','') }}
-                  </span>
-              {% endif %}
-            </td>
-            <td><span class="pill">{{ role_label(r.get('岗位','')) }}</span></td>
-            <td>{{ r.get('开始时间','') }}</td>
-            <td>
-              <form method="post" action="{{ url_for('do_sign_out') }}" onsubmit="return askSignOutPin(this);">
-                <input type="hidden" name="row_number" value="{{ r.get('_row') }}">
-                <input type="hidden" name="pin" value="">
-                <button class="btn-out" type="submit">{{ t.sign_out }}</button>
-              </form>
-              <a href="{{ url_for('edit_page', row_number=r.get('_row')) }}" style="display:inline-block;margin-top:8px;font-size:20px;">{{ t.edit }}</a>
-            </td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    {% else %}
-      <div class="muted">{{ t.no_open }}</div>
-    {% endif %}
-  </div>
+        <button
+            class="btn-out"
+            type="submit"
+            style="width:100%;font-size:30px;padding:14px;">
+            ⛔ {{ t.sign_out }}
+        </button>
 
-  <div class="card">
-    <details>
-      <summary style="font-size:24px;font-weight:800;cursor:pointer;">📋 {{ t.show_today_records }}</summary>
-      <div class="muted" style="margin:10px 0;">{{ t.latest_records_note }}</div>
-      {% if today_records %}
-        <table>
-          <thead><tr><th>{{ t.name }}</th><th>{{ t.role }}</th><th>{{ t.time }}</th><th>{{ t.hours }}</th></tr></thead>
-          <tbody>
-          {% for r in today_records %}
-            <tr>
-              <td>
-                {{ r.get('姓名','') }}
+        </form>
+    </div>
 
-                {% if r.get('card_no') %}
-                    <br>
-                    <span style="color:#0d6efd;font-weight:bold;">
-                    🎫 {{ r.get('card_no') }}
-                    </span>
-                {% endif %}
-              </td>
-              <td>{{ role_label(r.get('岗位','')) }}</td>
-              <td>{{ r.get('开始时间','') }} ~ {{ r.get('结束时间','') }}</td>
-              <td>{{ r.get('时数','') }}<br><a href="{{ url_for('edit_page', row_number=r.get('_row')) }}" style="font-size:18px;">{{ t.edit }}</a></td>
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table>
-      {% else %}
-        <div class="muted">{{ t.no_today }}</div>
-      {% endif %}
-    </details>
   </div>
 
   <div class="card">
@@ -1196,6 +812,14 @@ const TXT = {
 
 async function lookupVolunteer() {
   const id = document.getElementById('volunteer_id').value.trim();
+  const branch = document.getElementById('branch').value;
+  let finalId;
+
+  if (branch === "STW") {
+  finalId = "STW-" + id;
+  } else {
+      finalId = id;
+  }
   const box = document.getElementById('personBox');
   const btn = document.getElementById('signInBtn');
 
@@ -1210,7 +834,7 @@ async function lookupVolunteer() {
   const formData = new FormData();
   formData.append('pin', pin);
 
-  const res = await fetch('/api/volunteer/' + encodeURIComponent(id), {
+  const res = await fetch('/api/volunteer/' + encodeURIComponent(finalId), {
     method: 'POST',
     body: formData
   });
@@ -1239,12 +863,71 @@ async function lookupVolunteer() {
       html += `<br><span style="color:#842029;">${TXT.pin_wrong}</span>`;
     }
 
+    if (data.today_assignments && data.today_assignments.length > 0) {
+
+        html += `<br><hr>`;
+        html += `<b style="color:#198754;">📅 今天正式安排</b>`;
+
+        data.today_assignments.forEach(a => {
+
+            html += `
+                <div style="
+                    margin-top:10px;
+                    padding:10px;
+                    background:#f3fff4;
+                    border:1px solid #b9e5c0;
+                    border-radius:10px;
+                ">
+                    📍 <b>${a.assigned_place || "-"}</b><br>
+                    👷 ${a.role || "-"}<br>
+                    🕒 ${a.start_time || "-"} ～ ${a.end_time || "-"}
+                </div>
+            `;
+
+        });
+
+    } else {
+
+        html += `
+            <br><hr>
+            <div style="
+                color:#b02a37;
+                font-weight:bold;
+            ">
+            ❌ 今天没有正式安排
+            </div>
+        `;
+
+    }
+
     box.innerHTML = html;
     btn.disabled = false;
 
   } else {
-    box.innerHTML = `<span style="color:#842029;">${TXT.not_found_id}：${id}</span>`;
+    box.innerHTML = `<span style="color:#842029;">${TXT.not_found_id}：${finalId}</span>`;
   }
+}
+function toggleBranch() {
+
+    const btn = document.getElementById("branch_btn");
+    const branch = document.getElementById("branch");
+
+    if (branch.value === "CHE") {
+
+        branch.value = "STW";
+
+        btn.innerText = "STW";
+        btn.style.background = "#dc3545";
+
+    } else {
+
+        branch.value = "CHE";
+
+        btn.innerText = "CHE";
+        btn.style.background = "#28a745";
+
+    }
+
 }
 
 function quickSignIn() {
@@ -1253,6 +936,14 @@ function quickSignIn() {
   if (!pin) {
     alert(TXT.enter_pin);
     return false;
+  }
+
+  const idInput = document.getElementById("volunteer_id");
+  const rawId = idInput.value.trim();
+  const branch = document.getElementById("branch").value;
+
+  if (branch === "STW" && rawId && !rawId.toUpperCase().startsWith("STW")) {
+    idInput.value = "STW-" + rawId;
   }
 
   return true;
@@ -1269,11 +960,41 @@ function askSignOutPin(form) {
   return true;
 }
 
+async function askQuickSignOut() {
+    const volunteerId = document.getElementById("volunteer_id").value.trim();
+
+    if (!volunteerId) {
+        alert("请先输入义工编号");
+        return false;
+    }
+
+    const pin = prompt("请输入PIN进行签退");
+
+    if (pin === null) return false;
+
+    if (!pin.trim()) {
+        alert("PIN不能为空");
+        return false;
+    }
+
+    const branch = document.getElementById("branch").value;
+    let finalId = volunteerId;
+
+    if (branch === "STW" && volunteerId && !volunteerId.toUpperCase().startsWith("STW")) {
+        finalId = "STW-" + volunteerId;
+    }
+
+    document.getElementById("signout_volunteer_id").value = finalId;
+    document.getElementById("signout_pin").value = pin.trim();
+
+    return true;
+}
+
 setTimeout(() => {
   document.querySelectorAll('.msg.ok').forEach(el => {
     el.style.display = 'none';
   });
-}, 8000);
+}, 10000);
 
 const volunteerIdInput = document.getElementById('volunteer_id');
 const pinInput = document.getElementById('pin');
@@ -1561,40 +1282,121 @@ def qr_page():
 
 @app.route("/signin", methods=["POST"])
 def do_sign_in():
+
+    volunteer_id = request.form.get("volunteer_id", "").strip()
+    role = request.form.get("role", "").strip()
+    # 值班、卫生、膳食必须有正式安排
+
+    v = find_volunteer(volunteer_id)
+
+    if not v:
+        flash("❌ 找不到义工编号", "bad")
+        return redirect(url_for("index"))
+
+    volunteer_id = str(v.get("编号") or volunteer_id).strip()
+
+    if role in ["值班", "卫生", "膳食"]:
+
+        today_assignments = get_today_assignments(
+            volunteer_id,
+            role,
+            current_time=True
+        )
+        
+        if not today_assignments:
+
+            if ENABLE_SIGNIN_TIME_LIMIT:
+                flash("❌ 现在不是可签到时间，或今天没有正式安排。", "bad")
+            else:
+                flash("❌ 今天没有正式安排这个岗位，不能签到。", "bad")
+
+            return redirect(url_for("index"))
+    
     if TODAY_CODE_ENABLED:
         input_code = request.form.get("today_code", "").strip()
         if not verify_today_code(input_code):
             flash("今日签到码错误，请看现场公布的号码", "bad")
             return redirect(url_for("index"))
 
-    card_no = request.form.get("card_no", "").strip()
-
     ok, msg = sign_in(
-        request.form.get("volunteer_id", ""),
+        volunteer_id,
         request.form.get("pin", ""),
-        request.form.get("role", ""),
+        role,
         request.form.get("card_no", ""),
     )
 
-    flash(msg, "ok" if ok else "bad")
+    if ok:
+        flash(f"{msg}｜签到时间：{now_time_str()}", "ok")
+    else:
+        flash(msg, "bad")
+
     return redirect(url_for("index"))
 
 
 @app.route("/signout", methods=["POST"])
 def do_sign_out():
-    try:
-        row_number = int(request.form.get("row_number", "0"))
-    except Exception:
-        row_number = 0
+    pin = request.form.get("pin", "").strip()
 
-    row = db_query("select * from attendance where id=%s", (row_number,), fetchone=True)
+    # 旧方式：从今日进行中表格签退
+    row_number_raw = request.form.get("row_number", "").strip()
 
-    if not row:
-        flash("记录不存在", "bad")
-        return redirect(url_for("index"))
+    if row_number_raw:
+        try:
+            row_number = int(row_number_raw)
+        except Exception:
+            row_number = 0
 
-    ok, msg = sign_out(row["volunteer_id"], request.form.get("pin", ""))
-    flash(msg, "ok" if ok else "bad")
+        row = db_query(
+            "select * from attendance where id=%s",
+            (row_number,),
+            fetchone=True
+        )
+
+        if not row:
+            flash("记录不存在", "bad")
+            return redirect(url_for("index"))
+
+        volunteer_id = str(row["volunteer_id"]).strip()
+
+    else:
+        # 新方式：首页直接用义工编号签退
+        raw_id = request.form.get("volunteer_id", "").strip()
+        volunteer = find_volunteer(raw_id)
+
+        if not volunteer:
+            flash("找不到这个义工编号", "bad")
+            return redirect(url_for("index"))
+
+        volunteer_id = str(volunteer.get("编号") or raw_id).strip()
+
+        if not volunteer_id:
+            flash("请输入义工编号", "bad")
+            return redirect(url_for("index"))
+
+        row = db_query("""
+            select *
+            from attendance
+            where volunteer_id = %s
+              and date = %s
+              and (end_time is null or end_time = '')
+            order by id desc
+            limit 1
+        """, (
+            volunteer_id,
+            now_date_str()
+        ), fetchone=True)
+
+        if not row:
+            flash("今天没有找到未签退记录", "bad")
+            return redirect(url_for("index"))
+
+    ok, msg = sign_out(volunteer_id, pin)
+
+    if ok:
+        flash(f"{msg}｜签退时间：{now_time_str()}", "ok")
+    else:
+        flash(msg, "bad")
+
     return redirect(url_for("index"))
 
 @app.route("/edit/<int:row_number>")
@@ -1898,10 +1700,38 @@ def api_volunteer(volunteer_id):
         print("API result =", v)
 
         if not v:
-            return jsonify({"ok": False, "error": "find_volunteer returned None"})
+            return jsonify({
+                "ok": False,
+                "error": "find_volunteer returned None"
+            })
 
         pin = request.form.get("pin", "").strip()
         pin_ok = verify_pin_for_volunteer(v, pin) if pin else False
+
+        today = date.today()
+
+        today_assignments = []
+
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    select
+                        role,
+                        assigned_place,
+                        start_time,
+                        end_time,
+                        shift_label
+                    from volunteer_schedule_assignments
+                    where volunteer_id = %s
+                      and assignment_date = %s
+                      and coalesce(status, 'assigned') <> 'cancelled'
+                    order by start_time, assigned_place
+                """, (
+                    v.get("编号"),
+                    today
+                ))
+
+                today_assignments = cur.fetchall()
 
         safe_v = {
             "编号": v.get("编号", ""),
@@ -1923,11 +1753,18 @@ def api_volunteer(volunteer_id):
 
             safe_v["月费已缴费至"] = paid_until
 
-        return jsonify({"ok": True, "volunteer": safe_v})
+        return jsonify({
+            "ok": True,
+            "volunteer": safe_v,
+            "today_assignments": today_assignments
+        })
 
     except Exception as e:
         print("API ERROR =", e)
-        return jsonify({"ok": False, "error": str(e)})
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        })
     
 @app.route("/member_old", methods=["GET", "POST"])
 def member():

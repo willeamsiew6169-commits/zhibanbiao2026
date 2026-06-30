@@ -18,6 +18,9 @@ TODAY_CODE_LIST = [
 def now_date_str() -> str:
     return datetime.now(MY_TZ).strftime("%Y-%m-%d")
 
+def now_datetime():
+    return datetime.now(MY_TZ)
+
 def now_time_str() -> str:
     return datetime.now(MY_TZ).strftime("%I:%M%p").lstrip("0").lower()
 
@@ -86,31 +89,45 @@ def normalize_member_id(raw_id, default_branch="CHE"):
     if raw_id is None:
         return ""
 
-    # 1️⃣ 转字符串 + 清理
     raw = str(raw_id).strip()
 
-    # 👉 处理 Excel 160.0
+    # 处理 Excel 160.0
     if raw.endswith(".0"):
         raw = raw[:-2]
 
-    raw = raw.upper()
+    raw = raw.upper().replace(" ", "")
 
     if not raw:
         return ""
 
-    # 2️⃣ 已经是 CHE-160 / STW-160
-    if "-" in raw:
-        return raw
+    # STW160 / STW-160
+    if raw.startswith("STW"):
+        num = raw.replace("STW", "", 1).replace("-", "").lstrip("0")
+        return f"STW-{int(num)}" if num.isdigit() else raw
 
-    # 3️⃣ 0160 → STW
+    # CHE160 / CHE-160
+    if raw.startswith("CHE"):
+        num = raw.replace("CHE", "", 1).replace("-", "").lstrip("0")
+        return f"CHE-{int(num)}" if num.isdigit() else raw
+
+    # 暂时兼容旧规则：0160 → STW-160
     if raw.startswith("0") and raw.isdigit():
         return f"STW-{int(raw)}"
 
-    # 4️⃣ 160 → CHE
+    # 新规则：160 → CHE-160
     if raw.isdigit():
         return f"{default_branch}-{int(raw)}"
 
     return raw
+
+
+def apply_branch_prefix(keyword, branch):
+    keyword = str(keyword).strip()
+
+    if keyword.isdigit() and branch == "STW":
+        return f"STW-{keyword}"
+
+    return keyword
 
 
 def get_today_code():
@@ -136,7 +153,7 @@ TEXT = {
         "html_lang": "zh-Hans",
         "system_title": "蕉赖观音堂义工签到系统",
         "check_in": "签到",
-        "enter_id": "输入编号",
+        "enter_id": "输入义工编号",
         "id_placeholder": "例如：123",
         "pin": "PIN",
         "pin_placeholder": "请输入 PIN",
@@ -166,7 +183,7 @@ TEXT = {
         "chinese": "中文",
         "english": "English",
         "not_found_id": "找不到编号",
-        "enter_id_first": "请先输入编号。",
+        "enter_id_first": "请先输入义工编号。",
         "lookup_first": "请先按【查找义工】确认姓名。",
         "enter_pin": "请输入 PIN。",
         "signout_prompt": "请输入 PIN 才能签退：",

@@ -138,6 +138,27 @@ button {
     font-size:28px;
 }
 
+.top-actions .top-btn.meal{
+    background:#c0392b;
+    color:#fff;
+    display:flex;
+    flex-direction:column;
+    justify-content:center;
+    align-items:center;
+    line-height:1.4;
+}
+
+.top-actions .top-btn.meal .title{
+    font-size:28px;
+    font-weight:bold;
+}
+
+.top-actions .top-btn.meal .sub{
+    font-size:20px;
+    font-weight:bold;
+    margin-top:6px;
+}
+
 @media (max-width:700px) {
     body {
         padding:10px;
@@ -151,7 +172,7 @@ button {
     .hero h1 {
         font-size:34px;
     }
-
+    
     .top-btn {
         width:100%;
         min-height:85px;
@@ -189,6 +210,19 @@ button {
     <a class="top-btn orange" href="/volunteer/my_schedule_search">
         🔍 我的报名
     </a>
+
+    <a class="top-btn meal"
+    href="/volunteer/meal_status?date={{ meal_date }}">
+
+        <div class="title">
+            🍱 派餐义工名单
+        </div>
+
+        <div class="sub">
+            {{ meal_button_date }}　👥 {{ meal_count }}/9
+        </div>
+
+    </a>
 </div>
 
 <div class="notice">
@@ -202,13 +236,49 @@ button {
 </div>
 
 <div class="signup-card">
-<form method="post" action="/volunteer/signup">
+<form method="post"
+      action="/volunteer/signup"
+      onsubmit="return confirmSignup();">
 
-<label>
-义工编号 / 电话 / 姓名<br>
-<small>Volunteer ID / Phone / Name</small>
-</label>
-<input name="keyword" required placeholder="例如 CHE-108 / 108 / 姓名">
+    <label>
+    义工编号 / 电话 / 姓名
+    </label>
+
+    <div style="display:flex; gap:10px; align-items:center;">
+
+        <button
+            type="button"
+            id="branch_btn"
+            onclick="toggleBranch()"
+            style="
+                width:95px;
+                height:58px;
+                font-size:20px;
+                font-weight:bold;
+                background:#28a745;
+                color:white;
+                border:none;
+                border-radius:12px;
+                cursor:pointer;
+                flex-shrink:0;
+            ">
+            CHE
+        </button>
+
+        <input
+            type="hidden"
+            id="branch"
+            name="branch"
+            value="CHE">
+
+        <input
+            name="keyword"
+            id="keyword"
+            required
+            placeholder="例如：108 / 姓名 / 电话"
+            style="flex:1;">
+
+    </div>
 
 <label>
 日期<br>
@@ -224,7 +294,8 @@ button {
     <option value="值班">值班 Duty</option>
     <option value="卫生">卫生 Cleaning</option>
     <option value="供台">供台 Offering Table</option>
-    </select>
+    <option value="膳食">膳食组 Meal Team</option>
+</select>
 
 <div id="time_section">
 
@@ -313,13 +384,15 @@ function toggleTimeSection() {
     const role = document.getElementById("role_select").value;
     const timeSection = document.getElementById("time_section");
 
-    if (role === "卫生" || role === "供台") {
+    if (role === "卫生" || role === "供台" || role === "膳食") {
         timeSection.style.display = "none";
     } else {
         timeSection.style.display = "block";
         updateTimeOptions();
     }
 }
+
+window.addEventListener("DOMContentLoaded", toggleTimeSection);
 
 function updateTimeOptions() {
     const role = document.getElementById("role_select").value;
@@ -437,8 +510,71 @@ document.addEventListener("DOMContentLoaded", function () {
 
     updateTimeOptions();
 });
+function confirmSignup() {
+
+    const keyword = document.querySelector("input[name='keyword']").value;
+    const role = document.getElementById("role_select").value;
+    const date = document.querySelector("input[name='signup_date']").value;
+
+    let msg =
+`📋 请确认报名资料
+
+义工编号 / 姓名：
+${keyword}
+
+日期：
+${date}
+
+岗位：
+${role}`;
+
+    if (role === "值班") {
+
+        const start = document.getElementById("start_time").value;
+        const end = document.getElementById("end_time").value;
+
+        msg += `
+
+时间：
+${start} ～ ${end}`;
+    }
+
+    msg += `
+
+━━━━━━━━━━━━━━━━━━
+
+确定提交报名吗？
+
+⚠️ 请确认以上资料正确。
+
+⚠️ 如需取消，请尽早通知负责人。
+
+🙏 感恩您的发心护持。`;
+
+    return confirm(msg);
+}
 </script>
 
+<script>
+
+function toggleBranch(){
+
+    const btn=document.getElementById("branch_btn");
+    const branch=document.getElementById("branch");
+
+    if(branch.value==="CHE"){
+        branch.value="STW";
+        btn.innerText="STW";
+        btn.style.background="#dc3545";
+    }else{
+        branch.value="CHE";
+        btn.innerText="CHE";
+        btn.style.background="#28a745";
+    }
+
+}
+
+</script>
 </body>
 </html>
 """
@@ -617,10 +753,19 @@ function updateCalendar() {
 }
 
 function reloadPrebookPage() {
+
     const year = document.getElementById("year").value;
     const month = document.getElementById("month").value;
 
-    window.location.href = "/volunteer/prebook?year=" + year + "&month=" + month;
+    const keyword = document.getElementById("keyword").value;
+    const branch = document.getElementById("multi_branch").value;
+
+    window.location.href =
+        "/volunteer/prebook?"
+        + "year=" + encodeURIComponent(year)
+        + "&month=" + encodeURIComponent(month)
+        + "&keyword=" + encodeURIComponent(keyword)
+        + "&branch=" + encodeURIComponent(branch);
 }
 
 function toggleTimeFields() {
@@ -670,6 +815,7 @@ function goMonthlySignupList() {
 }
 
 document.addEventListener("DOMContentLoaded", function () {
+
     updateCalendar();
     toggleTimeFields();
 
@@ -686,6 +832,7 @@ document.addEventListener("DOMContentLoaded", function () {
     if (startSelect) {
         startSelect.addEventListener("change", updateEndTimes);
     }
+
 });
 </script>
 
@@ -698,8 +845,46 @@ document.addEventListener("DOMContentLoaded", function () {
 
 <form method="post" action="/volunteer/prebook">
 
-<label>义工编号 / 电话 / 姓名</label>
-<input name="keyword" required placeholder="例如 CHE-108 / 108 / 姓名">
+    <label>
+    义工编号 / 电话 / 姓名
+    </label>
+
+    <div style="display:flex; gap:10px; align-items:center;">
+
+        <button
+            type="button"
+            id="multi_branch_btn"
+            onclick="toggleMultiBranch()"
+            style="
+                width:95px;
+                height:58px;
+                font-size:20px;
+                font-weight:bold;
+                background:{{ '#dc3545' if branch == 'STW' else '#28a745' }};
+                color:white;
+                border:none;
+                border-radius:12px;
+                cursor:pointer;
+                flex-shrink:0;
+            ">
+            {{ branch }}
+        </button>
+
+        <input
+            type="hidden"
+            id="multi_branch"
+            name="branch"
+            value="{{ branch }}">
+
+        <input
+            name="keyword"
+            id="keyword"
+            value="{{ keyword }}"
+            required
+            placeholder="例如：108 / 姓名 / 电话"
+            style="flex:1;">
+
+    </div>
 
 <label>年份</label>
 <input id="year" name="year" value="{{ default_year }}" required>
@@ -707,7 +892,9 @@ document.addEventListener("DOMContentLoaded", function () {
 <label>月份</label>
 <select id="month" name="month">
 {% for m in range(1, 13) %}
-<option value="{{ m }}" {% if m == default_month %}selected{% endif %}>{{ m }}月</option>
+<option value="{{ m }}" {% if m == default_month %}selected{% endif %}>
+    {{ m }}月
+</option>
 {% endfor %}
 </select>
 
@@ -767,6 +954,23 @@ document.addEventListener("DOMContentLoaded", function () {
 <a href="/volunteer">返回</a>
 
 </div>
+<script>
+function toggleMultiBranch(){
+
+    const btn = document.getElementById("multi_branch_btn");
+    const branch = document.getElementById("multi_branch");
+
+    if(branch.value === "CHE"){
+        branch.value = "STW";
+        btn.innerText = "STW";
+        btn.style.background = "#dc3545";
+    }else{
+        branch.value = "CHE";
+        btn.innerText = "CHE";
+        btn.style.background = "#28a745";
+    }
+}
+</script>
 </body>
 </html>
 """

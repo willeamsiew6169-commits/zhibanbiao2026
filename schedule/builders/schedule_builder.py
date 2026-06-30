@@ -1566,12 +1566,26 @@ def auto_assign_duty(result):
             return "观音堂"
 
         return "活动中心"
+    
+    def get_cleaning_place_by_name():
+        mapping = {}
+
+        for key in ["佛堂卫生", "二楼卫生", "楼梯卫生"]:
+            for item in result.get(key, []):
+                name = get_name(item)
+                if name:
+                    mapping[name] = key
+
+        return mapping
 
     def opposite_place(place):
         return "活动中心" if place == "观音堂" else "观音堂"
+        
+    cleaning_place_by_name = get_cleaning_place_by_name()
 
     def choose_place_for_item(shift, item, preferred_place=None):
         volunteer_id = get_volunteer_id(item)
+        name = get_name(item)
 
         if volunteer_id == "CHE-238":
             if shift in ["绿", "橙"]:
@@ -1582,7 +1596,12 @@ def auto_assign_duty(result):
         if preferred_place:
             return preferred_place
 
+        if cleaning_place_by_name.get(name) == "佛堂卫生":
+            return "活动中心"
+
         return choose_less_place(shift)
+    
+    cleaning_place_by_name = get_cleaning_place_by_name()
 
     duty_keys = [
         "绿观音堂", "绿活动中心",
