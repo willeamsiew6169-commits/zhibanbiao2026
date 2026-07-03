@@ -11,6 +11,7 @@ from datetime import datetime
 from db import get_db, db_query, get_conn
 from psycopg2.extras import RealDictCursor
 from sqlalchemy import create_engine, text
+from schedule.services.publish_service import is_schedule_published, mark_schedule_need_republish
 from lunar_rules import get_special_day_info, get_next_day_remove_info
 from schedule.builders.time_utils import (
     parse_min,
@@ -157,7 +158,223 @@ def patch_schedule_for_date(date_str, only_signup_id=None):
 
         return 0
     
+def sync_schedule_after_signup_change(signup_id, action="upsert", changed_by="system"):
+    """
+    V2 统一同步函数
+
+    action:
+    - upsert = 新增 / 修改报名后同步
+    - cancel = 取消报名后同步
+
+    原则：
+    - 发布前：只改 signups，不动 assignments
+    - 发布后：只处理这个 signup_id 相关 assignment
+    """
+
+    signup = db_query("""
+        select
+            id,
+            volunteer_id,
+            name,
+            signup_date,
+            role,
+            status
+        from volunteer_schedule_signups
+        where id = %s
+    """, (int(signup_id),), fetchone=True)
+
+    if not signup:
+        print("❌ sync_schedule_after_signup_change：找不到 signup", signup_id)
+        return 0
+
+    date_str = str(signup["signup_date"])
+
+    # ✅ 发布前：不建立、不删除 assignments
+    if not is_schedule_published(date_str):
+        print("ℹ️ 尚未发布，不同步 assignments：", signup_id, date_str)
+        return 0
+
+    # ✅ 发布后取消：只删除这个人的 assignment
+    if action == "cancel" or signup.get("status") == "cancelled":
+
+        deleted = db_query("""
+            delete from volunteer_schedule_assignments
+            where signup_id = %s
+            and coalesce(locked_by_admin, false) = false
+            returning id
+        """, (int(signup_id),), fetchall=True)
+
+        deleted_count = len(deleted or [])
+
+        print(
+            "✅ 已取消报名并删除 assignment：",
+            signup_id,
+            signup.get("name"),
+            "删除数量：",
+            deleted_count
+        )
+
+        if deleted_count > 0:
+            mark_schedule_need_republish(date_str)
+
+        return deleted_count
+
+    # ✅ 发布后修改 / 新增：
+    # 先删除这个人的旧 assignment，再重新 patch 这个人
+    deleted = db_query("""
+        delete from volunteer_schedule_assignments
+        where signup_id = %s
+        and coalesce(locked_by_admin, false) = false
+        returning id
+    """, (int(signup_id),), fetchall=True)
+
+    deleted_count = len(deleted or [])
+
+    inserted_count = patch_schedule_for_date(
+        date_str,
+        only_signup_id=int(signup_id)
+    )
+
+    print(
+        "✅ sync 完成：",
+        signup_id,
+        signup.get("name"),
+        "旧 assignment 删除：",
+        deleted_count,
+        "新 assignment 新增：",
+        inserted_count
+    )
+
+    if deleted_count > 0 or inserted_count > 0:
+        mark_schedule_need_republish(date_str)
+
+    return inserted_count
+    
+def choose_cleaning_place_for_patch(date_str, volunteer_id):
+
+    places = ["佛堂卫生", "二楼卫生", "楼梯卫生"]
+
+    last = db_query("""
+        select assigned_place
+        from volunteer_schedule_assignments
+        where volunteer_id = %s
+        and role = '卫生'
+        and assignment_date < %s
+        and assigned_place in ('佛堂卫生', '二楼卫生', '楼梯卫生')
+        order by assignment_date desc, id desc
+        limit 1
+    """, (volunteer_id, date_str), fetchone=True)
+
+    last_place = last["assigned_place"] if last else None
+
+    today_rows = db_query("""
+        select assigned_place, count(*) as cnt
+        from volunteer_schedule_assignments
+        where assignment_date = %s
+        and role = '卫生'
+        and assigned_place in ('佛堂卫生', '二楼卫生', '楼梯卫生')
+        group by assigned_place
+    """, (date_str,), fetchall=True)
+
+    counts = {p: 0 for p in places}
+
+    for r in today_rows:
+        counts[r["assigned_place"]] = int(r["cnt"])
+
+    candidates = [p for p in places if p != last_place]
+
+    if not candidates:
+        candidates = places
+
+    candidates.sort(key=lambda p: counts.get(p, 0))
+
+    return candidates[0]
+
+    
 def sync_patch_assignments(date_str, assigned_rows, only_signup_id=None):
+
+    # ✅ 如果这次 patch 的是卫生报名：
+    # 删除当天旧卫生 assignments，再重写当天卫生安排
+    if only_signup_id is not None:
+
+        signup = db_query("""
+            select role
+            from volunteer_schedule_signups
+            where id = %s
+        """, (int(only_signup_id),), fetchone=True)
+
+        if signup and signup.get("role") == "卫生":
+
+            db_query("""
+                delete from volunteer_schedule_assignments
+                where assignment_date = %s
+                and role = '卫生'
+                and coalesce(locked_by_admin, false) = false
+            """, (date_str,))
+
+            cleaning_rows = []
+
+            for r in assigned_rows:
+                if r.get("role") != "卫生":
+                    continue
+
+                if r.get("signup_id") is None:
+                    continue
+
+                cleaning_rows.append(r)
+
+            inserted = 0
+
+            for r in cleaning_rows:
+
+                db_query("""
+                    insert into volunteer_schedule_assignments
+                    (
+                        signup_id,
+                        volunteer_id,
+                        name,
+                        assignment_date,
+                        role,
+                        shift_label,
+                        assigned_place,
+                        start_time,
+                        end_time,
+                        status,
+                        remarks,
+                        assignment_source,
+                        locked_by_admin
+                    )
+                    values
+                    (
+                        %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s,
+                        'assigned',
+                        '发布后自动重排卫生',
+                        'system',
+                        false
+                    )
+                """, (
+                    int(r["signup_id"]),
+                    r.get("volunteer_id"),
+                    r.get("name"),
+                    date_str,
+                    r.get("role"),
+                    r.get("shift_label"),
+                    r.get("assigned_place"),
+                    r.get("start_time"),
+                    r.get("end_time"),
+                ))
+
+                db_query("""
+                    update volunteer_schedule_signups
+                    set status='assigned'
+                    where id=%s
+                """, (int(r["signup_id"]),))
+
+                inserted += 1
+
+            return inserted
 
     rows = db_query("""
         select
@@ -165,10 +382,13 @@ def sync_patch_assignments(date_str, assigned_rows, only_signup_id=None):
             shift_label,
             assigned_place,
             start_time,
-            end_time
+            end_time,
+            coalesce(locked_by_admin, false) as locked_by_admin
         from volunteer_schedule_assignments
         where assignment_date=%s
     """, (date_str,), fetchall=True)
+
+    locked_signup_ids = set()
 
     existing_keys = set()
 
@@ -188,10 +408,9 @@ def sync_patch_assignments(date_str, assigned_rows, only_signup_id=None):
 
     new_rows = []
 
-    for r in assigned_rows:
+    patched_cleaning_signup_ids = set()
 
-        if r.get("role") != "值班":
-            continue
+    for r in assigned_rows:
 
         signup_id = r.get("signup_id")
 
@@ -200,9 +419,12 @@ def sync_patch_assignments(date_str, assigned_rows, only_signup_id=None):
 
         signup_id = int(signup_id)
 
+        if signup_id in locked_signup_ids:
+            continue
+                
         if only_signup_id is not None and signup_id != int(only_signup_id):
             continue
-
+                
         key = (
             int(signup_id),
             r.get("shift_label"),
@@ -243,7 +465,9 @@ def sync_patch_assignments(date_str, assigned_rows, only_signup_id=None):
                 start_time,
                 end_time,
                 status,
-                remarks
+                remarks,
+                assignment_source,
+                locked_by_admin
             )
             values
             (
@@ -251,7 +475,9 @@ def sync_patch_assignments(date_str, assigned_rows, only_signup_id=None):
                 %s, %s, %s,
                 %s, %s,
                 'assigned',
-                '发布后自动补排'
+                '发布后自动补排',
+                'system',
+                false
             )
         """, (
             int(r["signup_id"]),
@@ -292,10 +518,7 @@ def auto_assign_new_duty(result):
     def get_end(item):
         return item.get("end_time") or item.get("结束时间")
 
-    
-
-    
-
+   
     def shift_of(start_min):
         if start_min < 10 * 60:
             return "绿"
@@ -1428,10 +1651,11 @@ def assign_jobs(fixed_people, signup_df, special_info, patch_mode=False,):
     cleaning_count = len(unique_cleaners)
 
     if cleaning_count == 1:
-        p = dict(unique_cleaners[0])
-        result["佛堂卫生"].append(dict(p))
-        result["二楼卫生"].append(dict(p))
-        result["楼梯卫生"].append(dict(p))
+        p1 = dict(unique_cleaners[0])
+
+        result["佛堂卫生"].append(dict(p1))
+        result["二楼卫生"].append(dict(p1))
+        result["楼梯卫生"].append(dict(p1))
 
     elif cleaning_count == 2:
         p1 = dict(unique_cleaners[0])
@@ -1443,11 +1667,13 @@ def assign_jobs(fixed_people, signup_df, special_info, patch_mode=False,):
         result["楼梯卫生"].append(dict(p2))
 
     elif cleaning_count >= 3:
-        cleaning_places = ["佛堂卫生", "二楼卫生", "楼梯卫生"]
+        p1 = dict(unique_cleaners[0])
+        p2 = dict(unique_cleaners[1])
+        p3 = dict(unique_cleaners[2])
 
-        for i, p in enumerate(unique_cleaners):
-            place = cleaning_places[i % len(cleaning_places)]
-            result[place].append(dict(p))
+        result["佛堂卫生"].append(dict(p1))
+        result["二楼卫生"].append(dict(p2))
+        result["楼梯卫生"].append(dict(p3))
 
     if patch_mode:
         result = auto_assign_new_duty(result)
@@ -1645,7 +1871,9 @@ def auto_assign_duty(result):
         raw = p["raw"]
 
         if duration >= 4 * 60:
-            mid = s + duration // 2
+
+            # 真人排班习惯：长班尽量切在整点
+            mid = choose_split_time(s, e)
 
             first_shift = shift_of(s)
             first_place = choose_place_for_item(first_shift, raw)

@@ -16,8 +16,10 @@ from utils import apply_branch_prefix
 from schedule.blueprint import schedule_bp
 import schedule.routes
 
+from schedule.services.quote_service import get_daily_dharma
 from schedule.builders.time_utils import malaysia_today, malaysia_now
 from datetime import datetime, timedelta, date, timezone
+from schedule.builders.schedule_builder import sync_schedule_after_signup_change
 from schedule.services.admin_dashboard_service import load_admin_dashboard_data
 from lunar_rules import get_special_day_info, get_next_day_remove_info
 from flask import request, session, redirect, url_for, render_template_string, flash
@@ -35,6 +37,7 @@ from schedule.builders.schedule_builder import (
 )
 
 from schedule.helpers import (
+    get_daily_buddha_quote,
     to_simple,
     normalize_vol_id_for_search,
     time_to_minutes,
@@ -46,12 +49,17 @@ from schedule.services.settings_service import (
     get_schedule_setting,
     get_schedule_settings,
     save_schedule_setting,
+    set_schedule_setting,
 )
 
 from schedule.services.publish_service import (
+    clear_schedule_need_republish,
+    clear_schedule_need_republish,
     is_schedule_published,
+    mark_schedule_need_republish,
     publish_schedule_for_date,
     unpublish_schedule_for_date,
+    get_schedule_republish_info,
 )
 
 from schedule.services.assignment_service import (
@@ -268,6 +276,12 @@ def schedule_signup_cancel(signup_id):
 
             conn.commit()
 
+    sync_schedule_after_signup_change(
+        signup_id,
+        action="cancel",
+        changed_by="admin"
+    )
+
     return redirect("/schedule/signups")
 
     
@@ -459,6 +473,8 @@ def schedule_copy_whatsapp():
 
     output = build_whatsapp_from_assigned(date_str)
 
+    clear_schedule_need_republish(date_str)
+
     return render_template_string(DAY_OUTPUT_HTML, output=output)
 
 
@@ -479,11 +495,13 @@ def is_big_day(date_str):
     methods=["POST"]
 )
 def schedule_signup_restore(signup_id):
+
     if not session.get("schedule_login"):
         return redirect(url_for("schedule.schedule_admin"))
 
     with get_conn() as conn:
         with conn.cursor() as cur:
+
             cur.execute("""
                 update volunteer_schedule_signups
                 set
@@ -494,6 +512,12 @@ def schedule_signup_restore(signup_id):
             """, (signup_id,))
 
             conn.commit()
+
+    sync_schedule_after_signup_change(
+        signup_id,
+        action="upsert",
+        changed_by="admin"
+    )
 
     return redirect("/schedule/signups")
 
@@ -625,13 +649,28 @@ def edit_assigned_place(assignment_id):
                 end_time = request.form.get("end_time", "").strip()
 
                 cur.execute("""
+                    select assignment_date
+                    from volunteer_schedule_assignments
+                    where id = %s
+                """, (assignment_id,))
+
+                assignment_info = cur.fetchone()
+
+                if not assignment_info:
+                    return "❌ 找不到排班记录<br><a href='/schedule/signups'>返回</a>"
+
+                assignment_date = assignment_info["assignment_date"]
+
+                cur.execute("""
                     update volunteer_schedule_assignments
                     set
                         shift_label = %s,
                         assigned_place = %s,
                         start_time = %s,
                         end_time = %s,
-                        remarks = '负责人调整排班'
+                        remarks = '负责人调整排班',
+                        assignment_source = 'admin',
+                        locked_by_admin = true
                     where id = %s
                 """, (
                     shift_label or None,
@@ -642,6 +681,8 @@ def edit_assigned_place(assignment_id):
                 ))
 
                 conn.commit()
+
+                mark_schedule_need_republish(assignment_date)
 
                 return redirect("/schedule/signups")
 
@@ -677,6 +718,18 @@ p { font-size:22px; }
 <p><b>{{ row.name }}</b>（{{ row.volunteer_id or "" }}）</p>
 <p>日期：{{ row.assignment_date }}</p>
 <p>岗位：{{ row.role }}</p>
+
+{% if row.locked_by_admin %}
+    <div style="background:#fff3cd;border:2px solid #f0c36d;border-radius:12px;padding:14px;font-size:22px;margin:15px 0;">
+        🔒 已由负责人锁定<br>
+        <small>系统不会自动覆盖这笔安排</small>
+    </div>
+{% else %}
+    <div style="background:#e8f5e9;border:2px solid #81c784;border-radius:12px;padding:14px;font-size:22px;margin:15px 0;">
+        🤖 系统自动安排<br>
+        <small>保存调整后将变成负责人锁定</small>
+    </div>
+{% endif %}
 
 <form method="post">
 
@@ -951,7 +1004,7 @@ def build_signup_notice_whatsapp(date_str):
 
         return "\n".join(lines)
 
-    buddha_text = "\n".join(fixed_buddha) if fixed_buddha else ""
+    buddha_text = "　".join(fixed_buddha) if fixed_buddha else ""
 
     text = f"""师兄们大家好！
 
@@ -1030,7 +1083,7 @@ def schedule_admin():
 
             return "❌ PIN 错误<br><a href='/schedule'>返回</a>"
 
-        return LOGIN_HTML
+        return render_template_string(LOGIN_HTML)
 
     t0 = time.time()
 
@@ -1091,6 +1144,8 @@ def schedule_admin():
         buddha_names=buddha_names,
         override_date=override_date,
         fixed_buddha_today=fixed_buddha_today,
+        multi_day_signup_open=dashboard["multi_day_signup_open"],
+        meal_signup_open=dashboard["meal_signup_open"],
         records=dashboard["records"],
         pending_counts=dashboard["pending_counts"],
         day_summary=dashboard["day_summary"],
@@ -1102,6 +1157,7 @@ def schedule_admin():
         supply_signups=dashboard["supply_signups"],
         supply_alerts=dashboard["supply_alerts"],
         is_published=dashboard["is_published"],
+        republish_info=dashboard["republish_info"],
         default_year=dashboard["default_year"],
         default_month=dashboard["default_month"],
     )
@@ -1324,6 +1380,34 @@ def schedule_add():
             save_prebook_record(record)
 
     return redirect(url_for("schedule.schedule_admin", mode=mode))
+
+
+@schedule_bp.route("/schedule/toggle_setting", methods=["POST"])
+def toggle_schedule_setting():
+
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    key = request.form.get("key", "").strip()
+    force = request.form.get("force", "").strip()
+    return_to = request.form.get("return_to") or url_for("schedule.schedule_admin")
+
+    allowed_keys = {
+        "multi_day_signup_open",
+        "meal_signup_open",
+    }
+
+    if key not in allowed_keys:
+        return "❌ 不允许的设置"
+
+    if force in ("true", "false"):
+        set_schedule_setting(key, force, updated_by="admin")
+    else:
+        current = get_schedule_setting(key, "false")
+        new_value = "false" if current == "true" else "true"
+        set_schedule_setting(key, new_value, updated_by="admin")
+
+    return redirect(return_to)
 
 
 @schedule_bp.route("/schedule/prebook_add", methods=["POST"])
@@ -2291,35 +2375,135 @@ label { display:block; font-size:22px; margin-top:12px; }
 """, row=row, roles=ROLE_OPTIONS, times=TIME_OPTIONS)
 
 
-@schedule_bp.route("/schedule/generate_shortage_notice", methods=["POST"])
+@schedule_bp.route(
+    "/schedule/generate_shortage_notice",
+    methods=["GET", "POST"]
+)
 def generate_shortage_notice():
 
     if not session.get("schedule_login"):
         return redirect(url_for("schedule.schedule_admin"))
 
-    date_str = request.form.get("date")
+    date_str = (
+        request.form.get("date")
+        or request.args.get("date")
+    )
 
     msg = build_shortage_notice_from_assignments(date_str)
 
     return render_template_string("""
-    <h1>📢 缺人工通知</h1>
+    <!doctype html>
+    <html lang="zh">
+    <head>
+    <meta charset="utf-8">
+    <title>缺义工通知</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
 
-    <textarea
-        style="width:100%;height:400px;font-size:22px;"
-    >{{ msg }}</textarea>
+    <link rel="stylesheet"
+        href="{{ url_for('static', filename='css/toolbox.css') }}">
 
-    <br><br>
+    <style>
+    .notice-textarea{
+        width:100%;
+        min-height:420px;
+        font-size:20px;
+        padding:16px;
+        border:1px solid #d1d5db;
+        border-radius:16px;
+        resize:vertical;
+        box-sizing:border-box;
+    }
+    .notice-actions{
+        display:grid;
+        grid-template-columns:1fr 1fr;
+        gap:14px;
+        margin-top:20px;
+    }
+    @media(max-width:700px){
+        .notice-actions{
+            grid-template-columns:1fr;
+        }
+    }
+    </style>
 
-    <button onclick="navigator.clipboard.writeText(document.querySelector('textarea').value)">
-        📋 复制通知
-    </button>
+    </head>
+    <body>
 
-    <br><br>
+    <div class="page">
 
-    <a href="/schedule?mode=day&override_date={{ date_str }}">
-        返回
-    </a>
-    """, msg=msg, date_str=date_str)
+        <h1 class="page-title">
+            📢 缺义工通知
+        </h1>
+
+        <p class="page-subtitle">
+            WhatsApp 缺义工通知，可直接复制发送
+        </p>
+
+        <div class="card">
+
+            <div class="section-title">
+                📄 通知内容
+            </div>
+
+            <textarea
+                id="notice_text"
+                class="notice-textarea"
+            >{{ msg }}</textarea>
+
+            <div class="notice-actions">
+
+                <button
+                    class="btn-tool btn-primary"
+                    onclick="copyNotice()">
+
+                    📋 复制通知
+
+                </button>
+
+                <a
+                    class="btn-tool btn-secondary"
+                    href="/schedule?mode=day&override_date={{ date_str }}">
+
+                    ← 返回负责人首页
+
+                </a>
+
+            </div>
+
+        </div>
+
+    </div>
+
+    <script>
+    function copyNotice(){
+
+        const ta = document.getElementById("notice_text");
+
+        if(!ta){
+            alert("❌ 找不到通知内容");
+            return;
+        }
+
+        ta.focus();
+        ta.select();
+        ta.setSelectionRange(0, 999999);
+
+        const ok = document.execCommand("copy");
+
+        if(ok){
+            alert("✅ 已复制通知");
+        }else{
+            alert("❌ 复制失败，请手动全选复制");
+        }
+    }
+    </script>
+
+    </body>
+    </html>
+    """,
+    msg=msg,
+    date_str=date_str
+    )
 
 
 @schedule_bp.route("/schedule/view_assigned", methods=["POST"])
@@ -2390,158 +2574,277 @@ def schedule_view_assigned():
             other_groups.setdefault(place, []).append(item)
 
     return render_template_string("""
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>排班结果</title>
-<style>
-body {
-    font-family: "Microsoft YaHei", Arial;
-    background:#f5f5f5;
-    padding:20px;
-}
-.box {
-    background:white;
-    max-width:900px;
-    margin:auto;
-    padding:25px;
-    border-radius:15px;
-}
-h1, h2, h3 {
-    margin-top:18px;
-}
-.section {
-    border:1px solid #ccc;
-    padding:15px;
-    margin:15px 0;
-    border-radius:12px;
-    background:#fafafa;
-}
-.person {
-    font-size:22px;
-    padding:8px 0;
-}
-button {
-    font-size:22px;
-    padding:10px;
-    margin:6px 0;
-}
-a {
-    font-size:20px;
-}
-</style>
-</head>
-<body>
-<div class="box">
+    <!doctype html>
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>排班结果</title>
 
-<h1>📅 {{ date_str }} 排班结果</h1>
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/toolbox.css') }}">
 
-<a href="/schedule?mode=day&override_date={{ date_str }}">⬅ 返回当天值班安排</a>
+    <style>
+    .assigned-wrap{
+        max-width:1100px;
+        margin:auto;
+        padding:24px;
+    }
 
-<hr>
+    .assignment-section{
+        background:#f8fafc;
+        border:1px solid #e5e7eb;
+        border-radius:18px;
+        padding:20px;
+        margin:16px 0;
+    }
 
-<h2>🧹 卫生</h2>
+    .assignment-place-title{
+        font-size:30px;
+        font-weight:bold;
+        margin-bottom:14px;
+    }
 
-{% for place, names in cleaning_groups.items() %}
-    <div class="section">
-        <h3>{{ place }}</h3>
+    .person-row{
+        display:flex;
+        justify-content:space-between;
+        align-items:center;
+        gap:16px;
+        border-bottom:1px solid #e5e7eb;
+        padding:14px 0;
+        font-size:28px;
+    }
 
-        {% if names %}
-            {% for item in names %}
-                <div class="person">
-                    {{ item.name }}
-                    <a href="/schedule/edit_assigned/{{ item.id }}">✏️调整</a>
+    .person-row:last-child{
+        border-bottom:none;
+    }
+
+    .person-name{
+        font-weight:bold;
+    }
+
+    .person-time{
+        color:#6b7280;
+        font-size:24px;
+    }
+
+    .edit-link{
+        font-size:22px;
+        padding:8px 14px;
+        border-radius:12px;
+        background:#dbeafe;
+        color:#1e40af;
+        font-weight:bold;
+        white-space:nowrap;
+    }
+
+    .shift-title{
+        font-size:34px;
+        margin-top:26px;
+    }
+
+    .empty-line{
+        font-size:24px;
+        color:#6b7280;
+    }
+    </style>
+    </head>
+
+    <body>
+
+    <div class="assigned-wrap">
+
+        <div class="card">
+
+            <h1 class="page-title">
+                📅 {{ date_str }} 排班结果
+            </h1>
+
+            <p class="page-subtitle">
+                查看正式安排，也可进入个别义工调整岗位。
+            </p>
+
+            <div class="btn-row">
+
+                <a class="btn-tool btn-gray"
+                href="/schedule?mode=day&override_date={{ date_str }}">
+                    ⬅ 返回当天值班安排
+                </a>
+
+                <form method="post" action="/schedule/copy_whatsapp">
+                    <input type="hidden" name="date" value="{{ date_str }}">
+                    <button class="btn-tool btn-green" type="submit">
+                        📋 生成 WhatsApp 文字
+                    </button>
+                </form>
+
+            </div>
+
+        </div>
+
+        <div class="card">
+
+            <h2 class="section-title">🧹 卫生</h2>
+
+            {% for place, names in cleaning_groups.items() %}
+                <div class="assignment-section">
+
+                    <div class="assignment-place-title">
+                        {{ place }}
+                    </div>
+
+                    {% if names %}
+                        {% for item in names %}
+                            <div class="person-row">
+                                <div>
+                                    <span class="person-name">{{ item.name }}</span>
+                                </div>
+
+                                <a class="edit-link"
+                                href="/schedule/edit_assigned/{{ item.id }}">
+                                    ✏️ 调整
+                                </a>
+                            </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="empty-line">暂无安排</div>
+                    {% endif %}
+
                 </div>
             {% endfor %}
-        {% else %}
-            <p>暂无安排</p>
-        {% endif %}
-    </div>
-{% endfor %}
 
-<h2>🙏 供台</h2>
-
-<div class="section">
-{% if offering_group %}
-    {% for item in offering_group %}
-        <div class="person">
-            {{ item.name }}
-            <a href="/schedule/edit_assigned/{{ item.id }}">✏️调整</a>
         </div>
-    {% endfor %}
-{% else %}
-    <p>暂无安排</p>
-{% endif %}
-</div>
 
-<h2>🏠 值班</h2>
+        <div class="card">
 
-{% for shift, places in duty_groups.items() %}
+            <h2 class="section-title">🙏 供台</h2>
 
-    {% if shift == "绿" %}
-        <h3>🟢 绿班</h3>
-    {% elif shift == "橙" %}
-        <h3>🟠 橙班</h3>
-    {% elif shift == "黄" %}
-        <h3>🟡 黄班</h3>
-    {% else %}
-        <h3>{{ shift }}</h3>
-    {% endif %}
+            <div class="assignment-section">
 
-    {% for place, names in places.items() %}
-        <div class="section">
-            <h3>{{ place }}</h3>
+                {% if offering_group %}
+                    {% for item in offering_group %}
+                        <div class="person-row">
+                            <div>
+                                <span class="person-name">{{ item.name }}</span>
+                            </div>
 
-            {% if names %}
-                {% for item in names %}
-                    <div class="person">
-                        {{ item.name }}
-                        {% if item.start_time and item.end_time %}
-                            （{{ item.start_time }}~{{ item.end_time }}）
+                            <a class="edit-link"
+                            href="/schedule/edit_assigned/{{ item.id }}">
+                                ✏️ 调整
+                            </a>
+                        </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="empty-line">暂无安排</div>
+                {% endif %}
+
+            </div>
+
+        </div>
+
+        <div class="card">
+
+            <h2 class="section-title">🏠 值班</h2>
+
+            {% for shift, places in duty_groups.items() %}
+
+                {% if shift == "绿" %}
+                    <h3 class="shift-title">🟢 绿班</h3>
+                {% elif shift == "橙" %}
+                    <h3 class="shift-title">🟠 橙班</h3>
+                {% elif shift == "黄" %}
+                    <h3 class="shift-title">🟡 黄班</h3>
+                {% else %}
+                    <h3 class="shift-title">{{ shift }}</h3>
+                {% endif %}
+
+                {% for place, names in places.items() %}
+                    <div class="assignment-section">
+
+                        <div class="assignment-place-title">
+                            {{ place }}
+                        </div>
+
+                        {% if names %}
+                            {% for item in names %}
+                                <div class="person-row">
+
+                                    <div>
+                                        <span class="person-name">
+                                            {{ item.name }}
+                                        </span>
+
+                                        {% if item.start_time and item.end_time %}
+                                            <span class="person-time">
+                                                （{{ item.start_time }} ~ {{ item.end_time }}）
+                                            </span>
+                                        {% endif %}
+                                    </div>
+
+                                    <a class="edit-link"
+                                    href="/schedule/edit_assigned/{{ item.id }}">
+                                        ✏️ 调整
+                                    </a>
+
+                                </div>
+                            {% endfor %}
+                        {% else %}
+                            <div class="empty-line">暂无安排</div>
                         {% endif %}
-                        <a href="/schedule/edit_assigned/{{ item.id }}">✏️调整</a>
+
                     </div>
                 {% endfor %}
-            {% else %}
-                <p>暂无安排</p>
-            {% endif %}
+
+            {% endfor %}
+
         </div>
-    {% endfor %}
 
-{% endfor %}
+        {% if other_groups %}
+        <div class="card">
 
-{% if other_groups %}
-    <h2>其他</h2>
+            <h2 class="section-title">其他</h2>
 
-    {% for place, names in other_groups.items() %}
-        <div class="section">
-            <h3>{{ place }}</h3>
-            {% for item in names %}
-                <div class="person">
-                    {{ item.name }}
-                    {% if item.start_time and item.end_time %}
-                        （{{ item.start_time }}~{{ item.end_time }}）
-                    {% endif %}
-                    <a href="/schedule/edit_assigned/{{ item.id }}">✏️调整</a>
+            {% for place, names in other_groups.items() %}
+                <div class="assignment-section">
+
+                    <div class="assignment-place-title">
+                        {{ place }}
+                    </div>
+
+                    {% for item in names %}
+                        <div class="person-row">
+
+                            <div>
+                                <span class="person-name">
+                                    {{ item.name }}
+                                </span>
+
+                                {% if item.start_time and item.end_time %}
+                                    <span class="person-time">
+                                        （{{ item.start_time }} ~ {{ item.end_time }}）
+                                    </span>
+                                {% endif %}
+                            </div>
+
+                            <a class="edit-link"
+                            href="/schedule/edit_assigned/{{ item.id }}">
+                                ✏️ 调整
+                            </a>
+
+                        </div>
+                    {% endfor %}
+
                 </div>
             {% endfor %}
+
         </div>
-    {% endfor %}
-{% endif %}
+        {% endif %}
 
-<hr>
+    </div>
 
-<form method="post" action="/schedule/copy_whatsapp">
-    <input type="hidden" name="date" value="{{ date_str }}">
-    <button type="submit">📋 生成 WhatsApp 文字</button>
-</form>
-
-</div>
-</body>
-</html>
-""",
+    </body>
+    </html>
+    """,
         date_str=date_str,
         cleaning_groups=cleaning_groups,
         offering_group=offering_group,
@@ -2585,103 +2888,117 @@ def public_reports():
     <!doctype html>
     <html>
     <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>文件中心</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>文件中心</title>
 
-        <style>
-            body {
-                font-family: "Microsoft YaHei", Arial;
-                background:#f3f6fb;
-                padding:20px;
-            }
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/toolbox.css') }}">
 
-            .box {
-                max-width:900px;
-                margin:auto;
-                background:white;
-                padding:25px;
-                border-radius:18px;
-                box-shadow:0 4px 14px rgba(0,0,0,0.08);
-            }
+    <style>
+    .reports-wrap{
+        max-width:900px;
+        margin:auto;
+        padding:24px;
+    }
 
-            h1 {
-                font-size:34px;
-            }
+    .file-row{
+        display:flex;
+        justify-content:space-between;
+        align-items:center;
+        gap:18px;
+        padding:18px 0;
+        border-bottom:1px solid #e5e7eb;
+        font-size:26px;
+    }
 
-            .file-row {
-                display:flex;
-                justify-content:space-between;
-                align-items:center;
-                gap:15px;
-                padding:18px;
-                border-bottom:1px solid #e5e7eb;
-                font-size:24px;
-            }
+    .file-row:last-child{
+        border-bottom:none;
+    }
 
-            .download-btn {
-                background:#dbeafe;
-                padding:12px 18px;
-                border-radius:12px;
-                text-decoration:none;
-                color:#111827;
-                font-weight:bold;
-                white-space:nowrap;
-            }
+    .file-name{
+        font-weight:bold;
+    }
 
-            .download-btn:hover {
-                filter:brightness(0.95);
-            }
+    .download-btn{
+        min-width:150px;
+    }
 
-            @media (max-width:700px) {
-                .file-row {
-                    flex-direction:column;
-                    align-items:flex-start;
-                }
+    @media (max-width:700px){
+        .file-row{
+            flex-direction:column;
+            align-items:stretch;
+        }
 
-                .download-btn {
-                    width:100%;
-                    text-align:center;
-                }
-            }
-        </style>
+        .download-btn{
+            width:100%;
+        }
+    }
+    </style>
     </head>
 
     <body>
-    <div class="box">
 
-        <h1>📚 观音堂资料中心</h1>
+    <div class="reports-wrap">
 
-        <p style="font-size:20px;color:#666;">
-            提供报表、年报及相关资料下载。
-        </p>
+        <div class="card">
 
-        {% if report_files %}
-            {% for f in report_files %}
-            <div class="file-row">
-                <div>📄 {{ f.display_name }}</div>
-                <a class="download-btn" href="{{ f.url }}">
-                    📥 下载
+            <h1 class="page-title">📚 观音堂资料中心</h1>
+
+            <p class="page-subtitle">
+                提供月报、年报及相关资料下载。
+            </p>
+
+            {% if report_files %}
+
+                {% for f in report_files %}
+                <div class="file-row">
+
+                    <div class="file-name">
+                        📄 {{ f.display_name }}
+                    </div>
+
+                    <a class="btn-tool btn-blue download-btn"
+                    href="{{ f.url }}">
+                        📥 下载
+                    </a>
+
+                </div>
+                {% endfor %}
+
+            {% else %}
+
+                <div class="empty-state">
+                    <div class="empty-icon">📭</div>
+                    <div class="empty-title">
+                        目前还没有上传报表
+                    </div>
+                    <div class="empty-text">
+                        上传月报或年报后，会显示在这里。
+                    </div>
+                </div>
+
+            {% endif %}
+
+            <div class="btn-row">
+                <a class="btn-tool btn-gray btn-full"
+                href="/schedule/admin">
+                    ⬅ 返回负责人页面
                 </a>
             </div>
-            {% endfor %}
-        {% else %}
-            <p style="font-size:22px;">目前还没有上传报表。</p>
-        {% endif %}
 
-        <br>
-        <a href="/schedule/admin">返回负责人页面</a>
+        </div>
 
     </div>
+
     </body>
     </html>
-    """,
-    report_files=report_files)
+    """, report_files=report_files)
 
 
 @schedule_bp.route("/schedule/notice_center")
 def schedule_notice_center():
-
+    
     if not session.get("schedule_login"):
         return redirect(url_for("schedule.schedule_admin"))
 
@@ -2693,6 +3010,7 @@ def schedule_notice_center():
         default_date = now.strftime("%Y-%m-%d")
 
     date_str = request.args.get("date") or default_date
+    republish_info = get_schedule_republish_info(date_str)
 
     return render_template_string("""
 <!doctype html>
@@ -2761,6 +3079,46 @@ body{
 <p style="font-size:22px;color:#666;">
 负责人每天只需依照以下顺序发送 WhatsApp 信息。
 </p>
+                                  
+{% if republish_info is defined and republish_info.need_republish %}
+<div style="
+background:#fff8dc;
+border:3px solid orange;
+border-radius:15px;
+padding:18px;
+margin-bottom:20px;
+font-size:24px;
+line-height:1.8;
+">
+
+🟠 <b>正式值班表已有更新</b><br>
+
+自上次发布正式值班表后，已有义工报名、修改报名、取消报名或负责人调整排班。
+
+<br><br>
+
+<b>请重新发送最新正式值班表 WhatsApp。</b>
+
+<br><br>
+
+<form method="post" action="/schedule/copy_whatsapp">
+    <input type="hidden" name="date" value="{{ date_str }}">
+
+    <button class="notice-btn green" type="submit">
+        📋 复制最新正式值班表 WhatsApp<br>
+        <small>📤 可随时重新发送最新版</small>
+    </button>
+</form>
+
+{% if republish_info.last_schedule_change_text %}
+<br>
+<small>
+    🕒 最后更新：{{ republish_info.last_schedule_change_text }}
+</small>
+{% endif %}
+
+</div>
+{% endif %}
 
 <a class="notice-btn blue"
    href="/schedule/signup_notice?date={{ date_str }}">
@@ -2769,19 +3127,6 @@ body{
     <small>🕖 晚上 7:00 发群</small>
 
 </a>
-
-<form method="post" action="/schedule/copy_whatsapp">
-
-    <input type="hidden" name="date" value="{{ date_str }}">
-
-    <button class="notice-btn green" type="submit">
-
-        📋 正式值班表<br>
-        <small>🕙 晚上 10:00 发布</small>
-
-    </button>
-
-</form>
 
 <a class="notice-btn orange"
    href="/schedule/generate_shortage_notice?date={{ date_str }}">
@@ -2798,7 +3143,7 @@ body{
 </div>
 </body>
 </html>
-""", date_str=date_str)
+""", date_str=date_str,republish_info=republish_info)
 
 
 @schedule_bp.route("/schedule/signup_notice")
@@ -2819,46 +3164,122 @@ def schedule_signup_notice():
     text = build_signup_notice_whatsapp(date_str)
 
     return render_template_string("""
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{font-family:"Microsoft YaHei"; background:#f5f5f5; padding:20px;}
-.box{max-width:900px; margin:auto; background:white; border-radius:20px; padding:30px;}
-textarea{width:100%; height:650px; font-size:24px; padding:18px; box-sizing:border-box;}
-button,a{display:block; width:100%; box-sizing:border-box; text-align:center; font-size:28px; padding:18px; margin:15px 0; border-radius:15px; text-decoration:none;}
-button{background:#2196F3; color:white; border:0; font-weight:bold;}
-a{background:#607D8B; color:white; font-weight:bold;}
-</style>
-</head>
-<body>
-<div class="box">
+    <!doctype html>
+    <html lang="zh">
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>今晚义工报名</title>
 
-<h1>📢 今晚义工报名 WhatsApp</h1>
+    <link rel="stylesheet"
+        href="{{ url_for('static', filename='css/toolbox.css') }}">
 
-<textarea id="noticeText" readonly>{{ text }}</textarea>
+    <style>
 
-<button onclick="copyText()">📋 复制 WhatsApp</button>
+    .notice-textarea{
+        width:100%;
+        min-height:520px;
+        font-size:19px;
+        line-height:1.6;
+        padding:18px;
+        border:1px solid #d1d5db;
+        border-radius:16px;
+        box-sizing:border-box;
+        resize:vertical;
+    }
 
-<a href="/schedule/notice_center?date={{ date_str }}">⬅ 返回通知中心</a>
+    .notice-actions{
+        display:grid;
+        grid-template-columns:1fr 1fr;
+        gap:14px;
+        margin-top:20px;
+    }
 
-</div>
+    @media(max-width:700px){
 
-<script>
-function copyText(){
-    const t = document.getElementById("noticeText");
-    t.select();
-    t.setSelectionRange(0, 999999);
-    document.execCommand("copy");
-    alert("已复制，可以贴去 WhatsApp 群");
-}
-</script>
+        .notice-actions{
+            grid-template-columns:1fr;
+        }
 
-</body>
-</html>
-""", text=text, date_str=date_str)
+    }
+
+    </style>
+
+    </head>
+    <body>
+
+    <div class="page">
+
+        <h1 class="page-title">
+            📢 今晚义工报名
+        </h1>
+
+        <p class="page-subtitle">
+            WhatsApp 报名通知，可直接复制发送
+        </p>
+
+        <div class="card">
+
+            <div class="section-title">
+                📄 通知内容
+            </div>
+
+            <textarea
+                id="noticeText"
+                class="notice-textarea"
+                readonly>{{ text }}</textarea>
+
+            <div class="notice-actions">
+
+                <button
+                    type="button"
+                    class="btn-tool btn-primary"
+                    onclick="copyText()">
+
+                    📋 复制 WhatsApp
+
+                </button>
+
+                <a
+                    class="btn-tool btn-secondary"
+                    href="/schedule/notice_center?date={{ date_str }}">
+
+                    ← 返回通知中心
+
+                </a>
+
+            </div>
+
+        </div>
+
+    </div>
+
+    <script>
+
+    function copyText(){
+
+        const ta = document.getElementById("noticeText");
+
+        ta.focus();
+        ta.select();
+        ta.setSelectionRange(0,999999);
+
+        const ok = document.execCommand("copy");
+
+        if(ok){
+            alert("✅ 已复制，可以贴去 WhatsApp 群");
+        }else{
+            alert("❌ 复制失败，请手动复制");
+        }
+
+    }
+
+    </script>
+
+    </body>
+    </html>
+
+    """, text=text, date_str=date_str)
 
 
 @schedule_bp.route("/schedule/signup_edit/<int:signup_id>", methods=["POST"])
@@ -2904,8 +3325,13 @@ def schedule_signup_edit_save(signup_id):
 
             conn.commit()
 
-    return redirect("/schedule/signups")
+    sync_schedule_after_signup_change(
+        signup_id,
+        action="upsert",
+        changed_by="admin"
+    )
 
+    return redirect("/schedule/signups")
 
 @schedule_bp.route("/schedule/signup_place/<int:signup_id>", methods=["GET"])
 def schedule_signup_place(signup_id):
@@ -3101,119 +3527,189 @@ def schedule_attendance_status():
     not_checked_out = group_by_person(not_checked_out_raw, source="log")
 
     return render_template_string("""
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>签到情况</title>
-<style>
-body {
-    font-family:"Microsoft YaHei";
-    background:#f5f5f5;
-    padding:20px;
-}
-.box {
-    background:white;
-    max-width:1000px;
-    margin:auto;
-    padding:25px;
-    border-radius:15px;
-}
-.section {
-    border:1px solid #ddd;
-    padding:15px;
-    margin:15px 0;
-    border-radius:10px;
-}
-li {
-    font-size:22px;
-    margin:8px 0;
-}
-input, button {
-    font-size:22px;
-    padding:8px;
-}
-.summary {
-    display:flex;
-    flex-wrap:wrap;
-    gap:12px;
-    margin:18px 0;
-}
-.card {
-    flex:1;
-    min-width:180px;
-    padding:15px;
-    border-radius:12px;
-    font-size:24px;
-    font-weight:bold;
-    text-align:center;
-}
-.green { background:#e8fff0; }
-.red { background:#ffe8e8; }
-.blue { background:#e8f2ff; }
-.yellow { background:#fff8d6; }
-</style>
-</head>
+    <!doctype html>
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>签到情况</title>
 
-<body>
-<div class="box">
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/toolbox.css') }}">
 
-<h1>📋 {{ date_str }} 签到情况</h1>
+    <style>
+    .attendance-wrap{
+        max-width:1100px;
+        margin:auto;
+        padding:24px;
+    }
 
-<form method="get">
-    <input type="date" name="date" value="{{ date_str }}">
-    <button type="submit">查询</button>
-</form>
+    .attendance-list{
+        list-style:none;
+        padding:0;
+        margin:0;
+    }
 
-<a href="/schedule/admin">⬅ 返回负责人首页</a>
+    .attendance-list li{
+        font-size:26px;
+        padding:14px 0;
+        border-bottom:1px solid #e5e7eb;
+    }
 
-<div class="summary">
-    <div class="card green">✅ 已签到<br>{{ checked_in|length }}</div>
-    <div class="card red">❌ 未签到<br>{{ not_checked_in|length }}</div>
-    <div class="card blue">🚶 临时报到<br>{{ walk_ins|length }}</div>
-    <div class="card yellow">⏳ 未签退<br>{{ not_checked_out|length }}</div>
-</div>
+    .attendance-list li:last-child{
+        border-bottom:none;
+    }
 
-<div class="section">
-<h2>✅ 已签到：{{ checked_in|length }}</h2>
-<ul>
-{% for r in checked_in %}
-<li>{{ r.name }}｜{{ r.role_text }}｜{{ r.place_text }}</li>
-{% endfor %}
-</ul>
-</div>
+    .date-query-row{
+        display:grid;
+        grid-template-columns:260px 180px;
+        gap:14px;
+        align-items:end;
+    }
+                                  
+    .date-query-row .form-group{
+        margin-bottom:0;
+    }
 
-<div class="section">
-<h2>❌ 已排班未签到：{{ not_checked_in|length }}</h2>
-<ul>
-{% for r in not_checked_in %}
-<li>{{ r.name }}｜{{ r.role_text }}｜{{ r.place_text }}</li>
-{% endfor %}
-</ul>
-</div>
+    .date-query-row .btn-tool{
+        height:68px;
+        min-height:68px;
+        font-size:26px;
+        align-self:end;
+    }
 
-<div class="section">
-<h2>🚶 临时报到：{{ walk_ins|length }}</h2>
-<ul>
-{% for r in walk_ins %}
-<li>{{ r.name }}｜{{ r.role_text }}｜{{ r.place_text }}</li>
-{% endfor %}
-</ul>
-</div>
+    @media (max-width:700px){
+        .date-query-row{
+            grid-template-columns:1fr;
+        }
+    }
+    </style>
+    </head>
 
-<div class="section">
-<h2>⏳ 未签退：{{ not_checked_out|length }}</h2>
-<ul>
-{% for r in not_checked_out %}
-<li>{{ r.name }}｜{{ r.role_text }}｜{{ r.place_text }}</li>
-{% endfor %}
-</ul>
-</div>
+    <body>
 
-</div>
-</body>
-</html>
-""",
+    <div class="attendance-wrap">
+
+        <div class="card">
+
+            <h1 class="page-title">
+                📋 签到情况
+            </h1>
+
+            <p class="page-subtitle">
+                日期：{{ date_str }}
+            </p>
+
+            <form method="get">
+
+                <div class="date-query-row">
+
+                    <div class="form-group">
+                        <label class="form-label">查询日期</label>
+
+                        <input
+                            class="form-input"
+                            type="date"
+                            name="date"
+                            value="{{ date_str }}">
+                    </div>
+
+                    <button
+                        class="btn-tool btn-blue"
+                        type="submit">
+                          查询
+                    </button>
+
+                </div>
+
+            </form>
+
+            <div class="btn-row">
+                <a class="btn-tool btn-gray"
+                href="/schedule/admin">
+                    ⬅ 返回负责人首页
+                </a>
+            </div>
+
+        </div>
+
+        <div class="summary-grid">
+
+            <div class="summary-box">
+                <div class="summary-title">✅ 已签到</div>
+                <div class="summary-value">{{ checked_in|length }}</div>
+            </div>
+
+            <div class="summary-box">
+                <div class="summary-title">❌ 未签到</div>
+                <div class="summary-value">{{ not_checked_in|length }}</div>
+            </div>
+
+            <div class="summary-box">
+                <div class="summary-title">🚶 临时报到</div>
+                <div class="summary-value">{{ walk_ins|length }}</div>
+            </div>
+
+            <div class="summary-box">
+                <div class="summary-title">⏳ 未签退</div>
+                <div class="summary-value">{{ not_checked_out|length }}</div>
+            </div>
+
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">✅ 已签到：{{ checked_in|length }}</h2>
+
+            <ul class="attendance-list">
+            {% for r in checked_in %}
+                <li>{{ r.name }}｜{{ r.role_text }}｜{{ r.place_text }}</li>
+            {% else %}
+                <li class="text-gray">暂无记录</li>
+            {% endfor %}
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">❌ 已排班未签到：{{ not_checked_in|length }}</h2>
+
+            <ul class="attendance-list">
+            {% for r in not_checked_in %}
+                <li>{{ r.name }}｜{{ r.role_text }}｜{{ r.place_text }}</li>
+            {% else %}
+                <li class="text-gray">暂无记录</li>
+            {% endfor %}
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">🚶 临时报到：{{ walk_ins|length }}</h2>
+
+            <ul class="attendance-list">
+            {% for r in walk_ins %}
+                <li>{{ r.name }}｜{{ r.role_text }}｜{{ r.place_text }}</li>
+            {% else %}
+                <li class="text-gray">暂无记录</li>
+            {% endfor %}
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">⏳ 未签退：{{ not_checked_out|length }}</h2>
+
+            <ul class="attendance-list">
+            {% for r in not_checked_out %}
+                <li>{{ r.name }}｜{{ r.role_text }}｜{{ r.place_text }}</li>
+            {% else %}
+                <li class="text-gray">暂无记录</li>
+            {% endfor %}
+            </ul>
+        </div>
+
+    </div>
+
+    </body>
+    </html>
+    """,
         date_str=date_str,
         checked_in=checked_in,
         not_checked_in=not_checked_in,
@@ -3247,60 +3743,180 @@ def schedule_settings():
 
     settings = get_schedule_settings()
     saved = request.args.get("saved") == "1"
+    daily_quote = get_daily_buddha_quote()
 
     return render_template_string("""
-    <h1>⚙️ 排班设置</h1>
+    <!doctype html>
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>排班设置</title>
 
-    {% if saved %}
-        <p style="color:green; font-weight:bold;">✅ 设置已保存</p>
-    {% endif %}
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/toolbox.css') }}">
 
-    <form method="post" style="font-size:18px; max-width:500px;">
+    <style>
+    .settings-wrap{
+        max-width:900px;
+        margin:auto;
+        padding:24px;
+    }
 
-        <h2>📅 默认日期切换</h2>
+    .settings-grid{
+        display:grid;
+        grid-template-columns:1fr 1fr;
+        gap:18px;
+    }
 
-        <label>几点后默认看明天？</label><br>
-        <input name="default_day_switch_time"
-               value="{{ settings.default_day_switch_time }}"
-               placeholder="18:00"
-               style="font-size:20px; padding:8px; width:150px;">
-        <p style="color:#666;">例：18:00 = 晚上6点后负责人页面默认切到明天</p>
+    @media(max-width:700px){
+        .settings-grid{
+            grid-template-columns:1fr;
+        }
+    }
+    </style>
+    </head>
 
-        <hr>
+    <body>
 
-        <h2>👥 缺义工目标人数</h2>
+    <div class="settings-wrap">
 
-        <label>橙班 - 观音堂</label><br>
-        <input name="target_orange_guanyintang" value="{{ settings.target_orange_guanyintang }}" style="font-size:20px; padding:8px;"><br><br>
+        <div class="card">
 
-        <label>橙班 - 活动中心</label><br>
-        <input name="target_orange_activity" value="{{ settings.target_orange_activity }}" style="font-size:20px; padding:8px;"><br><br>
+            <h1 class="page-title">⚙️ 排班系统设置</h1>
 
-        <label>黄班 - 观音堂</label><br>
-        <input name="target_yellow_guanyintang" value="{{ settings.target_yellow_guanyintang }}" style="font-size:20px; padding:8px;"><br><br>
+            <p class="page-subtitle">
+                管理负责人页面默认日期、缺义工目标人数与供台提醒。
+            </p>
 
-        <label>黄班 - 活动中心</label><br>
-        <input name="target_yellow_activity" value="{{ settings.target_yellow_activity }}" style="font-size:20px; padding:8px;"><br><br>
+            <div class="quote-card" style="margin-bottom:22px;">
+                <div class="quote-title">
+                    🌸 今日佛言佛语
+                </div>
 
-        <label>卫生人数</label><br>
-        <input name="target_cleaning" value="{{ settings.target_cleaning }}" style="font-size:20px; padding:8px;"><br><br>
+                <div class="quote-content">
+                    {{ daily_quote }}
+                </div>
+            </div>
 
-        <hr>
+            {% if saved %}
+            <div class="alert alert-success">
+                ✅ 设置已保存
+            </div>
+            {% endif %}
 
-        <h2>🪔 供台提醒</h2>
+            <form method="post">
 
-        <label>提醒未来几天的大日子？</label><br>
-        <input name="supply_alert_days" value="{{ settings.supply_alert_days }}" style="font-size:20px; padding:8px;"><br><br>
+                <h2 class="section-title">📅 默认工作日期</h2>
 
-        <button type="submit" style="font-size:22px; padding:12px 20px;">
-            💾 保存设置
-        </button>
+                <div class="form-group">
+                    <label class="form-label">
+                        几点后默认看明天？
+                    </label>
 
-    </form>
+                    <input
+                        class="form-input"
+                        name="default_day_switch_time"
+                        value="{{ settings.default_day_switch_time }}"
+                        placeholder="18:00">
 
-    <br>
-    <a href="{{ url_for('schedule.schedule_admin') }}">⬅ 返回负责人首页</a>
-    """, settings=settings, saved=saved)
+                    <div class="form-help">
+                        例：18:00 = 晚上 6 点后，负责人首页默认切换到明天。
+                    </div>
+                </div>
+
+                <div class="divider"></div>
+
+                <h2 class="section-title">👥 缺义工目标人数</h2>
+
+                <div class="settings-grid">
+
+                    <div class="form-group">
+                        <label class="form-label">橙班 - 观音堂</label>
+                        <input
+                            class="form-input"
+                            name="target_orange_guanyintang"
+                            value="{{ settings.target_orange_guanyintang }}">
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">橙班 - 活动中心</label>
+                        <input
+                            class="form-input"
+                            name="target_orange_activity"
+                            value="{{ settings.target_orange_activity }}">
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">黄班 - 观音堂</label>
+                        <input
+                            class="form-input"
+                            name="target_yellow_guanyintang"
+                            value="{{ settings.target_yellow_guanyintang }}">
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">黄班 - 活动中心</label>
+                        <input
+                            class="form-input"
+                            name="target_yellow_activity"
+                            value="{{ settings.target_yellow_activity }}">
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">卫生人数</label>
+                        <input
+                            class="form-input"
+                            name="target_cleaning"
+                            value="{{ settings.target_cleaning }}">
+                    </div>
+
+                </div>
+
+                <div class="divider"></div>
+
+                <h2 class="section-title">🪔 供台提醒</h2>
+
+                <div class="form-group">
+                    <label class="form-label">
+                        提醒未来几天的大日子？
+                    </label>
+
+                    <input
+                        class="form-input"
+                        name="supply_alert_days"
+                        value="{{ settings.supply_alert_days }}">
+
+                    <div class="form-help">
+                        系统会提前显示未来几天需要设供台的大日子。
+                    </div>
+                </div>
+
+                <div class="btn-row">
+
+                    <button
+                        class="btn-tool btn-green btn-full"
+                        type="submit">
+                        保存排班设置
+                    </button>
+
+                    <a
+                        class="btn-tool btn-gray btn-full"
+                        href="{{ url_for('schedule.schedule_admin') }}">
+                        返回负责人首页
+                    </a>
+
+                </div>
+
+            </form>
+
+        </div>
+
+    </div>
+
+    </body>
+    </html>
+    """, settings=settings, saved=saved, daily_quote=daily_quote)
 
 
 @schedule_bp.route("/schedule/signups")
@@ -3420,336 +4036,446 @@ def schedule_signups_manage():
         role_summary[role] = role_summary.get(role, 0) + 1
 
     return render_template_string("""
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>报名管理</title>
+    <!doctype html>
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>报名管理</title>
 
-<style>
-body {
-    font-family: "Microsoft YaHei", Arial;
-    background:#f5f5f5;
-    padding:20px;
-}
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/toolbox.css') }}">
 
-.box {
-    background:white;
-    max-width:1200px;
-    margin:auto;
-    padding:25px;
-    border-radius:15px;
-}
+    <style>
+    .signup-admin-wrap{
+        max-width:1280px;
+        margin:auto;
+        padding:24px;
+    }
 
-button, input, select {
-    font-size:20px;
-    padding:8px;
-    margin:5px;
-}
+    .filter-grid{
+        display:grid;
+        grid-template-columns:240px 1fr 1fr 180px;
+        gap:16px;
+        align-items:end;
+    }
 
-table {
-    width:100%;
-    border-collapse:collapse;
-    font-size:20px;
-}
+    .quick-date-row{
+        display:flex;
+        flex-wrap:wrap;
+        gap:12px;
+        margin-top:16px;
+        align-items:center;
+    }
 
-th, td {
-    border:1px solid #999;
-    padding:8px;
-    text-align:center;
-}
+    .role-stat-row{
+        display:flex;
+        flex-wrap:wrap;
+        gap:12px;
+        margin-top:12px;
+    }
 
-.table-wrap {
-    overflow-x:auto;
-}
+    .role-stat-pill{
+        background:#fff7ed;
+        color:#9a3412;
+        border:1px solid #fed7aa;
+        border-radius:999px;
+        padding:10px 18px;
+        font-size:22px;
+        font-weight:bold;
+    }
 
-.pending {
-    background:#fff8d6;
-}
+    .status-pending{
+        background:#fff8d6;
+    }
 
-.assigned {
-    background:#e8fff0;
-}
+    .status-assigned{
+        background:#e8fff0;
+    }
 
-.cancelled {
-    background:#eee;
-    color:#777;
-}
+    .status-cancelled{
+        background:#f3f4f6;
+        color:#777;
+    }
 
-.summary-box {
-    background:#eef7ff;
-    padding:12px;
-    border-radius:10px;
-    font-size:22px;
-    margin:12px 0;
-}
+    .signup-table{
+        width:100%;
+        border-collapse:collapse;
+        font-size:22px;
+        background:white;
+    }
 
-.role-summary-box {
-    background:#fff8d6;
-    padding:12px;
-    border-radius:10px;
-    font-size:22px;
-    margin:12px 0;
-}
+    .signup-table th{
+        background:#f8fafc;
+        font-size:22px;
+        padding:14px 10px;
+        border-bottom:2px solid #e5e7eb;
+        white-space:nowrap;
+    }
 
-.filter-box {
-    background:#fafafa;
-    border:1px solid #ddd;
-    padding:15px;
-    border-radius:12px;
-    margin:15px 0;
-    font-size:20px;
-}
+    .signup-table td{
+        padding:14px 10px;
+        border-bottom:1px solid #e5e7eb;
+        text-align:center;
+        vertical-align:top;
+    }
 
-.op-form {
-    margin:5px 0;
-}
+    .signup-table tr:hover{
+        filter:brightness(.98);
+    }
 
-.op-btn {
-    width:120px;
-}
+    .assignment-text{
+        font-size:20px;
+        line-height:1.6;
+    }
 
-.floating-back {
-    position: fixed;
-    right: 25px;
-    bottom: 25px;
-    background: #2196F3;
-    color: white;
-    padding: 16px 24px;
-    border-radius: 50px;
-    text-decoration: none;
-    font-size: 22px;
-    font-weight: bold;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
-    z-index: 9999;
-}
+    .remark-text{
+        font-size:20px;
+        color:#6b7280;
+        max-width:200px;
+    }
 
-.floating-back:hover {
-    background: #0b7dda;
-}
-</style>
-</head>
+    .op-stack{
+        display:flex;
+        flex-direction:column;
+        gap:8px;
+        align-items:center;
+    }
 
-<body>
+    .op-stack form{
+        margin:0;
+    }
 
-<div class="box">
+    .op-btn{
+        min-height:42px;
+        padding:0 14px;
+        font-size:18px;
+        border-radius:12px;
+        width:110px;
+    }
 
-<h1>📋 义工报名管理</h1>
+    .floating-back{
+        position:fixed;
+        right:25px;
+        bottom:25px;
+        z-index:9999;
+        min-width:170px;
+    }
 
-<a href="/schedule/admin">⬅ 返回负责人首页</a>
+    .history-check{
+        display:flex;
+        gap:8px;
+        align-items:center;
+        font-size:22px;
+        font-weight:bold;
+        color:#374151;
+    }
 
-<hr>
+    .history-check input{
+        width:22px;
+        height:22px;
+    }
 
-<div class="summary-box">
-    当前查询：<b>{{ summary.total }}</b> 条　
-    未安排：<b>{{ summary.pending }}</b>　
-    已安排：<b>{{ summary.assigned }}</b>　
-    已取消：<b>{{ summary.cancelled }}</b>
-</div>
+    @media (max-width:900px){
+        .filter-grid{
+            grid-template-columns:1fr;
+        }
 
-<div class="role-summary-box">
-    <b>岗位统计：</b>
-    {% if role_summary %}
-        {% for role, count in role_summary.items() %}
-            {{ role }}：<b>{{ count }}</b> 人　
-        {% endfor %}
-    {% else %}
-        没有记录
-    {% endif %}
-</div>
+        .signup-table{
+            font-size:20px;
+        }
 
-<div class="filter-box">
-<form method="get">
+        .signup-table th,
+        .signup-table td{
+            padding:10px 8px;
+        }
 
-    日期：
-    <input type="date" name="date" value="{{ date_filter }}">
+        .floating-back{
+            position:static;
+            margin:20px auto;
+            width:100%;
+        }
+    }
+    </style>
+    </head>
 
-    <a href="/schedule/signups?date={{ today }}&status={{ status }}&role={{ role_filter }}">
-        <button type="button">今天</button>
-    </a>
+    <body>
 
-    <a href="/schedule/signups?date={{ tomorrow }}&status={{ status }}&role={{ role_filter }}">
-        <button type="button">明天</button>
-    </a>
+    <div class="signup-admin-wrap">
 
-    <a href="/schedule/signups">
-        <button type="button">全部</button>
-    </a>
+        <div class="card">
 
-    <br><br>
+            <h1 class="page-title">📋 义工报名管理</h1>
 
-    状态：
-    <select name="status" style="width:160px;">
+            <p class="page-subtitle">
+                查看、筛选、修改、取消或恢复义工报名。
+            </p>
 
-    <option value="all"
-    {% if status=="all" %}selected{% endif %}>
-    全部状态
-    </option>
+            <div class="btn-row">
+                <a class="btn-tool btn-gray"
+                href="/schedule/admin">
+                    ⬅ 返回负责人首页
+                </a>
+            </div>
 
-    <option value="pending"
-    {% if status=="pending" %}selected{% endif %}>
-    未安排
-    </option>
+        </div>
 
-    <option value="assigned"
-    {% if status=="assigned" %}selected{% endif %}>
-    已安排
-    </option>
+        <div class="summary-grid">
 
-    <option value="cancelled"
-    {% if status=="cancelled" %}selected{% endif %}>
-    已取消
-    </option>
+            <div class="summary-box">
+                <div class="summary-title">当前查询</div>
+                <div class="summary-value">{{ summary.total }}</div>
+            </div>
 
-    </select>
+            <div class="summary-box">
+                <div class="summary-title">🟡 未安排</div>
+                <div class="summary-value">{{ summary.pending }}</div>
+            </div>
 
-    岗位：
-    <select name="role" style="width:160px;">
+            <div class="summary-box">
+                <div class="summary-title">🟢 已安排</div>
+                <div class="summary-value">{{ summary.assigned }}</div>
+            </div>
 
-    <option value="all"
-    {% if role_filter=="all" %}selected{% endif %}>
-    全部岗位
-    </option>
+            <div class="summary-box">
+                <div class="summary-title">⚪ 已取消</div>
+                <div class="summary-value">{{ summary.cancelled }}</div>
+            </div>
 
-    {% for role in roles %}
-    <option value="{{ role }}"
-    {% if role_filter==role %}selected{% endif %}>
-    {{ role }}
-    </option>
-    {% endfor %}
+        </div>
 
-    </select>
-        <option value="all" {% if role_filter == "all" %}selected{% endif %}>全部</option>
-        {% for role in roles %}
-            <option value="{{ role }}" {% if role_filter == role %}selected{% endif %}>
-                {{ role }}
-            </option>
-        {% endfor %}
-    </select>
+        <div class="card">
 
-    <label style="font-size:18px;">
-        <input
-            type="checkbox"
-            name="show_history"
-            value="1"
-            {% if show_history %}checked{% endif %}
-        >
-        显示过去记录
-    </label>
+            <h2 class="section-title">📊 岗位统计</h2>
 
-    <button type="submit">
-        🔍 查询
-    </button>
+            {% if role_summary %}
+                <div class="role-stat-row">
+                {% for role, count in role_summary.items() %}
+                    <div class="role-stat-pill">
+                        {{ role }}：{{ count }} 人
+                    </div>
+                {% endfor %}
+                </div>
+            {% else %}
+                <div class="empty-state">
+                    <div class="empty-icon">📭</div>
+                    <div class="empty-title">没有岗位统计</div>
+                </div>
+            {% endif %}
 
-</form>
-</div>
+        </div>
 
-<hr>
+        <div class="card">
 
-<div class="table-wrap">
-<table>
-<tr>
-    <th>日期</th>
-    <th>编号</th>
-    <th>姓名</th>
-    <th>岗位</th>
-    <th>时间</th>
-    <th>状态</th>
-    <th>系统安排</th>
-    <th>备注</th>
-    <th>操作</th>
-</tr>
+            <h2 class="section-title">🔍 筛选查询</h2>
 
-{% for r in rows %}
-<tr class="{{ r.status }}">
-    <td>{{ r.signup_date }}</td>
-    <td>{{ r.volunteer_id }}</td>
-    <td>{{ r.name }}</td>
-    <td>{{ r.role }}</td>
-    <td>
-        {% if r.start_time or r.end_time %}
-            {{ r.start_time or "" }} ~ {{ r.end_time or "" }}
-        {% else %}
-            -
-        {% endif %}
-    </td>
-    <td>
-        {% if r.status == "pending" %}
-            未安排
-        {% elif r.status == "assigned" %}
-            已安排
-        {% elif r.status == "cancelled" %}
-            已取消
-        {% else %}
-            {{ r.status }}
-        {% endif %}
-    </td>
-    <td>
-        {% if r.final_assignment %}
-            {% for item in r.final_assignment %}
-                <div>{{ item|safe }}</div>
-            {% endfor %}
-        {% else %}
-            -
-        {% endif %}
-    </td>
-    <td>{{ r.remarks or "" }}</td>
+            <form method="get">
 
-    <td>
+                <div class="filter-grid">
 
-        <form class="op-form" method="get" action="/schedule/signup_edit/{{ r.id }}">
-            <button class="op-btn" type="submit">✏️ 修改</button>
-        </form>
+                    <div class="form-group">
+                        <label class="form-label">日期</label>
+                        <input
+                            class="form-input"
+                            type="date"
+                            name="date"
+                            value="{{ date_filter }}">
+                    </div>
 
-        {% if r.status == "assigned" %}
-            <form class="op-form" method="get" action="/schedule/signup_place/{{ r.id }}">
-                <button class="op-btn" type="submit">🔧 调整</button>
+                    <div class="form-group">
+                        <label class="form-label">状态</label>
+                        <select class="form-select" name="status">
+                            <option value="all" {% if status=="all" %}selected{% endif %}>全部状态</option>
+                            <option value="pending" {% if status=="pending" %}selected{% endif %}>未安排</option>
+                            <option value="assigned" {% if status=="assigned" %}selected{% endif %}>已安排</option>
+                            <option value="cancelled" {% if status=="cancelled" %}selected{% endif %}>已取消</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">岗位</label>
+                        <select class="form-select" name="role">
+                            <option value="all" {% if role_filter=="all" %}selected{% endif %}>全部岗位</option>
+
+                            {% for role in roles %}
+                            <option value="{{ role }}" {% if role_filter==role %}selected{% endif %}>
+                                {{ role }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">&nbsp;</label>
+                        <button class="btn-tool btn-blue btn-full" type="submit">
+                            🔍 查询
+                        </button>
+                    </div>
+
+                </div>
+
+                <div class="quick-date-row">
+
+                    <a class="btn-tool btn-orange"
+                    href="/schedule/signups?date={{ today }}&status={{ status }}&role={{ role_filter }}">
+                        今天
+                    </a>
+
+                    <a class="btn-tool btn-purple"
+                    href="/schedule/signups?date={{ tomorrow }}&status={{ status }}&role={{ role_filter }}">
+                        明天
+                    </a>
+
+                    <a class="btn-tool btn-gray"
+                    href="/schedule/signups">
+                        全部
+                    </a>
+
+                    <label class="history-check">
+                        <input
+                            type="checkbox"
+                            name="show_history"
+                            value="1"
+                            {% if show_history %}checked{% endif %}>
+                        显示过去记录
+                    </label>
+
+                </div>
+
             </form>
-        {% endif %}
 
-        {% if r.status == "pending" %}
-            <form class="op-form"
-                  method="post"
-                  action="/schedule/signup_cancel/{{ r.id }}"
-                  onsubmit="return confirm('确定取消报名？');">
-                <button class="op-btn" type="submit">❌ 取消</button>
-            </form>
+        </div>
 
-        {% elif r.status == "cancelled" %}
-            <form class="op-form"
-                  method="post"
-                  action="/schedule/signup_restore/{{ r.id }}"
-                  onsubmit="return confirm('确定恢复报名？');">
-                <button class="op-btn" type="submit">↩️ 恢复</button>
-            </form>
+        <div class="card">
 
-        {% elif r.status == "assigned" %}
-            <div style="font-size:18px; color:#666;">已安排</div>
+            <h2 class="section-title">📄 报名记录</h2>
 
-        {% else %}
-            -
-        {% endif %}
+            <div class="table-wrap">
 
-    </td>
-</tr>
-{% endfor %}
-</table>
-</div>
+                <table class="signup-table">
 
-{% if not rows %}
-<p style="font-size:22px;">没有记录。</p>
-{% endif %}
+                    <tr>
+                        <th>日期</th>
+                        <th>编号</th>
+                        <th>姓名</th>
+                        <th>岗位</th>
+                        <th>时间</th>
+                        <th>状态</th>
+                        <th>系统安排</th>
+                        <th>备注</th>
+                        <th>操作</th>
+                    </tr>
 
-</div>
-                                  
-<a href="/schedule/admin" class="floating-back">
-    ⬅ 返回首页
-</a>
-                                  
-</body>
-</html>
-""",
+                    {% for r in rows %}
+                    <tr class="status-{{ r.status }}">
+                        <td>{{ r.signup_date }}</td>
+                        <td>{{ r.volunteer_id }}</td>
+                        <td><b>{{ r.name }}</b></td>
+                        <td>{{ r.role }}</td>
+
+                        <td>
+                            {% if r.start_time or r.end_time %}
+                                {{ r.start_time or "" }} ~ {{ r.end_time or "" }}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+
+                        <td>
+                            {% if r.status == "pending" %}
+                                <span class="badge badge-orange">未安排</span>
+                            {% elif r.status == "assigned" %}
+                                <span class="badge badge-green">已安排</span>
+                            {% elif r.status == "cancelled" %}
+                                <span class="badge badge-gray">已取消</span>
+                            {% else %}
+                                <span class="badge badge-blue">{{ r.status }}</span>
+                            {% endif %}
+                        </td>
+
+                        <td class="assignment-text">
+                            {% if r.final_assignment %}
+                                {% for item in r.final_assignment %}
+                                    <div>{{ item|safe }}</div>
+                                {% endfor %}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+
+                        <td class="remark-text">
+                            {{ r.remarks or "" }}
+                        </td>
+
+                        <td>
+                            <div class="op-stack">
+
+                                <form method="get" action="/schedule/signup_edit/{{ r.id }}">
+                                    <button class="btn-tool btn-blue op-btn" type="submit">
+                                        ✏️ 修改
+                                    </button>
+                                </form>
+
+                                {% if r.status == "assigned" %}
+                                <form method="get" action="/schedule/signup_place/{{ r.id }}">
+                                    <button class="btn-tool btn-purple op-btn" type="submit">
+                                        🔧 调整
+                                    </button>
+                                </form>
+                                {% endif %}
+
+                                {% if r.status != "cancelled" %}
+                                <form
+                                    method="post"
+                                    action="/schedule/signup_cancel/{{ r.id }}"
+                                    onsubmit="return confirm('确定取消这位义工的报名？');">
+                                    <button class="btn-tool btn-red op-btn" type="submit">
+                                        ❌ 取消
+                                    </button>
+                                </form>
+
+                                {% else %}
+
+                                <form
+                                    method="post"
+                                    action="/schedule/signup_restore/{{ r.id }}"
+                                    onsubmit="return confirm('确定恢复报名？');">
+                                    <button class="btn-tool btn-green op-btn" type="submit">
+                                        ↩️ 恢复
+                                    </button>
+                                </form>
+
+                                {% endif %}
+
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+
+                </table>
+
+            </div>
+
+            {% if not rows %}
+                <div class="empty-state">
+                    <div class="empty-icon">📭</div>
+                    <div class="empty-title">没有记录</div>
+                    <div class="empty-text">请调整筛选条件后再查询。</div>
+                </div>
+            {% endif %}
+
+        </div>
+
+        <a href="/schedule/admin"
+        class="btn-tool btn-blue floating-back">
+            ⬅ 返回首页
+        </a>
+
+    </div>
+
+    </body>
+    </html>
+    """,
         rows=rows,
         status=status,
         date_filter=date_filter,
@@ -3758,7 +4484,8 @@ th, td {
         summary=summary,
         role_summary=role_summary,
         today=today,
-        tomorrow=tomorrow
+        tomorrow=tomorrow,
+        show_history=show_history,
     )
 
 
@@ -3769,31 +4496,136 @@ LOGIN_HTML = """
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>负责人排班系统</title>
+
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
+
 <style>
-body { font-family: "Microsoft YaHei", Arial; background:#f5f5f5; padding:20px; font-size:24px; }
-.box { background:white; max-width:1200px; margin:auto; padding:30px; border-radius:15px; text-align:center; }
-input, button { font-size:30px; padding:18px; margin:10px; width:90%; border-radius:12px; }
+.login-wrap{
+    max-width:620px;
+    margin:60px auto;
+    padding:20px;
+}
+
+.login-card{
+    text-align:center;
+}
+
+.login-icon{
+    font-size:64px;
+    margin-bottom:10px;
+}
+
+.login-title{
+    font-size:52px;
+    font-weight:bold;
+    color:#1e293b;
+}
+
+.login-subtitle{
+    margin:15px 0 35px;
+    color:#666;
+    font-size:22px;
+    line-height:1.8;
+}
+
+.login-input{
+    margin-top:10px;
+}
+
+.login-input input{
+    text-align:center;
+    letter-spacing:6px;
+    font-size:34px;
+}
+
+@media (max-width:700px){
+
+    .login-title{
+        font-size:40px;
+    }
+
+    .login-subtitle{
+        font-size:20px;
+    }
+
+}
 </style>
+
+<script>
+window.addEventListener("DOMContentLoaded",function(){
+
+    document.querySelector("input[name='pin']").focus();
+
+});
+</script>
+
 </head>
+
 <body>
-<div class="box">
-<h1>📅 负责人排班系统</h1>
-<form method="post">
-    <input
-        type="password"
-        name="pin"
-        placeholder="请输入负责人PIN"
-        inputmode="numeric"
-        autocomplete="new-password"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck="false"
-        readonly
-        onfocus="this.removeAttribute('readonly');"
-    >
-    <button type="submit">进入</button>
-</form>
+
+<div class="login-wrap">
+
+    <div class="card login-card">
+
+        <div class="login-icon">
+            📅
+        </div>
+
+        <div class="login-title">
+            负责人排班系统
+        </div>
+
+        <div class="login-subtitle">
+            请输入负责人 PIN<br>
+            进入排班管理系统。
+        </div>
+
+        <form method="post">
+
+            <div class="form-group">
+
+                <label class="form-label">
+                    负责人 PIN
+                </label>
+
+                <div class="login-input">
+
+                    <input
+                        class="form-input"
+                        type="password"
+                        name="pin"
+                        placeholder="请输入负责人 PIN"
+                        inputmode="numeric"
+                        autocomplete="new-password"
+                        autocorrect="off"
+                        autocapitalize="off"
+                        spellcheck="false"
+                        readonly
+                        onfocus="this.removeAttribute('readonly');">
+
+                </div>
+
+            </div>
+
+            <div class="btn-row">
+
+                <button
+                    class="btn-tool btn-green btn-full"
+                    type="submit">
+
+                    🔓 进入负责人系统
+
+                </button>
+
+            </div>
+
+        </form>
+
+    </div>
+
 </div>
+
 </body>
 </html>
 """
@@ -3805,295 +4637,13 @@ SCHEDULE_HTML = """
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="manifest" href="/schedule-manifest.json">
+<link rel="icon" href="/static/schedule_icon.png?v=1">
 <title>负责人排班系统</title>
 
-<style>
-body {
-    font-family: "Microsoft YaHei", Arial, sans-serif;
-    background: #f3f6fb;
-    margin: 0;
-    padding: 18px;
-    color: #1f2937;
-}
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
 
-.box {
-    background: transparent;
-    max-width: 1180px;
-    margin: auto;
-}
-
-.top-bar {
-    background: white;
-    padding: 20px 24px;
-    border-radius: 18px;
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    gap:15px;
-    flex-wrap:wrap;
-    box-shadow: 0 4px 14px rgba(0,0,0,0.06);
-}
-
-.top-bar h1 {
-    margin: 0;
-    font-size: 30px;
-}
-
-.card {
-    background: white;
-    border-radius: 18px;
-    padding: 22px;
-    margin-top: 18px;
-    box-shadow: 0 4px 14px rgba(0,0,0,0.06);
-}
-
-.info-box {
-    background: #eaf5ff;
-    border-left: 6px solid #3b82f6;
-    padding: 18px;
-    border-radius: 16px;
-    font-size: 23px;
-}
-
-.warn-box {
-    background: #fff4f4;
-    border-left: 6px solid #ef4444;
-    padding: 18px;
-    border-radius: 16px;
-    font-size: 22px;
-}
-
-.main-menu {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 14px;
-}
-
-.quick-actions {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 14px;
-}
-
-.big-btn,
-.quick-btn,
-.action-btn {
-    width: 100%;
-    border: 0;
-    border-radius: 16px;
-    background: #f1f5f9;
-    padding: 18px 16px;
-    font-size: 24px;
-    font-weight: 700;
-    cursor: pointer;
-    color: #111827;
-    text-align: center;
-    box-sizing: border-box;
-    text-decoration: none;
-    display: block;
-}
-
-.big-btn {
-    font-size: 28px;
-    padding: 24px;
-    background: #eef6ff;
-}
-
-.quick-btn.primary {
-    background: #dbeafe;
-}
-
-.quick-btn.warn {
-    background: #fee2e2;
-}
-
-.quick-btn.whatsapp {
-    background: #dcfce7;
-}
-
-.big-btn:hover,
-.quick-btn:hover,
-.action-btn:hover {
-    filter: brightness(0.96);
-}
-
-.section-title {
-    margin: 0 0 16px 0;
-    font-size: 25px;
-}
-
-.action-row {
-    display:flex;
-    gap:15px;
-    flex-wrap:wrap;
-    align-items:center;
-}
-
-.date-input,
-input,
-select,
-textarea {
-    font-size: 22px;
-    padding: 12px;
-    border: 1px solid #cbd5e1;
-    border-radius: 12px;
-    box-sizing: border-box;
-}
-
-.date-input {
-    font-size: 26px;
-}
-
-textarea {
-    width:100%;
-}
-
-.two-col {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 18px;
-}
-
-.sub-card {
-    background: #f8fafc;
-    border-radius: 16px;
-    padding: 18px;
-}
-
-.role-box label {
-    display: inline-block;
-    background: white;
-    border: 1px solid #cbd5e1;
-    border-radius: 12px;
-    padding: 8px 12px;
-    margin: 6px;
-    font-size: 22px;
-}
-
-.special-box {
-    margin-top:25px;
-    padding:25px;
-    background:#f8fafc;
-    border:2px solid #dbeafe;
-    border-radius:18px;
-}
-
-.publish-btn{
-    background:#2e7d32;
-    color:#fff;
-    font-size:30px;
-    font-weight:bold;
-}
-
-.auto-btn{
-    background:#1976d2;
-    color:#fff;
-}
-
-.view-btn{
-    background:#7b1fa2;
-    color:#fff;
-}
-
-.whatsapp-btn{
-    background:#25D366;
-    color:#fff;
-}
-
-.shortage-btn{
-    background:#ef6c00;
-    color:#fff;
-}
-
-.attendance-btn{
-    background:#0097a7;
-    color:#fff;
-}
-
-.report-btn{
-    background:#546e7a;
-    color:#fff;
-}
-
-.notice-btn{
-    background:#2563eb;
-    color:#fff;
-}
-
-.status-note{
-    grid-column:1 / -1;
-    background:#f8fafc;
-    border:2px solid #e2e8f0;
-    border-radius:16px;
-    padding:18px;
-    text-align:center;
-    font-size:24px;
-    font-weight:bold;
-    color:#334155;
-}
-
-.helper-text{
-    display:block;
-    font-size:18px;
-    font-weight:normal;
-    opacity:0.9;
-    margin-top:5px;
-}
-
-.publish-btn{
-    background:#2e7d32;
-    color:white;
-}
-
-.published-btn{
-    background:#9e9e9e;
-    color:white;
-}
-
-.published-btn{
-    background:#9e9e9e;
-    color:white;
-    opacity:0.9;
-}
-
-button {
-    font-family: inherit;
-}
-
-.small-btn{
-    display:block;
-    text-align:center;
-    padding:16px;
-    margin-top:25px;
-    border-radius:12px;
-    background:#888;
-    color:white;
-    text-decoration:none;
-    font-size:22px;
-}
-
-a {
-    text-decoration: none;
-}
-
-@media (max-width: 800px) {
-    .main-menu,
-    .quick-actions,
-    .two-col {
-        grid-template-columns: 1fr;
-    }
-
-    .top-bar h1 {
-        font-size: 25px;
-    }
-
-    .big-btn,
-    .quick-btn,
-    .action-btn {
-        font-size: 22px;
-    }
-}
-</style>
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {
@@ -4150,6 +4700,56 @@ function showSpecial(id) {
 }
 </script>
 
+<style>
+.login-wrap{
+    max-width:620px;
+    margin:60px auto;
+    padding:20px;
+}
+
+.login-card{
+    text-align:center;
+}
+
+.login-icon{
+    font-size:64px;
+    margin-bottom:10px;
+}
+
+.login-title{
+    font-size:52px;
+    font-weight:bold;
+    color:#1e293b;
+}
+
+.login-subtitle{
+    margin:15px 0 35px;
+    color:#666;
+    font-size:22px;
+    line-height:1.8;
+}
+
+.login-input{
+    margin-top:10px;
+}
+
+.login-input input{
+    text-align:center;
+    letter-spacing:6px;
+    font-size:34px;
+}
+
+@media (max-width:700px){
+    .login-title{
+        font-size:40px;
+    }
+
+    .login-subtitle{
+        font-size:20px;
+    }
+}
+</style>
+
 </head>
 
 <body>
@@ -4158,47 +4758,165 @@ function showSpecial(id) {
 <div class="top-bar">
     <h1>📅 负责人排班系统</h1>
 
-    <a href="/schedule/logout">
-        <button type="button">🚪 退出登录</button>
+    <a class="btn-tool btn-gray" style="width:auto;min-width:160px;" href="/schedule/logout">
+        🚪 退出登录
     </a>
 </div>
 
 <div class="card">
+    <h2 class="section-title">📅 今日工作</h2>
+
     <div class="main-menu">
-        <a href="/schedule/signups">
-            <button type="button" class="big-btn">📋 报名管理</button>
+
+        <a class="btn-tool btn-blue"
+           href="/schedule?mode=day&override_date={{ override_date }}">
+            📅 当天安排
         </a>
 
-        <a href="/schedule?mode=day&override_date={{ override_date }}">
-            <button type="button" class="big-btn">📅 当天安排</button>
+        <a class="btn-tool btn-orange"
+           href="/schedule/notice_center?date={{ override_date }}">
+            📢 通知中心
         </a>
 
-        <a href="/schedule/notice_center?date={{ override_date }}">
-            <button type="button" class="big-btn">📢 通知中心</button>
+        <a class="btn-tool btn-purple"
+           href="/schedule/signups">
+            📋 报名管理
         </a>
 
-        <a href="/schedule/settings">
-            <button type="button" class="big-btn">⚙️ 排班设置</button>
-        </a>
-
-        <a href="/reports">
-            <button type="button" class="big-btn">📚 资料中心</button>
-        </a>
-
-        <a href="/volunteer" class="small-btn">
-            👥 打开义工报名页面
-        </a>
     </div>
 </div>
 
-<div class="warn-box">
+<div class="card">
+    <h2 class="section-title">⚙️ 系统功能</h2>
+
+    <div class="main-menu">
+
+        <a class="btn-tool btn-gray"
+           href="/schedule/settings">
+            ⚙️ 排班设置
+        </a>
+
+        <a class="btn-tool btn-green"
+           href="/reports">
+            📚 资料中心
+        </a>
+
+        <a class="btn-tool btn-blue"
+           href="/volunteer">
+            👥 打开义工报名页面
+        </a>
+
+    </div>
+</div>
+
+{% if mode == "day" %}
+
+<div class="card today-panel">
+    <h2 class="section-title">📅 今日概况</h2>
+    <div class="dashboard-note">负责人打开后，先确认日期、发布状态、报名人数和提醒。</div>
+
+    <div class="date-card">
+        <b>🗓 日期资料</b><br>
+        阳历：{{ special_day_info.solar_date }}<br>
+        农历：{{ special_day_info.lunar_text }}<br>
+
+        {% if special_day_info.is_special %}
+            <span class="text-red" style="font-weight:bold;">
+                🔴 {{ special_day_info.special_names | join("、") }}
+            </span><br>
+            模板：{{ special_day_info.template_text }}<br>
+
+            {% if special_day_info.setup_shifu %}
+                🛕 需要设师父供台<br>
+            {% endif %}
+
+            {% if special_day_info.remove_next_day %}
+                📦 明日需要收供台<br>
+            {% endif %}
+        {% else %}
+            🟢 平时日
+        {% endif %}
+
+        {% if remove_info.need_remove_today_after_12 %}
+            <br>⚠️ 今日中午后需要收昨日供台
+        {% endif %}
+    </div>
+
+    <div class="date-status-row compact-date-row">
+
+        <div class="date-picker-card compact-date-picker">
+
+            <div class="status-title">
+                📅 选择工作日期
+            </div>
+
+            <input
+                type="date"
+                id="main_date"
+                class="date-input"
+                value="{{ override_date }}"
+                onchange="goToScheduleDate(this.value)"
+            >
+
+        </div>
+
+    </div>
+
+    <div class="kpi-grid">
+        <div class="kpi-card">
+            <div class="kpi-title">👥 已报名</div>
+            <div class="kpi-value">{{ day_summary.total }}</div>
+        </div>
+
+        <div class="kpi-card">
+            <div class="kpi-title">🟡 待安排</div>
+            <div class="kpi-value">{{ day_summary.pending }}</div>
+        </div>
+
+        <div class="kpi-card">
+            <div class="kpi-title">🟢 已安排</div>
+            <div class="kpi-value">{{ day_summary.assigned }}</div>
+        </div>
+
+        <div class="kpi-card">
+            <div class="kpi-title">⚪ 已取消</div>
+            <div class="kpi-value">{{ day_summary.cancelled }}</div>
+        </div>
+    </div>
+
+    <div class="info-box">
+        <b>📢 缺人工提醒</b><br>
+
+        {% if shortage_summary %}
+            {% for line in shortage_summary %}
+                {{ line }}<br>
+            {% endfor %}
+        {% else %}
+            🟢 目前没有缺人工岗位
+        {% endif %}
+    </div>
+</div>
+
+<div class="card">
+    <h2 class="section-title">🔔 今日提醒</h2>
+    <div class="reminder-stack">
+<div class="alert alert-error">
     <h3 style="margin-top:0;">🔴 未安排提醒</h3>
     今日：<b>{{ pending_counts.today }}</b> 人　
     明日：<b>{{ pending_counts.tomorrow }}</b> 人　
     本月：<b>{{ pending_counts.month }}</b> 人
 </div>
 
-<div class="alert-box" style="background:#fff8e6;border-left:6px solid #f0b429;padding:18px;margin:18px 0;border-radius:12px;">
+
+
+        {% if republish_info and republish_info.need_republish %}
+        <div class="alert alert-warning">
+            🟠 正式值班表已有更新<br>
+            最后更新时间：{{ republish_info.last_schedule_change }}<br>
+            请到通知中心复制最新正式值班表 WhatsApp。
+        </div>
+        {% endif %}
+<div class="alert alert-warning">
     <h2>🌸 供台报名提醒</h2>
 
     {% for item in supply_alerts %}
@@ -4221,94 +4939,21 @@ function showSpecial(id) {
     {% endfor %}
 </div>
 
-<hr>
 
-{% if mode == "day" %}
-
-<h2>📅 当天值班安排</h2>
+    </div>
+</div>
 
 <div class="card">
-    <h3>📅 日期选择</h3>
+    <h2 class="section-title">📝 今日操作</h2>
 
-    <div class="info-box">
-        <b>🗓 日期资料</b><br>
+    <div class="action-grid">
 
-        阳历：{{ special_day_info.solar_date }}<br>
-        农历：{{ special_day_info.lunar_text }}<br>
-
-        {% if special_day_info.is_special %}
-            <span style="color:red;font-weight:bold;">
-                🔴 {{ special_day_info.special_names | join("、") }}
-            </span><br>
-
-            模板类型：{{ special_day_info.template_text }}<br>
-
-            {% if special_day_info.setup_shifu %}
-                🛕 需要设师父供台<br>
-            {% endif %}
-
-            {% if special_day_info.remove_next_day %}
-                📦 明日需要收供台<br>
-            {% endif %}
-        {% else %}
-            🟢 平时日
-        {% endif %}
-
-        {% if remove_info.need_remove_today_after_12 %}
-            <br>⚠️ 今日中午后需要收昨日供台
-        {% endif %}
-    </div>
-
-    <div class="action-row">
-        <input
-            type="date"
-            id="main_date"
-            class="date-input"
-            value="{{ override_date }}"
-            required
-        >
-
-        <a href="/schedule?mode=day&override_date={{ override_date }}">
-            <button type="button" class="action-btn">📅 当前日期：{{ override_date }}</button>
-        </a>
-    </div>
-</div>
-
-<div class="info-box">
-    <b>📊 当天概况</b><br>
-    已报名：<b>{{ day_summary.total }}</b> 人　
-    待安排：<b>{{ day_summary.pending }}</b> 人　
-    已安排：<b>{{ day_summary.assigned }}</b> 人　
-    已取消：<b>{{ day_summary.cancelled }}</b> 人
-</div>
-
-<div class="info-box">
-    <b>📢 缺人工提醒</b><br>
-
-    {% if shortage_summary %}
-
-        {% for line in shortage_summary %}
-            {{ line }}<br>
-        {% endfor %}
-
-    {% else %}
-
-        🟢 目前没有缺人工岗位
-
-    {% endif %}
-</div>
-
-<div class="section quick-panel">
-    <h3 class="section-title">⚡ 今日操作</h3>
-
-    <div class="quick-actions">
-
-        <form method="post" action="/schedule/publish" style="grid-column:1 / -1;">
+        <form method="post" action="/schedule/publish">
             <input type="hidden" name="date" id="publish_date" value="{{ override_date }}">
 
             <button
                 type="submit"
-                class="quick-btn {% if is_published %}published-btn{% else %}publish-btn{% endif %}"
+                class="btn-tool {% if is_published %}btn-gray{% else %}btn-green{% endif %}"
             >
                 {% if is_published %}
                     ✅ 已发布
@@ -4324,7 +4969,7 @@ function showSpecial(id) {
             {% if not is_today_or_past %}
             <form method="post" action="/schedule/generate_day">
                 <input type="hidden" name="date" id="generate_day_date" value="{{ override_date }}">
-                <button type="submit" class="quick-btn auto-btn">
+                <button type="submit" class="btn-tool btn-blue">
                     🔄 重新自动排班
                     <span class="helper-text">发布前可重复执行</span>
                 </button>
@@ -4332,7 +4977,7 @@ function showSpecial(id) {
             {% else %}
             <form method="post" action="/schedule/fill_pending">
                 <input type="hidden" name="date" id="fill_pending_date" value="{{ override_date }}">
-                <button type="submit" class="quick-btn auto-btn">
+                <button type="submit" class="btn-tool btn-blue">
                     ➕ 补入待安排
                     <span class="helper-text">今天或过去日期使用</span>
                 </button>
@@ -4342,26 +4987,26 @@ function showSpecial(id) {
 
         <form method="post" action="/schedule/view_assigned">
             <input type="hidden" name="date" id="view_assigned_date" value="{{ override_date }}">
-            <button type="submit" class="quick-btn view-btn">
+            <button type="submit" class="btn-tool btn-purple">
                 👀 查看排班
                 <span class="helper-text">查看 / 调整正式安排</span>
             </button>
         </form>
 
         <a href="/schedule/notice_center?date={{ override_date }}"
-           class="quick-btn notice-btn">
+           class="btn-tool btn-orange">
             📢 通知中心
             <span class="helper-text">报名通知 / WhatsApp / 缺义工通知</span>
         </a>
 
         {% if is_published %}
-        <a href="/schedule/attendance_status" class="quick-btn attendance-btn">
+        <a href="/schedule/attendance_status" class="btn-tool btn-blue">
             📋 签到情况
             <span class="helper-text">查看义工签到纪录</span>
         </a>
         {% endif %}
 
-        <a href="/reports" class="quick-btn report-btn">
+        <a href="/reports" class="btn-tool btn-gray">
             📚 资料中心
             <span class="helper-text">月报 / 年报 / 文件</span>
         </a>
@@ -4369,105 +5014,131 @@ function showSpecial(id) {
     </div>
 </div>
 
+
+
 <div class="card">
-    <h3>👥 报名录入</h3>
+    <h2 class="section-title">📋 报名录入</h2>
+    <div class="dashboard-note">负责人只需要在这里加入报名：可以人工输入，也可以贴 WhatsApp 文字解析。</div>
 
-    <div class="two-col">
+    <div class="signup-unified">
 
-        <div class="sub-card">
-            <h4>➕ 负责人代报名</h4>
+        <div class="signup-block">
+            <h3>➕ 负责人代报名</h3>
 
             <form method="post" action="/schedule/prebook_add">
                 <input type="hidden" name="mode" value="day">
                 <input type="hidden" name="single_date" id="prebook_single_date" value="{{ override_date }}">
 
-                <label>义工编号 / 姓名</label>
+                <div class="form-row-large">
+                    <label>义工编号 / 姓名</label>
 
-                <div style="display:flex; gap:10px; align-items:center;">
-                    <button
-                        type="button"
-                        id="admin_branch_btn"
-                        onclick="toggleAdminBranch()"
-                        style="width:95px;height:58px;font-size:20px;font-weight:bold;background:#28a745;color:white;border:none;border-radius:12px;cursor:pointer;flex-shrink:0;">
-                        CHE
-                    </button>
+                    <div class="branch-search-row">
+                        <button
+                            type="button"
+                            id="admin_branch_btn"
+                            onclick="toggleAdminBranch()"
+                            class="branch-toggle-btn">
+                            CHE
+                        </button>
 
-                    <input type="hidden" id="admin_branch" name="branch" value="CHE">
+                        <input type="hidden" id="admin_branch" name="branch" value="CHE">
+
+                        <input
+                            name="keyword"
+                            id="admin_keyword"
+                            placeholder="例如：108 / 姓名">
+                    </div>
+
+                    <div id="volunteer_lookup_result" class="lookup-text"></div>
+                </div>
+
+                {% for role in roles %}
+                <label class="role-btn">
 
                     <input
-                        name="keyword"
-                        id="admin_keyword"
-                        placeholder="例如：108 / 姓名"
-                        style="flex:1;">
+                        type="checkbox"
+                        name="roles"
+                        value="{{ role }}">
+
+                    {% if role == "值班" %}
+                        👷 值班
+                    {% elif role == "卫生" %}
+                        🧹 卫生
+                    {% elif role == "供台" %}
+                        🛕 供台
+                    {% else %}
+                        {{ role }}
+                    {% endif %}
+
+                </label>
+                {% endfor %}
+
+                <div class="form-row-large">
+                    <p>时间（只给值班用）</p>
+
+                    <div class="time-grid">
+                        <div>
+                            <label>开始</label>
+                            <select name="start_time" style="width:100%;">
+                            {% for t in times %}
+                                <option value="{{ t }}">{{ t }}</option>
+                            {% endfor %}
+                            </select>
+                        </div>
+
+                        <div>
+                            <label>结束</label>
+                            <select name="end_time" style="width:100%;">
+                            {% for t in times %}
+                                <option value="{{ t }}">{{ t }}</option>
+                            {% endfor %}
+                            </select>
+                        </div>
+                    </div>
                 </div>
 
-                <p>岗位</p>
-                <div class="role-box">
-                {% for role in roles %}
-                    <label>
-                        <input type="checkbox" name="roles" value="{{ role }}"> {{ role }}
-                    </label>
-                {% endfor %}
-                </div>
-
-                <p>时间（只给值班用）</p>
-
-                开始：
-                <select name="start_time">
-                {% for t in times %}
-                    <option value="{{ t }}">{{ t }}</option>
-                {% endfor %}
-                </select>
-
-                结束：
-                <select name="end_time">
-                {% for t in times %}
-                    <option value="{{ t }}">{{ t }}</option>
-                {% endfor %}
-                </select>
-
-                <br><br>
-
-                <button type="submit" class="action-btn">➕ 代报名</button>
+                <button type="submit" class="btn-tool btn-blue">➕ 加入报名</button>
             </form>
         </div>
 
-        <div class="sub-card">
-            <h4>📥 WhatsApp 报名解析</h4>
+        <div class="signup-divider"></div>
+
+        <div class="signup-block">
+            <h3>📥 WhatsApp 报名解析</h3>
 
             <form method="post" action="/schedule/parse_raw">
                 <input type="hidden" name="single_date" id="raw_single_date" value="{{ override_date }}">
 
                 <textarea
                     name="raw_signup"
-                    rows="10"
-                    style="font-size:22px;"
-                    placeholder="输入姓名 / 时间，例如：&#10;张三 10:00am-2:00pm&#10;李四 8:00am-12:00pm"
-                ></textarea>
+                    rows="8"
+                    placeholder="输入姓名 / 时间，例如：&#10;张三 10:00am-2:00pm&#10;李四 8:00am-12:00pm"></textarea>
 
                 <br><br>
 
-                <button type="submit" class="action-btn">📥 解析加入报名</button>
+                <button type="submit" class="btn-tool btn-blue">📥 解析加入报名</button>
             </form>
         </div>
 
     </div>
 </div>
 
+
+
     <div class="card">
-        <h3>🛕 佛台设置</h3>
+        <h2 class="section-title">⚙️ 特殊设置</h2>
 
         <div class="quick-actions">
-            <button type="button" class="quick-btn" onclick="showSpecial('master-table')">
+            <button type="button" class="btn-tool btn-gray" onclick="showSpecial('master-table')">
                 🛕 师父供台
                 <span class="helper-text">点击后自动跳到设置区</span>
             </button>
 
-            <button type="button" class="quick-btn" onclick="showSpecial('extra-buddha')">
+            <button type="button" class="btn-tool btn-gray" onclick="showSpecial('extra-buddha')">
                 🌸 初一补人
             </button>
 
-            <button type="button" class="quick-btn" onclick="showSpecial('buddha-leave')">
+            <button type="button" class="btn-tool btn-gray" onclick="showSpecial('buddha-leave')">
                 🔁 佛台请假
             </button>
         </div>
@@ -4575,13 +5246,25 @@ function showSpecial(id) {
 
                 <br><br>
 
-                <button type="submit" class="action-btn">💾 保存供台人员</button>
+                <button type="submit" class="btn-tool btn-blue">💾 保存供台人员</button>
             </form>
         </div>
 
         <!-- 2. 初一补人 -->
         <div id="extra-buddha" class="special-box" style="display:none;">
             <h3>🌸 初一整理佛台补人</h3>
+
+            <div class="info-box">
+                <b>🛕 当天负责整理佛台义工</b><br><br>
+
+                {% if fixed_buddha_today %}
+                    {% for n in fixed_buddha_today %}
+                        🟢 {{ n }}<br>
+                    {% endfor %}
+                {% else %}
+                    ⚪ 今天没有固定整理佛台义工
+                {% endif %}
+            </div>
 
             <form method="post" action="/schedule/save_day_flags">
                 <input type="hidden" name="date" value="{{ override_date }}">
@@ -4603,7 +5286,7 @@ function showSpecial(id) {
 
                 <br><br>
 
-                <button type="submit" class="action-btn">💾 保存初一补人</button>
+                <button type="submit" class="btn-tool btn-blue">💾 保存初一补人</button>
             </form>
         </div>
 
@@ -4634,19 +5317,158 @@ function showSpecial(id) {
                         </div>
                     {% endfor %}
 
-                    <button type="submit" class="action-btn">💾 保存佛台请假 / 换人</button>
+                    <button type="submit" class="btn-tool btn-blue">💾 保存佛台请假 / 换人</button>
                 {% else %}
                     <p style="font-size:22px;">这一天没有固定佛台。</p>
                 {% endif %}
             </form>
         </div>
     </div>
-    
+
+<div class="card">
+
+    <h2 class="section-title">⚙️ 报名开放控制</h2>
+
+    <table class="setting-table">
+
+        <!-- 多日报名 -->
+
+        <tr>
+            <td style="padding:12px 0;">
+                <b>📅 下个月多日报名</b><br>
+
+                {% if multi_day_signup_open %}
+                    <span style="color:green;font-weight:bold;">
+                        🟢 已开放
+                    </span>
+                {% else %}
+                    <span style="color:#999;font-weight:bold;">
+                        ⚪ 已关闭
+                    </span>
+                {% endif %}
+            </td>
+
+            <td style="text-align:right;white-space:nowrap;">
+
+                <form method="post"
+                      action="/schedule/toggle_setting"
+                      class="inline-form">
+
+                    <input type="hidden"
+                           name="key"
+                           value="multi_day_signup_open">
+
+                    <input type="hidden"
+                           name="force"
+                           value="true">
+
+                    <button class="btn-tool btn-green mini-btn">
+                        开启
+                    </button>
+
+                </form>
+
+                <form method="post"
+                      action="/schedule/toggle_setting"
+                      class="inline-form">
+
+                    <input type="hidden"
+                           name="key"
+                           value="multi_day_signup_open">
+
+                    <input type="hidden"
+                           name="force"
+                           value="false">
+
+                    <button class="btn-tool btn-red mini-btn">
+                        关闭
+                    </button>
+
+                </form>
+
+            </td>
+        </tr>
+
+        <tr>
+            <td colspan="2">
+                <hr>
+            </td>
+        </tr>
+
+        <!-- 膳食 -->
+
+        <tr>
+
+            <td style="padding:12px 0;">
+
+                <b>🍱 膳食组报名</b><br>
+
+                {% if meal_signup_open %}
+                    <span style="color:green;font-weight:bold;">
+                        🟢 已开放
+                    </span>
+                {% else %}
+                    <span style="color:#999;font-weight:bold;">
+                        ⚪ 已关闭
+                    </span>
+                {% endif %}
+
+            </td>
+
+            <td style="text-align:right;white-space:nowrap;">
+
+                <form method="post"
+                      action="/schedule/toggle_setting"
+                      class="inline-form">
+
+                    <input type="hidden"
+                           name="key"
+                           value="meal_signup_open">
+
+                    <input type="hidden"
+                           name="force"
+                           value="true">
+
+                    <button class="btn-tool btn-green mini-btn">
+                        开启
+                    </button>
+
+                </form>
+
+                <form method="post"
+                      action="/schedule/toggle_setting"
+                      class="inline-form">
+
+                    <input type="hidden"
+                           name="key"
+                           value="meal_signup_open">
+
+                    <input type="hidden"
+                           name="force"
+                           value="false">
+
+                    <button class="btn-tool btn-red mini-btn">
+                        关闭
+                    </button>
+
+                </form>
+
+            </td>
+
+        </tr>
+
+    </table>
+
 </div>
+
+
 
 {% else %}
 
-<h2 style="text-align:center;">请选择要做的功能</h2>
+<div class="card">
+    <h2 class="section-title center-text">请选择要做的功能</h2>
+    <p class="page-subtitle">建议先进入「当天安排」查看今日工作。</p>
+</div>
 
 {% endif %}
 
@@ -4667,6 +5489,14 @@ function toggleAdminBranch(){
     }
 }
 </script>
+<script>
+function goToScheduleDate(dateValue) {
+    if (!dateValue) return;
+
+    window.location.href =
+        "/schedule?mode=day&override_date=" + encodeURIComponent(dateValue);
+}
+</script>
 </body>
 </html>
 """
@@ -4678,64 +5508,114 @@ DAY_OUTPUT_HTML = """
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>排班结果</title>
+<title>正式值班表</title>
+
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
+
 <style>
-body {
-    font-family: "Microsoft YaHei";
-    background: #f5f5f5;
-    padding: 20px;
+
+.page-wrap{
+    max-width:1100px;
+    margin:auto;
+    padding:25px;
 }
-.box {
-    background: white;
-    max-width: 900px;
-    margin: auto;
-    padding: 25px;
-    border-radius: 15px;
+
+.output-box{
+    min-height:650px;
 }
-textarea {
-    width: 100%;
-    height: 600px;
-    font-size: 20px;
-    padding: 15px;
+
+.output-box textarea{
+    width:100%;
+    height:650px;
+
+    font-size:26px;
+    line-height:1.7;
+
+    padding:18px;
+
+    border-radius:16px;
+    border:2px solid #d6d6d6;
+
+    box-sizing:border-box;
+
+    resize:vertical;
 }
-button, a {
-    font-size: 22px;
-    padding: 10px 18px;
-    margin: 8px;
-}
-.copy-btn {
-    background: #4CAF50;
-    color: white;
-    border: none;
-}
+
 </style>
+
+<script>
+function copySchedule(){
+
+    const ta = document.getElementById("output");
+
+    if(!ta){
+        alert("❌ 找不到值班表内容");
+        return;
+    }
+
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, 999999);
+
+    const ok = document.execCommand("copy");
+
+    if(ok){
+        alert("✅ 已复制，可以贴去 WhatsApp 群");
+    }else{
+        alert("❌ 复制失败，请手动全选复制");
+    }
+}
+</script>
+
 </head>
+
 <body>
-<div class="box">
 
-<h1>📋 WhatsApp 值班表</h1>
+<div class="page-wrap">
 
-<a href="/schedule?mode=day">⬅ 返回</a>
+<div class="card">
 
-<br><br>
+    <h1 class="page-title">
+        📋 正式值班表
+    </h1>
 
-<button class="copy-btn" onclick="copyText()">📋 一键复制</button>
+    <p class="page-subtitle">
+        可直接复制到 WhatsApp 发布。
+    </p>
 
-<br><br>
+    <div class="btn-row">
 
-<textarea id="output">{{ output }}</textarea>
+        <a
+            class="btn-tool btn-gray"
+            href="/schedule?mode=day">
+
+            ⬅ 返回负责人首页
+
+        </a>
+
+        <button
+            type="button"
+            class="btn-tool btn-green"
+            onclick="copySchedule()">
+
+            📋 一键复制
+
+        </button>
+
+    </div>
+
+    <div class="output-box">
+
+        <textarea
+            id="output"
+            readonly>{{ output }}</textarea>
+
+    </div>
 
 </div>
 
-<script>
-function copyText() {
-    var text = document.getElementById("output");
-    text.select();
-    text.setSelectionRange(0, 99999);
-    document.execCommand("copy");
-    alert("✅ 已复制，可以直接贴去 WhatsApp");
-}
-</script>
+</div>
 
 </body>
 </html>
@@ -4749,48 +5629,37 @@ MONTHLY_PREBOOK_HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>月预报名表</title>
 
-<style>
-body {
-    font-family: "Microsoft YaHei", Arial;
-    background:#f5f5f5;
-    padding:20px;
-}
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
 
-.box {
-    background:white;
-    max-width:900px;
+<style>
+.page-wrap{
+    max-width:1100px;
     margin:auto;
     padding:25px;
-    border-radius:15px;
 }
 
-textarea {
+.output-box textarea{
     width:100%;
     height:650px;
-    font-size:20px;
-    padding:15px;
+    font-size:26px;
+    line-height:1.7;
+    padding:18px;
+    border-radius:16px;
+    border:2px solid #d6d6d6;
     box-sizing:border-box;
-}
-
-a, button {
-    font-size:22px;
-    padding:10px 18px;
-    margin:8px;
-    cursor:pointer;
+    resize:vertical;
 }
 </style>
 
 <script>
-function copyOutput(btn) {
-
-    const text =
-        document.getElementById("output").value;
-
+function copyOutput(btn){
+    const text = document.getElementById("output").value;
     navigator.clipboard.writeText(text);
 
     btn.innerText = "✅ 已复制";
 
-    setTimeout(() => {
+    setTimeout(function(){
         btn.innerText = "📋 一键复制";
     }, 2000);
 }
@@ -4800,19 +5669,35 @@ function copyOutput(btn) {
 
 <body>
 
-<div class="box">
+<div class="page-wrap">
 
-<h1>📢 月预报名表</h1>
+<div class="card">
 
-<a href="/schedule?mode=prebook">⬅ 返回月预报名</a>
+    <h1 class="page-title">📢 月预报名表</h1>
 
-<button onclick="copyOutput(this)">
-📋 一键复制
-</button>
+    <p class="page-subtitle">
+        可直接复制到 WhatsApp 群发布。
+    </p>
 
-<br><br>
+    <div class="btn-row">
 
-<textarea id="output" readonly>{{ output }}</textarea>
+        <a class="btn-tool btn-gray"
+           href="/schedule?mode=prebook">
+            ⬅ 返回月预报名
+        </a>
+
+        <button class="btn-tool btn-green"
+                onclick="copyOutput(this)">
+            📋 一键复制
+        </button>
+
+    </div>
+
+    <div class="output-box">
+        <textarea id="output" readonly>{{ output }}</textarea>
+    </div>
+
+</div>
 
 </div>
 

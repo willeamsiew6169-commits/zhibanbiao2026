@@ -12,6 +12,7 @@ from flask import send_file
 from psycopg2.extras import RealDictCursor
 from openpyxl.utils import get_column_letter
 from datetime import datetime, date, timedelta
+from schedule.builders.time_utils import malaysia_now
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from flask import Blueprint, request, render_template_string, redirect, url_for, flash, session, send_file
 
@@ -77,6 +78,20 @@ def check_missing_months(paid_months):
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
+
+def normalize_volunteer_id(keyword):
+    keyword = str(keyword).strip().upper()
+
+    if keyword.startswith("CHE-") or keyword.startswith("STW-"):
+        return keyword
+
+    if keyword.isdigit():
+        return f"CHE-{int(keyword)}"
+
+    return keyword
+
+def get_member_query_volunteer():
+    return session.get("member_query_volunteer")
 
 
 def normalize_member_id(raw):
@@ -149,8 +164,423 @@ def verify_member_pin(member, pin):
 
     return pin == default_pin
 
+
+from datetime import datetime
+import pandas as pd
+
+def parse_month(value):
+
+    if value is None or pd.isna(value):
+        return None
+
+    # Excel 日期
+    if isinstance(value, datetime):
+        return value.date().replace(day=1)
+
+    text = str(value).strip()
+
+    # Nov-24
+    for fmt in (
+        "%b-%y",
+        "%B-%y",
+        "%Y-%m",
+        "%Y/%m",
+    ):
+        try:
+            return datetime.strptime(text, fmt).date().replace(day=1)
+        except:
+            pass
+
+    # 最后再交给 pandas
+    return pd.to_datetime(text).date().replace(day=1)
+
+
+@member_bp.route("/query-logout")
+def member_query_logout():
+    session.pop("member_query_volunteer", None)
+    return redirect(url_for("member.member_query_login"))
+
+
+@member_bp.route("/query-login", methods=["GET", "POST"])
+def member_query_login():
+
+    error = None
+
+    if request.method == "POST":
+        keyword = request.form.get("volunteer_id", "").strip()
+        branch = request.form.get("branch", "CHE").strip().upper()
+
+        if keyword.isdigit():
+            volunteer_id = f"{branch}-{int(keyword)}"
+        else:
+            volunteer_id = normalize_volunteer_id(keyword)
+
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    select id, name, status
+                    from volunteers
+                    where id = %s
+                    limit 1
+                """, (volunteer_id,))
+
+                vol = cur.fetchone()
+
+        if not vol:
+            error = "找不到这个义工编号"
+        elif vol.get("status") != "在册":
+            error = "这个义工不是在册状态"
+        else:
+            session["member_query_volunteer"] = {
+                "id": str(vol["id"]),
+                "name": vol["name"]
+            }
+            return redirect(url_for("member.member_home"))
+
+    return render_template_string("""
+    <!doctype html>
+    <html>
+    <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>月费查询系统</title>
+
+    <style>
+    body {
+        margin: 0;
+        font-family: Arial, "Microsoft YaHei", sans-serif;
+        background: #f4f6f8;
+    }
+
+    .card {
+        max-width: 520px;
+        margin: 60px auto;
+        background: white;
+        padding: 35px;
+        border-radius: 18px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+    }
+
+    h1 {
+        margin-top: 0;
+        color: #7a0000;
+        font-size: 34px;
+    }
+
+    h2 {
+        font-size: 22px;
+        color: #333;
+    }
+
+    .branch-row {
+        display: flex;
+        gap: 12px;
+        margin: 20px 0;
+    }
+
+    .branch-btn {
+        flex: 1;
+        padding: 18px;
+        font-size: 26px;
+        font-weight: bold;
+        border: none;
+        border-radius: 14px;
+        cursor: pointer;
+        background: #ddd;
+        color: #333;
+    }
+
+    .branch-btn.active {
+        background: #7a0000;
+        color: white;
+    }
+
+    input {
+        width: 100%;
+        box-sizing: border-box;
+        font-size: 26px;
+        padding: 16px;
+        border-radius: 12px;
+        border: 1px solid #aaa;
+        margin-bottom: 18px;
+    }
+
+    button.submit-btn {
+        width: 100%;
+        font-size: 26px;
+        padding: 18px;
+        border: none;
+        border-radius: 14px;
+        background: #198754;
+        color: white;
+        font-weight: bold;
+        cursor: pointer;
+    }
+
+    .error {
+        background: #ffe5e5;
+        color: #b00020;
+        padding: 14px;
+        border-radius: 10px;
+        font-size: 20px;
+        margin-bottom: 15px;
+    }
+
+    .note {
+        color: #666;
+        font-size: 16px;
+    }
+    </style>
+    </head>
+
+    <body>
+
+    <div class="card">
+        <h1>月费查询系统</h1>
+        <h2>请先输入值班义工编号</h2>
+
+        {% if error %}
+            <div class="error">{{ error }}</div>
+        {% endif %}
+
+        <form method="post">
+            <input type="hidden" id="branch" name="branch" value="CHE">
+
+            <div class="branch-row">
+                <button type="button" id="btnCHE" class="branch-btn active" onclick="setBranch('CHE')">
+                    CHE
+                </button>
+                <button type="button" id="btnSTW" class="branch-btn" onclick="setBranch('STW')">
+                    STW
+                </button>
+            </div>
+
+            <input name="volunteer_id"
+                placeholder="例如：108"
+                required
+                autofocus>
+
+            <button class="submit-btn" type="submit">
+                进入查询
+            </button>
+
+            <p class="note">
+                系统会记录查询义工与查询次数，方便财政查看。
+            </p>
+        </form>
+    </div>
+
+    <script>
+    function setBranch(branch) {
+        document.getElementById("branch").value = branch;
+
+        document.getElementById("btnCHE").classList.remove("active");
+        document.getElementById("btnSTW").classList.remove("active");
+
+        document.getElementById("btn" + branch).classList.add("active");
+    }
+    </script>
+
+    </body>
+    </html>
+    """, error=error)
+
+
+@member_bp.route("/query-logs")
+def member_query_logs():
+
+    if not session.get("member_admin"):
+        return redirect(url_for("member.member_admin"))
+
+    mode = request.args.get("mode", "today")
+
+    where_sql = ""
+    params = []
+
+    if mode == "today":
+        where_sql = "where queried_at::date = current_date"
+    elif mode == "month":
+        where_sql = """
+            where date_trunc('month', queried_at)
+            = date_trunc('month', current_date)
+        """
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(f"""
+                select *
+                from member_query_logs
+                {where_sql}
+                order by queried_at desc
+                limit 300
+            """, params)
+
+            logs = cur.fetchall()
+
+            cur.execute(f"""
+                select
+                    volunteer_id,
+                    volunteer_name,
+                    count(*) as total
+                from member_query_logs
+                {where_sql}
+                group by volunteer_id, volunteer_name
+                order by total desc
+            """, params)
+
+            summary = cur.fetchall()
+
+        return render_template_string("""
+    <!doctype html>
+    <html lang="zh">
+    <head>
+    <meta charset="utf-8">
+    <title>月费查询记录</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <link rel="stylesheet"
+        href="{{ url_for('static', filename='css/toolbox.css') }}">
+
+    <style>
+    .log-filter-row{
+        display:grid;
+        grid-template-columns:repeat(4, 1fr);
+        gap:12px;
+    }
+
+    .query-log-page .section-title{
+        font-size:26px;
+        margin-bottom:16px;
+    }
+
+    .query-log-page .card{
+        padding:22px;
+    }
+
+    .query-log-page .btn-tool{
+        min-height:54px;
+        font-size:21px;
+    }
+
+    @media(max-width:700px){
+        .log-filter-row{
+            grid-template-columns:1fr;
+        }
+    }
+    </style>
+    </head>
+
+    <body>
+
+    <div class="page query-log-page">
+
+        <h1 class="page-title">🔍 月费查询记录</h1>
+        <p class="page-subtitle">查看义工查询佛友月费资料的记录</p>
+
+        <div class="card">
+            <div class="section-title">📅 筛选</div>
+
+            <div class="log-filter-row">
+                <a class="btn-tool {% if mode == 'today' %}btn-primary{% else %}btn-secondary{% endif %}"
+                href="/member/query-logs?mode=today">
+                    今天
+                </a>
+
+                <a class="btn-tool {% if mode == 'month' %}btn-primary{% else %}btn-secondary{% endif %}"
+                href="/member/query-logs?mode=month">
+                    本月
+                </a>
+
+                <a class="btn-tool {% if mode == 'all' %}btn-primary{% else %}btn-secondary{% endif %}"
+                href="/member/query-logs?mode=all">
+                    全部
+                </a>
+
+                <a class="btn-tool btn-warning"
+                href="/member/finance-upload">
+                    ← 返回管理中心
+                </a>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="section-title">👥 义工查询统计</div>
+
+            {% if summary %}
+            <div class="table-responsive">
+                <table class="record-table">
+                    <tr>
+                        <th>义工编号</th>
+                        <th>义工姓名</th>
+                        <th>查询次数</th>
+                    </tr>
+
+                    {% for s in summary %}
+                    <tr>
+                        <td>{{ s.volunteer_id }}</td>
+                        <td>{{ s.volunteer_name }}</td>
+                        <td>{{ s.total }}</td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
+            {% else %}
+            <div class="empty-state">
+                <div class="empty-title">暂无查询统计</div>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="card">
+            <div class="section-title">📋 详细记录</div>
+
+            {% if logs %}
+            <div class="table-responsive">
+                <table class="record-table">
+                    <tr>
+                        <th>时间</th>
+                        <th>查询义工</th>
+                        <th>佛友编号</th>
+                        <th>佛友姓名</th>
+                        <th>输入关键词</th>
+                        <th>IP</th>
+                    </tr>
+
+                    {% for r in logs %}
+                    <tr>
+                        <td>
+                        {{ (r.queried_at + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S") if r.queried_at else "-" }}
+                        </td>
+                        <td>{{ r.volunteer_id }} {{ r.volunteer_name }}</td>
+                        <td>{{ r.member_id }}</td>
+                        <td>{{ r.member_name }}</td>
+                        <td>{{ r.keyword }}</td>
+                        <td>{{ r.ip_address }}</td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
+            {% else %}
+            <div class="empty-state">
+                <div class="empty-title">暂无查询记录</div>
+            </div>
+            {% endif %}
+        </div>
+
+    </div>
+
+    </body>
+    </html>
+    """, logs=logs, summary=summary, mode=mode, timedelta=timedelta)
+
+
 @member_bp.route("/", methods=["GET", "POST"])
 def member_home():
+
+    query_volunteer = get_member_query_volunteer()
+
+    if not query_volunteer:
+        return redirect(url_for("member.member_query_login"))
+    
     member = None
     error = None
     paid_until = None
@@ -300,6 +730,34 @@ def member_home():
                     else:
                         real_member_id = member["member_id"]
 
+                        # ✅ 成功找到会员后，记录是谁查询了这个会员
+                        query_volunteer = get_member_query_volunteer()
+
+                        if query_volunteer:
+                            cur.execute("""
+                                insert into member_query_logs (
+                                    queried_at,
+                                    volunteer_id,
+                                    volunteer_name,
+                                    member_id,
+                                    member_name,
+                                    keyword,
+                                    ip_address,
+                                    user_agent
+                                )
+                                values (%s, %s, %s, %s, %s, %s, %s, %s)
+                            """, (
+                                malaysia_now(),
+                                query_volunteer["id"],
+                                query_volunteer["name"],
+                                member["member_id"],
+                                member["name"],
+                                raw_member_id or selected_member_id,
+                                request.remote_addr,
+                                request.headers.get("User-Agent", "")
+                            ))
+                            conn.commit()
+
                         summary, paid_until, payments = load_member_payment_data(
                             cur,
                             real_member_id
@@ -341,7 +799,8 @@ def member_home():
         paid_until=paid_until,
         summary=summary,
         payments=payments,
-        candidates=candidates
+        candidates=candidates,
+        query_volunteer=query_volunteer
     )
 
 @member_bp.route("/admin", methods=["GET", "POST"])
@@ -609,7 +1068,7 @@ def member_admin():
 def admin_late_members():
 
     if not session.get("member_admin"):
-        return redirect(url_for("member_bp.member_admin"))
+        return redirect(url_for("member.member_admin"))
 
     rows = db_query("""
         select
@@ -668,104 +1127,192 @@ def admin_late_members():
     total_amount = sum(r["reference_amount"] for r in rows)
 
     return render_template_string("""
-<h1>🌿 月费迟付名单</h1>
+    <!doctype html>
+    <html lang="zh">
+    <head>
+    <meta charset="utf-8">
+    <title>月费迟付名单</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
 
-<div style="display:flex; gap:20px; flex-wrap:wrap; margin-bottom:25px;">
-    <div style="padding:15px; border:1px solid #ddd; border-radius:8px; background:#f8f9fa;">
-        <b>总人数</b><br>
-        {{ rows|length }} 人
-    </div>
+    <link rel="stylesheet"
+        href="{{ url_for('static', filename='css/toolbox.css') }}">
 
-    <div style="padding:15px; border:1px solid #ddd; border-radius:8px; background:#f8f9fa;">
-        <b>参考金额</b><br>
-        RM {{ "{:,.2f}".format(total_amount) }}
-    </div>
+    <style>
+    .late-page .section-title{
+        font-size:26px;
+        margin-bottom:16px;
+    }
 
-    <div style="padding:15px; border-radius:8px; background:#e8f5e9;">
-        🟢 最近缴费<br>
-        {{ green_count }} 人
-    </div>
+    .late-page .card{
+        padding:22px;
+    }
 
-    <div style="padding:15px; border-radius:8px; background:#fff8e1;">
-        🟡 一段时间未缴费<br>
-        {{ yellow_count }} 人
-    </div>
+    .late-page .btn-tool{
+        min-height:54px;
+        font-size:21px;
+    }
 
-    <div style="padding:15px; border-radius:8px; background:#ffebee;">
-        🔴 较久未缴费<br>
-        {{ red_count }} 人
-    </div>
-</div>
+    .late-row-green{
+        background:#ecfdf5;
+    }
 
-<table border="1" cellpadding="8">
-    <tr>
-        <th>会员编号</th>
-        <th>姓名</th>
-        <th>电话</th>
-        <th>WhatsApp</th>
-        <th>已缴至</th>
-        <th>缴费间隔</th>
-        <th>参考金额</th>
-        <th>状态</th>
-        <th>最后付款日期</th>
-        <th>备注</th>
-    </tr>
+    .late-row-yellow{
+        background:#fffbeb;
+    }
 
-    {% for r in rows %}
-    <tr
-    {% if r.level == "green" %}
-        style="background:#e8f5e9;"
-    {% elif r.level == "yellow" %}
-        style="background:#fff8e1;"
-    {% elif r.level == "red" %}
-        style="background:#ffebee;"
-    {% endif %}
-    >
-        <td>{{ r.member_id }}</td>
-        <td>{{ r.name }}</td>
-        <td>{{ r.phone or "-" }}</td>
-        <td>
-            {% if r.wa_link %}
-                <a href="{{ r.wa_link }}" target="_blank">打开</a>
+    .late-row-red{
+        background:#fef2f2;
+    }
+
+    .floating-back{
+        position:fixed;
+        left:24px;
+        bottom:24px;
+        z-index:999;
+        padding:14px 22px;
+        border-radius:14px;
+        background:#4b5563;
+        color:white;
+        text-decoration:none;
+        font-size:18px;
+        font-weight:700;
+        box-shadow:0 8px 20px rgba(0,0,0,.18);
+    }
+
+    .floating-back:hover{
+        background:#374151;
+    }
+    </style>
+    </head>
+
+    <body>
+
+    <div class="page late-page">
+
+        <h1 class="page-title">🌿 月费迟付名单</h1>
+        <p class="page-subtitle">查看已过期月费会员，方便后续关怀联系</p>
+
+        <div class="card">
+            <div class="info-summary-grid">
+
+                <div class="info-summary-box">
+                    <div class="info-summary-title">总人数</div>
+                    <div class="info-summary-value">{{ rows|length }} 人</div>
+                </div>
+
+                <div class="info-summary-box">
+                    <div class="info-summary-title">参考金额</div>
+                    <div class="info-summary-value">RM {{ "{:,.2f}".format(total_amount) }}</div>
+                </div>
+
+                <div class="info-summary-box">
+                    <div class="info-summary-title">🟢 最近缴费</div>
+                    <div class="info-summary-value">{{ green_count }} 人</div>
+                </div>
+
+                <div class="info-summary-box">
+                    <div class="info-summary-title">🟡 一段时间未缴费</div>
+                    <div class="info-summary-value">{{ yellow_count }} 人</div>
+                </div>
+
+                <div class="info-summary-box">
+                    <div class="info-summary-title">🔴 较久未缴费</div>
+                    <div class="info-summary-value">{{ red_count }} 人</div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="section-title">📋 名单</div>
+
+            {% if rows %}
+            <div class="table-responsive">
+                <table class="record-table">
+                    <tr>
+                        <th>会员编号</th>
+                        <th>姓名</th>
+                        <th>电话</th>
+                        <th>WhatsApp</th>
+                        <th>已缴至</th>
+                        <th>缴费间隔</th>
+                        <th>参考金额</th>
+                        <th>状态</th>
+                        <th>最后付款日期</th>
+                        <th>备注</th>
+                    </tr>
+
+                    {% for r in rows %}
+                    <tr class="
+                        {% if r.level == 'green' %}
+                            late-row-green
+                        {% elif r.level == 'yellow' %}
+                            late-row-yellow
+                        {% elif r.level == 'red' %}
+                            late-row-red
+                        {% endif %}
+                    ">
+                        <td>{{ r.member_id }}</td>
+                        <td>{{ r.name }}</td>
+                        <td>{{ r.phone or "-" }}</td>
+                        <td>
+                            {% if r.wa_link %}
+                                <a class="btn-tool btn-success mini-btn"
+                                href="{{ r.wa_link }}"
+                                target="_blank">
+                                    打开
+                                </a>
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>{{ r.paid_until.strftime("%Y-%m") }}</td>
+                        <td>{{ r.late_months }} 个月</td>
+                        <td>RM {{ "%.2f"|format(r.reference_amount) }}</td>
+                        <td>
+                            {% if r.level == "green" %}
+                                🟢 最近缴费
+                            {% elif r.level == "yellow" %}
+                                🟡 一段时间未缴费
+                            {% else %}
+                                🔴 较久未缴费
+                            {% endif %}
+                        </td>
+                        <td>{{ r.last_payment_date or "-" }}</td>
+                        <td>{{ r.remark or "-" }}</td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
             {% else %}
-                -
+            <div class="empty-state">
+                <div class="empty-title">暂无迟付名单</div>
+                <div class="empty-text">目前没有需要列入迟付关怀的会员。</div>
+            </div>
             {% endif %}
-        </td>
-        <td>{{ r.paid_until.strftime("%Y-%m") }}</td>
-        <td>{{ r.late_months }} 个月</td>
-        <td>RM {{ "%.2f"|format(r.reference_amount) }}</td>
-        <td>
-            {% if r.level == "green" %}
-                🟢 最近缴费
-            {% elif r.level == "yellow" %}
-                🟡 一段时间未缴费
-            {% else %}
-                🔴 较久未缴费
-            {% endif %}
-        </td>
-        <td>{{ r.last_payment_date or "-" }}</td>
-        <td>{{ r.remark or "-" }}</td>
-    </tr>
-    {% endfor %}
-</table>
+        </div>
 
-<p>
-    <a href="{{ url_for('member.member_admin') }}">
-        返回月费管理员
+    </div>
+
+    <a class="floating-back"
+    href="{{ url_for('member.member_admin') }}">
+        ⬅ 返回月费管理员
     </a>
-</p>
-""",
-rows=rows,
-green_count=green_count,
-yellow_count=yellow_count,
-red_count=red_count,
-total_amount=total_amount
-)
+
+    </body>
+    </html>
+    """,
+    rows=rows,
+    green_count=green_count,
+    yellow_count=yellow_count,
+    red_count=red_count,
+    total_amount=total_amount
+    )
 
 @member_bp.route("/payment/edit/<int:payment_id>", methods=["GET", "POST"])
 def edit_member_payment(payment_id):
     if not session.get("member_admin"):
-        return redirect("/member/admin")
+        return redirect(url_for("member.member_admin"))
 
     error = None
 
@@ -855,7 +1402,7 @@ def edit_member_payment(payment_id):
 
                         conn.commit()
 
-                        return redirect(f"/member/admin?member_id={payment['member_id']}")
+                        return redirect(url_for("member.member_admin", member_id=payment["member_id"]))
 
         return render_template_string(
             PAYMENT_EDIT_HTML,
@@ -869,7 +1416,7 @@ def edit_member_payment(payment_id):
 @member_bp.route("/payment/history/<int:history_id>")
 def member_payment_history_detail(history_id):
     if not session.get("member_admin"):
-        return redirect("/member/admin")
+        return redirect(url_for("member.member_admin"))
 
     try:
         with get_conn() as conn:
@@ -952,111 +1499,153 @@ def member_admin_logout():
 def member_management():
 
     if not session.get("member_admin"):
-        return redirect("/member/admin")
+        return redirect(url_for("member.member_admin"))
 
     return render_template_string("""
-    <div style="
-        max-width:1000px;
-        margin:auto;
-        padding:20px;
-    ">
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>会员资料管理</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 
-        <h1 style="
-            text-align:center;
-            font-size:42px;
-            margin-bottom:30px;
-        ">
-            👤 会员资料管理
-        </h1>
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
 
-        <div style="
-            display:grid;
-            grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
-            gap:20px;
-        ">
+<style>
+.member-menu-grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+    gap:18px;
+}
 
-            <a href="/member/member-management/search"
-            style="
-                text-decoration:none;
-                background:#e8f0fe;
-                padding:25px;
-                border-radius:15px;
-                color:#111;
-                font-size:24px;
-                font-weight:bold;
-                display:block;
-            ">
-                🔍 查找 / 编辑会员
-                <br>
-                <small style="font-size:16px;">
-                    修改电话、PIN、备注等资料
-                </small>
+.member-menu-card{
+    display:block;
+    text-decoration:none;
+    border-radius:16px;
+    padding:24px;
+    color:#111827;
+    transition:.2s;
+}
+
+.member-menu-card:hover{
+    transform:translateY(-2px);
+}
+
+.member-menu-title{
+    font-size:24px;
+    font-weight:bold;
+    margin-bottom:10px;
+}
+
+.member-menu-desc{
+    font-size:16px;
+    color:#6b7280;
+    line-height:1.6;
+}
+
+.card-blue{
+    background:#eff6ff;
+}
+
+.card-green{
+    background:#ecfdf5;
+}
+
+.card-yellow{
+    background:#fffbeb;
+}
+
+.card-gray{
+    background:#f9fafb;
+}
+</style>
+
+</head>
+<body>
+
+<div class="page">
+
+    <h1 class="page-title">
+        👤 会员资料管理
+    </h1>
+
+    <p class="page-subtitle">
+        管理会员资料、下载资料、查看迟付名单
+    </p>
+
+    <div class="card">
+
+        <div class="member-menu-grid">
+
+            <a class="member-menu-card card-blue"
+               href="/member/member-management/search">
+
+                <div class="member-menu-title">
+                    🔍 查找 / 编辑会员
+                </div>
+
+                <div class="member-menu-desc">
+                    修改电话、PIN、备注、会员资料
+                </div>
+
             </a>
 
-            <a href="/member/download-members"
-            style="
-                text-decoration:none;
-                background:#e8f5e9;
-                padding:25px;
-                border-radius:15px;
-                color:#111;
-                font-size:24px;
-                font-weight:bold;
-                display:block;
-            ">
-                📥 下载会员资料 Excel
-                <br>
-                <small style="font-size:16px;">
+            <a class="member-menu-card card-green"
+               href="/member/download-members">
+
+                <div class="member-menu-title">
+                    📥 下载会员资料 Excel
+                </div>
+
+                <div class="member-menu-desc">
                     下载最新 members 主档
-                </small>
+                </div>
+
             </a>
 
-            <a href="/member/admin/late_members"
-            style="
-                text-decoration:none;
-                background:#fff8e1;
-                padding:25px;
-                border-radius:15px;
-                color:#111;
-                font-size:24px;
-                font-weight:bold;
-                display:block;
-            ">
-                ⚠️ 月费迟付名单
-                <br>
-                <small style="font-size:16px;">
-                    查看过期会员
-                </small>
+            <a class="member-menu-card card-yellow"
+               href="/member/admin/late_members">
+
+                <div class="member-menu-title">
+                    ⚠️ 月费迟付名单
+                </div>
+
+                <div class="member-menu-desc">
+                    查看已过期会员
+                </div>
+
             </a>
 
-            <a href="/member/member-management/add"
-                style="
-                    text-decoration:none;
-                    background:#f3f4f6;
-                    padding:25px;
-                    border-radius:15px;
-                    color:#111;
-                    font-size:24px;
-                    font-weight:bold;
-                    display:block;
-                ">
+            <a class="member-menu-card card-gray"
+               href="/member/member-management/add">
+
+                <div class="member-menu-title">
                     ➕ 新增会员
-                    <br>
-                    <small style="font-size:16px;">
-                        新增 CHE / STW 月费会员
-                    </small>
-                </a>
+                </div>
+
+                <div class="member-menu-desc">
+                    新增 CHE / STW 月费会员
+                </div>
+
+            </a>
 
         </div>
 
-        <p style="margin-top:30px;">
-            <a href="/member/admin">
-                ← 返回月费管理员
-            </a>
-        </p>
-
     </div>
-    """)
+
+    <div class="card">
+        <a class="btn-tool btn-secondary"
+           href="{{ url_for('member.member_admin') }}">
+            ← 返回月费管理员
+        </a>
+    </div>
+
+</div>
+
+</body>
+</html>
+""")
 
 @member_bp.route("/download-members")
 def download_members():
@@ -2105,36 +2694,33 @@ def finance_upload():
                             print("会员不存在：", member_id)
                             skipped += 1
                             continue
-                        
-                        member_info = db_query("""
-                            select name
-                            from members
-                            where member_id = %s
-                        """, (member_id,), fetchone=True)
-
-                        if not member_info:
-                            print("会员不存在：", member_id)
-                            skipped += 1
-                            continue
-
+                                                
                         system_name = member_info["name"]
 
                         excel_name = str(
                             row["捐款人\n姓名\nName"]
                         ).strip()
 
-                        if excel_name != system_name:
-                            print(
-                                f"姓名不一致：{member_id} | "
-                                f"Excel={excel_name} | "
-                                f"Members={system_name}"
-                            )
+                        name_warnings = {}
 
+                        if excel_name != system_name:
+                            name_warnings[member_id] = (
+                                f"{member_id}：Excel={excel_name}，Members={system_name}"
+                            )
+                                             
                         name = system_name
 
-                        payment_date = pd.to_datetime(row["日期\nDate"]).date()
-                        start_month = pd.to_datetime(row["START MONTH"]).date()
-                        end_month = pd.to_datetime(row["END MONTH"]).date()
+                        payment_date = pd.to_datetime(
+                            row["日期\nDate"]
+                        ).date()
+
+                        start_month = parse_month(
+                            row["START MONTH"]
+                        )
+
+                        end_month = parse_month(
+                            row["END MONTH"]
+                        )
 
                         month_count = int(row["No/ of Mth"])
                         amount = float(row["Total Amt"])
@@ -2179,6 +2765,16 @@ def finance_upload():
                         skipped += 1
 
                 msg = f"上传完成：读取 {len(df)} 行，新增 {inserted} 行，跳过 {skipped} 行。"
+
+                if name_warnings:
+
+                    print("=" * 60)
+                    print(f"发现 {len(name_warnings)} 位会员姓名不一致：")
+
+                    for w in sorted(name_warnings.values()):
+                        print(w)
+
+                    print("=" * 60)
 
             except Exception as e:
                 print("上传失败:", e)
@@ -2334,433 +2930,376 @@ def finance_upload():
         print("读取修改历史失败:", e)
 
     return render_template_string("""
-<!doctype html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<title>月费资料管理中心</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{
-    font-family:Arial,"Microsoft YaHei",sans-serif;
-    background:#f3f4f6;
-    margin:0;
-    padding:18px;
-}
-.box{
-    max-width:1100px;
-    margin:auto;
-    background:white;
-    padding:24px;
-    border-radius:18px;
-    box-shadow:0 3px 12px rgba(0,0,0,.08);
-}
-h1{
-    text-align:center;
-    font-size:42px;
-}
-.card{
-    background:#f8f9fa;
-    border:1px solid #ddd;
-    border-radius:14px;
-    padding:18px;
-    margin-top:18px;
-}
-label{
-    font-size:20px;
-    font-weight:bold;
-    display:block;
-    margin-top:14px;
-}
-input, select{
-    width:100%;
-    font-size:22px;
-    padding:12px;
-    border:1px solid #ccc;
-    border-radius:10px;
-    box-sizing:border-box;
-    margin-top:6px;
-}
-button,.btn{
-    display:inline-block;
-    width:100%;
-    text-align:center;
-    font-size:24px;
-    font-weight:bold;
-    padding:14px;
-    margin-top:18px;
-    border:0;
-    border-radius:12px;
-    background:#2d7ff9;
-    color:white;
-    text-decoration:none;
-    box-sizing:border-box;
-}
-.error{
-    background:#ffe5e5;
-    color:#a10000;
-    padding:14px;
-    border-radius:10px;
-    margin-bottom:12px;
-}
-.ok{
-    background:#e8f7e8;
-    color:#176b2c;
-    padding:14px;
-    border-radius:10px;
-    margin-bottom:12px;
-}
-.grid{
-    display:grid;
-    grid-template-columns:1fr 1fr;
-    gap:16px;
-}
-table{
-    width:100%;
-    border-collapse:collapse;
-    background:white;
-    margin-top:16px;
-}
-th,td{
-    border:1px solid #ddd;
-    padding:8px;
-    text-align:center;
-    font-size:15px;
-}
-th{background:#eee;}
-.edit{
-    background:#2d7ff9;
-    color:white;
-    padding:5px 10px;
-    border-radius:6px;
-    text-decoration:none;
-    font-size:14px;
-}
-.note{
-    background:#fff7d6;
-    color:#6b4b00;
-    padding:12px;
-    border-radius:10px;
-    margin-top:12px;
-}
-@media(max-width:700px){
-    .grid{grid-template-columns:1fr;}
-    h1{font-size:34px;}
-    th,td{font-size:12px;padding:5px;}
-}
-</style>
-</head>
-<body>
+    <!doctype html>
+    <html lang="zh">
+    <head>
+    <meta charset="utf-8">
+    <title>月费管理中心</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
 
-<div class="box">
+    <link rel="stylesheet"
+        href="{{ url_for('static', filename='css/toolbox.css') }}">
 
-    <a href="/member/admin">← 返回月费管理员</a>
+    <style>
+    .member-center .section-title{
+        font-size:26px;
+        margin-bottom:16px;
+    }
+    .member-center .card{
+        padding:22px;
+    }
+    .member-center .btn-tool{
+        min-height:54px;
+        font-size:21px;
+    }
+    .member-grid{
+        display:grid;
+        grid-template-columns:1fr 1fr;
+        gap:16px;
+    }
+    .month-grid{
+        display:grid;
+        grid-template-columns:repeat(4,1fr);
+        gap:10px;
+    }
+    .month-option{
+        display:flex;
+        align-items:center;
+        gap:8px;
+        font-size:20px;
+        font-weight:bold;
+        cursor:pointer;
+        padding:10px;
+        border:1px solid #e5e7eb;
+        border-radius:12px;
+        background:white;
+    }
+    .month-option input{
+        width:22px;
+        height:22px;
+    }
+    .search-row{
+        display:flex;
+        gap:10px;
+        align-items:center;
+    }
+    .branch-small-btn{
+        width:95px;
+        height:54px;
+        font-size:20px;
+        font-weight:bold;
+        background:#16a34a;
+        color:white;
+        border:none;
+        border-radius:12px;
+        cursor:pointer;
+        flex-shrink:0;
+    }
+    @media(max-width:700px){
+        .member-grid{
+            grid-template-columns:1fr;
+        }
+        .month-grid{
+            grid-template-columns:repeat(2,1fr);
+        }
+        .search-row{
+            align-items:stretch;
+        }
+    }
+    </style>
+    </head>
 
-    <h1>月费资料管理中心</h1>
+    <body>
 
-    {% if error %}
-        <div class="error">❌ {{ error }}</div>
-    {% endif %}
+    <div class="page member-center">
 
-    {% if msg %}
-        <div class="ok">✅ {{ msg }}</div>
-    {% endif %}
-
-    <div class="grid">
+        <h1 class="page-title">📂 月费管理中心</h1>
+        <p class="page-subtitle">上传、下载、搜索、检查月费资料</p>
 
         <div class="card">
-            <h2>① 上传单月 Excel</h2>
+            <a class="btn-tool btn-secondary" href="/member/admin">
+                ← 返回月费管理员
+            </a>
+        </div>
 
-            <form method="post" enctype="multipart/form-data">
-                <label>选择 Excel 文件</label>
-                <input name="file" type="file" accept=".xlsx,.xls" required>
+        {% if error %}
+        <div class="alert alert-danger">❌ {{ error }}</div>
+        {% endif %}
 
-                <button type="submit">上传 Excel</button>
-            </form>
+        {% if msg %}
+        <div class="alert alert-success">✅ {{ msg }}</div>
+        {% endif %}
 
-            <div class="note">
-                系统会保留旧数据，只导入这次 Excel 的新记录。重复收据编号会自动跳过。
+        <div class="member-grid">
+
+            <div class="card">
+                <div class="section-title">① 上传单月 Excel</div>
+
+                <form method="post" enctype="multipart/form-data">
+                    <div class="form-group">
+                        <label>选择 Excel 文件</label>
+                        <input class="form-input" name="file" type="file" accept=".xlsx,.xls" required>
+                    </div>
+
+                    <button class="btn-tool btn-primary" type="submit" style="width:100%;">
+                        ⬆️ 上传 Excel
+                    </button>
+                </form>
+
+                <div class="alert alert-warning">
+                    系统会保留旧数据，只导入新记录。重复收据编号会自动跳过。
+                </div>
             </div>
+
+            <div class="card">
+                <div class="section-title">② 下载月费 Excel</div>
+
+                <form method="get">
+                    <input type="hidden" name="download" value="1">
+
+                    <div class="form-group">
+                        <label>年份</label>
+                        <input class="form-input" name="year" value="{{ year }}">
+                    </div>
+
+                    <div class="form-group">
+                        <label>月份</label>
+                        <div class="small-text">不打勾 = 下载全年，可同时选择多个月</div>
+                    </div>
+
+                    <div class="month-grid">
+                        {% for m in range(1,13) %}
+                        <label class="month-option">
+                            <input
+                                type="checkbox"
+                                name="months"
+                                value="{{ '%02d'|format(m) }}"
+                            >
+                            {{ m }}月
+                        </label>
+                        {% endfor %}
+                    </div>
+
+                    <button class="btn-tool btn-primary" type="submit" style="width:100%;">
+                        ⬇️ 下载 Excel
+                    </button>
+                </form>
+            </div>
+
         </div>
 
         <div class="card">
-            <h2>② 下载月费 Excel</h2>
+            <div class="section-title">③ 搜索月费记录</div>
 
             <form method="get">
-                <input type="hidden" name="download" value="1">
+                <div class="form-group">
+                    <label>寻找编号 / 姓名 / 收据编号</label>
 
-                <label>年份</label>
-                <input name="year" value="{{ year }}">
+                    <div class="search-row">
+                        <button
+                            type="button"
+                            id="search_branch_btn"
+                            onclick="toggleSearchBranch()"
+                            class="branch-small-btn">
+                            {{ branch }}
+                        </button>
 
-                <label>月份</label>
+                        <input
+                            type="hidden"
+                            id="search_branch"
+                            name="branch"
+                            value="{{ branch }}">
 
-                <div style="
-                    color:#666;
-                    font-size:14px;
-                    margin-bottom:10px;
-                ">
-                    💡 不打勾 = 下载全年，可同时选择多个月
+                        <input
+                            class="form-input"
+                            name="q"
+                            value="{{ q }}"
+                            placeholder="例如：108 / 张三 / CHE0001493"
+                            style="flex:1;">
+                    </div>
                 </div>
 
-                <div style="
-                    display:grid;
-                    grid-template-columns:repeat(4,1fr);
-                    gap:12px;
-                ">
-
-                {% for m in range(1,13) %}
-
-                <label style="
-                    display:flex;
-                    align-items:center;
-                    gap:10px;
-                    font-size:28px;
-                    font-weight:bold;
-                    cursor:pointer;
-                    padding:12px;
-                    border:1px solid #ddd;
-                    border-radius:12px;
-                    background:white;
-                ">
-
-                    <input
-                        type="checkbox"
-                        name="months"
-                        value="{{ '%02d'|format(m) }}"
-                        style="
-                            width:28px;
-                            height:28px;
-                            cursor:pointer;
-                        "
-                    >
-
-                    {{ m }}月
-
-                </label>
-
-                {% endfor %}
-
-                </div>
-
-                <button type="submit">下载 Excel</button>
-            </form>
-        </div>
-
-    </div>
-                                  
-    
-    <div class="card">
-        <h2>③ 搜索月费记录</h2>
-
-        <form method="get">
-            <label>寻找编号 / 姓名 / 收据编号</label>
-
-            <div style="display:flex; gap:10px; align-items:center;">
-
-                <button
-                    type="button"
-                    id="search_branch_btn"
-                    onclick="toggleSearchBranch()"
-                    style="
-                        width:95px;
-                        height:58px;
-                        font-size:20px;
-                        font-weight:bold;
-                        background:#28a745;
-                        color:white;
-                        border:none;
-                        border-radius:12px;
-                        cursor:pointer;
-                        flex-shrink:0;
-                    ">
-                {{ branch }}
+                <button class="btn-tool btn-primary" type="submit" style="width:100%;">
+                    🔍 搜索记录
                 </button>
+            </form>
 
-                <input
-                    type="hidden"
-                    id="search_branch"
-                    name="branch"
-                    value="{{ branch }}">
-
-                <input
-                    name="q"
-                    value="{{ q }}"
-                    placeholder="例如：108 / 张三 / CHE0001493"
-                    style="flex:1;">
-
+            {% if q %}
+            <div class="section-title" style="margin-top:22px;">
+                搜索结果：{{ rows|length }} 笔
             </div>
 
-            <button type="submit">搜索记录</button>
-        </form>
-
-        {% if q %}
-            <h3>搜索结果：{{ rows|length }} 笔</h3>
-
             {% if rows %}
-            <table>
-                <tr>
-                    <th>付款日期</th>
-                    <th>月费编号</th>
-                    <th>姓名</th>
-                    <th>收据编号</th>
-                    <th>开始月份</th>
-                    <th>结束月份</th>
-                    <th>月数</th>
-                    <th>金额</th>
-                    <th>操作</th>
-                </tr>
+            <div class="table-responsive">
+                <table class="record-table">
+                    <tr>
+                        <th>付款日期</th>
+                        <th>月费编号</th>
+                        <th>姓名</th>
+                        <th>收据编号</th>
+                        <th>开始月份</th>
+                        <th>结束月份</th>
+                        <th>月数</th>
+                        <th>金额</th>
+                        <th>操作</th>
+                    </tr>
 
-                {% for r in rows %}
-                <tr>
-                    <td>{{ r.payment_date.strftime("%Y-%m-%d") if r.payment_date else "-" }}</td>
-                    <td>{{ r.member_id }}</td>
-                    <td>{{ r.name }}</td>
-                    <td>{{ r.receipt_no }}</td>
-                    <td>{{ r.start_month.strftime("%Y-%m") if r.start_month else "-" }}</td>
-                    <td>{{ r.end_month.strftime("%Y-%m") if r.end_month else "-" }}</td>
-                    <td>{{ r.month_count }}</td>
-                    <td>RM {{ "%.2f"|format(r.amount or 0) }}</td>
-                    <td>
-                        <a class="edit" href="/member/payment/edit/{{ r.id }}">✏ 编辑</a>
-                    </td>
-                </tr>
-                {% endfor %}
-            </table>
+                    {% for r in rows %}
+                    <tr>
+                        <td>{{ r.payment_date.strftime("%Y-%m-%d") if r.payment_date else "-" }}</td>
+                        <td>{{ r.member_id }}</td>
+                        <td>{{ r.name }}</td>
+                        <td>{{ r.receipt_no }}</td>
+                        <td>{{ r.start_month.strftime("%Y-%m") if r.start_month else "-" }}</td>
+                        <td>{{ r.end_month.strftime("%Y-%m") if r.end_month else "-" }}</td>
+                        <td>{{ r.month_count }}</td>
+                        <td>RM {{ "%.2f"|format(r.amount or 0) }}</td>
+                        <td>
+                            <a class="btn-tool btn-primary mini-btn"
+                            href="/member/payment/edit/{{ r.id }}">
+                                ✏ 编辑
+                            </a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
             {% else %}
-                <div class="note">找不到相关记录。</div>
+            <div class="empty-state">
+                <div class="empty-title">找不到相关记录</div>
+            </div>
             {% endif %}
-        {% endif %}
-    </div>
-
-    <div class="card">
-        <h2>④ 修改历史 History</h2>
-
-        {% if history_rows %}
-        <table>
-            <tr>
-                <th>时间</th>
-                <th>会员编号</th>
-                <th>收据编号</th>
-                <th>动作</th>
-                <th>修改者</th>
-                <th>详情</th>
-            </tr>
-
-            {% for h in history_rows %}
-            <tr>
-                <td>{{ (h.changed_at + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M") if h.changed_at else "-" }}</td>
-                <td>{{ h.member_id }}</td>
-                <td>{{ h.receipt_no }}</td>
-                <td>{{ h.action }}</td>
-                <td>{{ h.changed_by }}</td>
-                <td>
-                    <a class="edit" href="/member/payment/history/{{ h.id }}">查看详情</a>
-                </td>
-            </tr>
-            {% endfor %}
-        </table>
-        {% else %}
-        <div class="note">暂时没有修改记录。</div>
-        {% endif %}
-    </div>
-
-    <div class="card">
-        <h2>⑤ 月费安全检查</h2>
-
-        {% if safety_issues %}
-
-        <div class="error">
-            ⚠️ 发现 {{ safety_issues|length }} 个问题
+            {% endif %}
         </div>
 
-        <table>
-        <tr>
-            <th>类型</th>
-            <th>问题</th>
-            <th>操作</th>
-        </tr>
+        <div class="card">
+            <div class="section-title">④ 修改历史</div>
 
-        {% for s in safety_issues %}
-        <tr>
+            {% if history_rows %}
+            <div class="table-responsive">
+                <table class="record-table">
+                    <tr>
+                        <th>时间</th>
+                        <th>会员编号</th>
+                        <th>收据编号</th>
+                        <th>动作</th>
+                        <th>修改者</th>
+                        <th>详情</th>
+                    </tr>
 
-            <td>{{ s.type }}</td>
+                    {% for h in history_rows %}
+                    <tr>
+                        <td>{{ (h.changed_at + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M") if h.changed_at else "-" }}</td>
+                        <td>{{ h.member_id }}</td>
+                        <td>{{ h.receipt_no }}</td>
+                        <td>{{ h.action }}</td>
+                        <td>{{ h.changed_by }}</td>
+                        <td>
+                            <a class="btn-tool btn-primary mini-btn"
+                            href="/member/payment/history/{{ h.id }}">
+                                查看详情
+                            </a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
+            {% else %}
+            <div class="empty-state">
+                <div class="empty-title">暂时没有修改记录</div>
+            </div>
+            {% endif %}
+        </div>
 
-            <td>{{ s.detail }}</td>
+        <div class="card">
+            <div class="section-title">⑤ 月费安全检查</div>
 
-            <td>
+            {% if safety_issues %}
+            <div class="alert alert-danger">
+                ⚠️ 发现 {{ safety_issues|length }} 个问题
+            </div>
 
-                {% if s.payment_id %}
-                <a class="edit"
-                href="/member/payment/edit/{{ s.payment_id }}">
-                ✏ 编辑
+            <div class="table-responsive">
+                <table class="record-table">
+                    <tr>
+                        <th>类型</th>
+                        <th>问题</th>
+                        <th>操作</th>
+                    </tr>
+
+                    {% for s in safety_issues %}
+                    <tr>
+                        <td>{{ s.type }}</td>
+                        <td>{{ s.detail }}</td>
+                        <td>
+                            {% if s.payment_id %}
+                            <a class="btn-tool btn-primary mini-btn"
+                            href="/member/payment/edit/{{ s.payment_id }}">
+                                ✏ 编辑
+                            </a>
+                            {% else %}
+                            -
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
+            {% else %}
+            <div class="alert alert-success">
+                ✅ 没有发现问题
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="card">
+            <div class="section-title">⑥ 其他管理</div>
+
+            <div class="member-grid">
+                <a class="btn-tool btn-primary" href="/member/member-management">
+                    👤 会员资料管理
                 </a>
-                {% else %}
-                -
-                {% endif %}
 
-            </td>
-
-        </tr>
-        {% endfor %}
-
-        </table>
-
-        {% else %}
-
-        <div class="ok">
-            ✅ 没有发现问题
+                <a class="btn-tool btn-purple" href="/member/query-logs">
+                    🔍 月费查询记录
+                </a>
+            </div>
         </div>
 
-        {% endif %}
-    </div>
-                                  
-    <div class="card">
-        <h2>⑥ 会员资料管理</h2>
-
-        <a class="btn"
-        href="/member/member-management">
-        👤 会员资料管理
-        </a>
-
     </div>
 
-</div>
+    <script>
+    function toggleSearchBranch(){
 
-<script>
+        const btn = document.getElementById("search_branch_btn");
+        const branch = document.getElementById("search_branch");
 
-function toggleSearchBranch(){
-
-    const btn = document.getElementById("search_branch_btn");
-    const branch = document.getElementById("search_branch");
-
-    if(branch.value==="CHE"){
-        branch.value="STW";
-        btn.innerText="STW";
-        btn.style.background="#dc3545";
-    }else{
-        branch.value="CHE";
-        btn.innerText="CHE";
-        btn.style.background="#28a745";
+        if(branch.value==="CHE"){
+            branch.value="STW";
+            btn.innerText="STW";
+            btn.style.background="#dc2626";
+        }else{
+            branch.value="CHE";
+            btn.innerText="CHE";
+            btn.style.background="#16a34a";
+        }
     }
+    </script>
 
-}
-
-</script>
-
-</body>
-</html>
-""",
-error=error,
-msg=msg,
-rows=rows,
-q=q,
-year=year,
-branch=branch,
-months=months,
-timedelta=timedelta,
-safety_issues=safety_issues,
-history_rows=history_rows
-)
+    </body>
+    </html>
+    """,
+    error=error,
+    msg=msg,
+    rows=rows,
+    q=q,
+    year=year,
+    branch=branch,
+    months=months,
+    timedelta=timedelta,
+    safety_issues=safety_issues,
+    history_rows=history_rows
+    )
 
 MEMBER_HTML = """
 <!doctype html>
@@ -2769,228 +3308,202 @@ MEMBER_HTML = """
 <meta charset="utf-8">
 <title>月费查询</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="manifest" href="/member-manifest.json">
+<link rel="icon" href="/static/member_icon.png?v=1">
+
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
+
 <style>
-body{
-    font-family: Arial, "Microsoft YaHei", sans-serif;
-    background:#f3f4f6;
-    margin:0;
-    padding:14px;
+.member-search-row{
+    display:flex;
+    gap:10px;
+    align-items:center;
 }
-.box{
-    max-width:1100px;
-    margin:auto;
-    background:white;
-    padding:22px;
-    border-radius:18px;
-    box-shadow:0 3px 12px rgba(0,0,0,.08);
-}
-.back{
-    display:inline-block;
-    margin-bottom:12px;
-    text-decoration:none;
-    color:#555;
-    font-size:22px;
-}
-.admin-link{
-    text-align:right;
-    margin-bottom:8px;
-}
-.admin-link a{
-    font-size:13px;
-    color:#aaa;
-    text-decoration:none;
-}
-h1{
-    text-align:center;
-    margin:8px 0 24px;
-    font-size:46px;
-}
-label{
-    font-weight:bold;
-    font-size:28px;
-    display:block;
-    margin-top:18px;
-}
-input{
-    width:100%;
-    font-size:32px;
-    padding:18px;
-    box-sizing:border-box;
-    border:1px solid #ccc;
-    border-radius:12px;
-    margin-top:8px;
-}
-button{
-    width:100%;
-    margin-top:24px;
-    font-size:36px;
-    padding:22px;
+.branch-btn{
+    width:100px;
+    min-height:64px;
+    font-size:24px;
+    font-weight:800;
     border:0;
-    border-radius:14px;
-    background:#2d7ff9;
-    color:white;
-    font-weight:bold;
-}
-.error{
-    background:#ffe5e5;
-    color:#a10000;
-    padding:16px;
-    border-radius:12px;
-    margin-bottom:16px;
-    font-size:22px;
-}
-.result{
-    margin-top:24px;
-    background:#eef8ee;
-    padding:20px;
     border-radius:16px;
+    color:white;
+    background:#16a34a;
+    flex-shrink:0;
+    cursor:pointer;
 }
-.record-card{
-    background:white;
-    border-radius:14px;
-    padding:14px;
-    margin-top:10px;
-    border:1px solid #ddd;
-    font-size:20px;
-}
-.member-card{
-    margin-top:20px;
-    padding:18px;
-    background:#f7f7f7;
-    border-radius:12px;
-}
-.member-title{
+.member-title-line{
     font-size:30px;
-    font-weight:bold;
-    margin-bottom:8px;
+    font-weight:800;
 }
-.member-title small{
-    font-size:22px;
-    color:#222;
-    font-weight:600;
-}
-.member-info{
-    font-size:17px;
-    line-height:1.7;
-}
-.summary-grid{
-    display:grid;
-    grid-template-columns:repeat(3, 1fr);
-    gap:12px;
-    margin-top:18px;
-}
-.summary-box{
-    background:white;
-    border:1px solid #ddd;
-    border-radius:12px;
-    padding:14px 16px;
-}
-.summary-title{
+.member-sub{
     color:#666;
     font-size:16px;
-}
-.summary-value{
-    font-size:24px;
-    font-weight:bold;
     margin-top:6px;
 }
-.last-payment-box{
-    margin-top:12px;
-    background:white;
-    border:1px solid #ddd;
-    border-radius:12px;
-    padding:14px 16px;
-}
-table{
+.record-table{
     width:100%;
     border-collapse:collapse;
-    margin-top:18px;
     background:white;
+    margin-top:14px;
 }
-th,td{
-    border:1px solid #ddd;
+.record-table th,
+.record-table td{
+    border:1px solid #e5e7eb;
     padding:10px;
     text-align:center;
-    font-size:16px;
+    font-size:15px;
 }
-th{
-    background:#eeeeee;
+.record-table th{
+    background:#f3f4f6;
 }
-.no-record{
+.candidate-card{
+    background:white;
+    border:1px solid #e5e7eb;
+    border-radius:16px;
+    padding:16px;
+    margin-top:12px;
+}
+
+.member-summary-grid{
+    grid-template-columns:repeat(3, 1fr);
     margin-top:18px;
-    background:#fff4d6;
-    padding:14px;
-    border-radius:10px;
-    color:#7a4b00;
-    font-size:18px;
 }
+
+.member-summary-box{
+    text-align:left;
+    box-shadow:none;
+    border:1px solid #e5e7eb;
+    padding:16px 18px;
+}
+
+.member-summary-value{
+    font-size:26px;
+    color:#111827;
+}
+
+.member-last-payment{
+    margin-top:14px;
+}
+
 @media(max-width:700px){
-    h1{font-size:36px;}
-    .summary-grid{grid-template-columns:1fr;}
-    th,td{font-size:13px;padding:6px;}
+    .member-summary-grid{
+        grid-template-columns:1fr;
+    }
+
+    .member-summary-value{
+        font-size:24px;
+    }
+}
+
+@media(max-width:700px){
+    .member-search-row{
+        align-items:stretch;
+    }
+    .branch-btn{
+        width:82px;
+        font-size:21px;
+    }
+    .record-table th,
+    .record-table td{
+        font-size:12px;
+        padding:6px;
+    }
+    .member-title-line{
+        font-size:24px;
+    }
 }
 </style>
 </head>
+
 <body>
 
-<div class="box">
-    <div class="admin-link">
-        <a href="/member/admin">⚙ 管理员入口</a>
+<div class="page">
+
+    <div class="btn-row" style="justify-content:space-between;">
+        <a class="btn-tool btn-light" href="/member/admin">⚙ 管理员入口</a>
     </div>
 
-    <h1>月费查询</h1>
+    <h1 class="page-title">🙏 月费查询</h1>
+    <p class="page-subtitle">请输入月费编号、姓名、英文名或电话查询供养记录</p>
+
+    {% if query_volunteer %}
+    <div class="alert alert-warning">
+        当前查询义工：
+        <b>{{ query_volunteer.id }} {{ query_volunteer.name }}</b>
+
+        <div style="margin-top:12px;">
+            <a class="btn-tool btn-danger" href="/member/query-logout">
+                🔒 退出查询
+            </a>
+        </div>
+    </div>
+    {% endif %}
 
     {% if error %}
-    <div class="error">❌ {{ error }}</div>
+    <div class="alert alert-danger">
+        ❌ {{ error }}
+    </div>
     {% endif %}
-    
-    <form method="post">
-        <label>月费编号 / 姓名 / 英文名 / 电话</label>
 
-        <div style="display:flex; gap:10px; align-items:center;">
-            <button
-                type="button"
-                id="branch_btn"
-                onclick="toggleBranch()"
-                style="width:100px;height:70px;font-size:24px;font-weight:bold;background:#28a745;color:white;border:none;border-radius:14px;cursor:pointer;flex-shrink:0;">
-                CHE
+    <div class="card">
+        <div class="section-title">🔍 查询资料</div>
+
+        <form method="post">
+            <div class="form-group">
+                <label>月费编号 / 姓名 / 英文名 / 电话</label>
+
+                <div class="member-search-row">
+                    <button
+                        type="button"
+                        id="branch_btn"
+                        class="branch-btn"
+                        onclick="toggleBranch()"
+                    >
+                        CHE
+                    </button>
+
+                    <input type="hidden" id="branch" name="branch" value="CHE">
+
+                    <input
+                        class="form-input"
+                        id="member_id"
+                        name="member_id"
+                        placeholder="例如：108 / 张三 / 0123456789"
+                        autocomplete="off"
+                        required
+                    >
+                </div>
+            </div>
+
+            <button class="btn-tool btn-primary" type="submit" style="width:100%;">
+                🔍 查询
             </button>
-
-            <input type="hidden" id="branch" name="branch" value="CHE">
-
-            <input
-                id="member_id"
-                name="member_id"
-                placeholder="例如：108 / 张三 / 0123456789"
-                autocomplete="off"
-                required
-                style="flex:1;"
-            >
-        </div>
-
-        <button type="submit">查询</button>
-    </form>
+        </form>
+    </div>
 
     {% if candidates %}
-    <div class="result">
-        <h3>找到多位会员，请选择</h3>
+    <div class="card">
+        <div class="section-title">👥 找到多位会员，请选择</div>
 
         <form method="post">
             {% for m in candidates %}
-            <div class="record-card">
-                <div><b>{{ m.member_id }}</b></div>
-                <div>{{ m.name }}</div>
-
-                {% if m.english_name %}
-                <div>{{ m.english_name }}</div>
-                {% endif %}
-
-                <div>{{ m.phone or "-" }}</div>
+            <div class="candidate-card">
+                <div class="member-title-line">{{ m.name }}</div>
+                <div class="member-sub">
+                    编号：<b>{{ m.member_id }}</b><br>
+                    {% if m.english_name %}
+                    英文名：{{ m.english_name }}<br>
+                    {% endif %}
+                    电话：{{ m.phone or "-" }}
+                </div>
 
                 <button
+                    class="btn-tool btn-primary"
                     type="submit"
                     name="selected_member_id"
                     value="{{ m.member_id }}"
+                    style="width:100%;margin-top:12px;"
                 >
                     查看这个会员
                 </button>
@@ -3001,35 +3514,41 @@ th{
     {% endif %}
 
     {% if member %}
-    <div class="member-card">
+    <div class="card">
+        <div class="section-title">👤 会员资料</div>
 
-        <div class="member-title">
+        <div class="member-title-line">
             {{ member.name }}
-            <small>｜月费编号：{{ member.member_id }}</small>
         </div>
 
-        <div class="member-info">
+        <div class="member-sub">
+            月费编号：<b>{{ member.member_id }}</b><br>
             {% if member.english_name %}
-                英文名：{{ member.english_name }}<br>
+            英文名：{{ member.english_name }}<br>
             {% endif %}
             电话：{{ member.phone or "-" }}
         </div>
 
         {% if summary %}
-        <div class="summary-grid">
-            <div class="summary-box">
+        <div class="summary-grid member-summary-grid">
+
+            <div class="summary-box member-summary-box">
                 <div class="summary-title">已付月费总额</div>
-                <div class="summary-value">RM {{ "%.2f"|format(summary.total_payment or 0) }}</div>
+                <div class="summary-value member-summary-value">
+                    RM {{ "%.2f"|format(summary.total_payment or 0) }}
+                </div>
             </div>
 
-            <div class="summary-box">
+            <div class="summary-box member-summary-box">
                 <div class="summary-title">累计已付月数</div>
-                <div class="summary-value">{{ summary.total_months or 0 }} 个月</div>
+                <div class="summary-value member-summary-value">
+                    {{ summary.total_months or 0 }} 个月
+                </div>
             </div>
 
-            <div class="summary-box">
+            <div class="summary-box member-summary-box">
                 <div class="summary-title">月费已缴至</div>
-                <div class="summary-value">
+                <div class="summary-value member-summary-value">
                     {% if summary.paid_until %}
                         {{ summary.paid_until.strftime("%Y-%m") }}
                     {% else %}
@@ -3040,10 +3559,9 @@ th{
 
         </div>
 
-        <div class="last-payment-box">
+        <div class="card-soft member-last-payment">
             <div class="summary-title">最后付款记录</div>
-
-            <div class="summary-value">
+            <div class="summary-value member-summary-value">
                 {% if summary.last_payment_date %}
                     {{ summary.last_payment_date.strftime("%Y-%m-%d") }}
                     ｜RM {{ "%.2f"|format(summary.last_payment_amount or 0) }}
@@ -3053,34 +3571,37 @@ th{
             </div>
         </div>
         {% endif %}
+    </div>
+
+    <div class="card">
+        <div class="section-title">📋 缴费记录</div>
 
         {% if payments %}
-        <h3>缴费记录</h3>
+        <div style="overflow-x:auto;">
+            <table class="record-table">
+                <tr>
+                    <th>付款日期</th>
+                    <th>收据编号</th>
+                    <th>开始月份</th>
+                    <th>结束月份</th>
+                    <th>月数</th>
+                    <th>金额</th>
+                </tr>
 
-        <table>
-            <tr>
-                <th>付款日期</th>
-                <th>收据编号</th>
-                <th>开始月份</th>
-                <th>结束月份</th>
-                <th>月数</th>
-                <th>金额</th>
-            </tr>
-
-            {% for p in payments %}
-            <tr>
-                <td>{{ p.payment_date.strftime("%Y-%m-%d") if p.payment_date else "-" }}</td>
-                <td>{{ p.receipt_no }}</td>
-                <td>{{ p.start_month.strftime("%Y-%m") if p.start_month else "-" }}</td>
-                <td>{{ p.end_month.strftime("%Y-%m") if p.end_month else "-" }}</td>
-                <td>{{ p.month_count }}</td>
-                <td>RM {{ "%.2f"|format(p.amount or 0) }}</td>
-            </tr>
-            {% endfor %}
-        </table>
-
+                {% for p in payments %}
+                <tr>
+                    <td>{{ p.payment_date.strftime("%Y-%m-%d") if p.payment_date else "-" }}</td>
+                    <td>{{ p.receipt_no }}</td>
+                    <td>{{ p.start_month.strftime("%Y-%m") if p.start_month else "-" }}</td>
+                    <td>{{ p.end_month.strftime("%Y-%m") if p.end_month else "-" }}</td>
+                    <td>{{ p.month_count }}</td>
+                    <td>RM {{ "%.2f"|format(p.amount or 0) }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
         {% else %}
-        <div class="no-record">
+        <div class="empty-state">
             这个会员目前没有缴费记录。
         </div>
         {% endif %}
@@ -3088,6 +3609,7 @@ th{
     {% endif %}
 
 </div>
+
 <script>
 function toggleBranch() {
     const btn = document.getElementById("branch_btn");
@@ -3096,14 +3618,15 @@ function toggleBranch() {
     if (branch.value === "CHE") {
         branch.value = "STW";
         btn.innerText = "STW";
-        btn.style.background = "#dc3545";
+        btn.style.background = "#dc2626";
     } else {
         branch.value = "CHE";
         btn.innerText = "CHE";
-        btn.style.background = "#28a745";
+        btn.style.background = "#16a34a";
     }
 }
 </script>
+
 </body>
 </html>
 """
@@ -3115,300 +3638,226 @@ MEMBER_ADMIN_HTML = """
 <meta charset="utf-8">
 <title>月费管理员</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
+
 <style>
-body{
-    font-family:Arial,"Microsoft YaHei",sans-serif;
-    background:#f5f5f5;
-    margin:0;
-    padding:20px;
-}
-.box{
-    max-width:1100px;
-    margin:auto;
-    background:white;
-    padding:24px;
-    border-radius:16px;
-    box-shadow:0 2px 10px rgba(0,0,0,.08);
-}
-a{
-    text-decoration:none;
-    color:#555;
-}
-h1{
-    text-align:center;
-    font-size:42px;
-}
-label{
-    font-weight:bold;
-    font-size:24px;
-    display:block;
-    margin-top:14px;
-}
-input{
-    width:100%;
-    font-size:26px;
-    padding:14px;
-    box-sizing:border-box;
-    border:1px solid #ccc;
-    border-radius:10px;
-    margin-top:6px;
-}
-button{
-    width:100%;
-    margin-top:20px;
-    font-size:30px;
-    padding:16px;
-    border:0;
-    border-radius:12px;
-    background:#2d7ff9;
-    color:white;
-    font-weight:bold;
-}
-.error{
-    background:#ffe5e5;
-    color:#a10000;
-    padding:12px;
-    border-radius:10px;
-    margin-bottom:12px;
-}
-.ok{
-    background:#e8f5e9;
-    color:#176b2c;
-    padding:12px;
-    border-radius:10px;
-    margin-bottom:15px;
-    font-size:18px;
-    font-weight:bold;
-}
-.warning{
-    background:#fff3cd;
-    border:1px solid #ffecb5;
-    color:#664d03;
-    padding:14px;
-    border-radius:10px;
-    margin-top:18px;
-}
-.member-card{
-    margin-top:20px;
-    padding:18px;
-    background:#f7f7f7;
-    border-radius:12px;
-}
-.member-title{
-    font-size:30px;
-    font-weight:bold;
-    margin-bottom:8px;
-}
-.member-title small{
-    font-size:22px;
-    color:#222;
-    font-weight:600;
-}
-.member-info{
-    font-size:17px;
-    line-height:1.7;
-}
-.summary-grid{
+.admin-link-grid{
     display:grid;
     grid-template-columns:repeat(3, 1fr);
     gap:12px;
-    margin-top:18px;
 }
-.summary-box{
-    background:white;
-    border:1px solid #ddd;
-    border-radius:12px;
-    padding:14px 16px;
+
+.member-search-row{
+    display:flex;
+    gap:10px;
+    align-items:center;
 }
-.summary-title{
-    color:#666;
-    font-size:16px;
-}
-.summary-value{
+
+.branch-btn{
+    width:100px;
+    min-height:64px;
     font-size:24px;
-    font-weight:bold;
-    margin-top:6px;
+    font-weight:800;
+    border:0;
+    border-radius:16px;
+    color:white;
+    background:#16a34a;
+    flex-shrink:0;
+    cursor:pointer;
 }
-.last-payment-box{
-    margin-top:12px;
-    background:white;
-    border:1px solid #ddd;
-    border-radius:12px;
-    padding:14px 16px;
-}
-table{
-    width:100%;
-    border-collapse:collapse;
-    margin-top:18px;
-    background:white;
-}
-th,td{
-    border:1px solid #ddd;
-    padding:10px;
-    text-align:center;
-    font-size:16px;
-}
-th{
-    background:#eeeeee;
-}
-.no-record{
-    margin-top:18px;
-    background:#fff4d6;
-    padding:14px;
-    border-radius:10px;
-    color:#7a4b00;
-}
+
 .pagination{
     margin-top:20px;
     text-align:center;
 }
+
 .pagination a,
 .pagination span{
     display:inline-block;
     padding:8px 13px;
     margin:3px;
-    border-radius:6px;
+    border-radius:8px;
     text-decoration:none;
     font-size:16px;
 }
+
 .pagination a{
-    background:#eee;
+    background:#e5e7eb;
     color:#333;
 }
+
 .pagination span{
-    background:#2d7ff9;
+    background:#2563eb;
     color:white;
     font-weight:bold;
 }
+
 @media(max-width:700px){
-    h1{font-size:34px;}
-    .summary-grid{grid-template-columns:1fr;}
-    th,td{font-size:13px;padding:6px;}
+    .admin-link-grid{
+        grid-template-columns:1fr;
+    }
+
+    .member-search-row{
+        align-items:stretch;
+    }
+
+    .branch-btn{
+        width:82px;
+        font-size:21px;
+    }
 }
 </style>
 </head>
+
 <body>
 
-<div class="box">
+<div class="page">
 
-    <div style="margin-bottom:20px;">
+    <h1 class="page-title">🙏 月费管理员</h1>
+    <p class="page-subtitle">管理员查询佛友月费记录、检查缴费资料与编辑记录</p>
 
-        <a href="/member">← 返回月费查询</a>
+    <div class="card">
+        <div class="section-title">📂 功能入口</div>
 
-        &nbsp; | &nbsp;
+        <div class="admin-link-grid">
+            <a class="btn-tool btn-secondary" href="/member">
+                ← 月费查询
+            </a>
 
-        <a href="/member/finance-upload">资料管理中心</a>
+            <a class="btn-tool btn-primary" href="/member/finance-upload">
+                📂 资料管理中心
+            </a>
 
-        &nbsp; | &nbsp;
-
-        <a href="/member/admin/late_members"
-           style="color:#d97706;font-weight:bold;">
-            ⚠️ 月费迟付名单
-        </a>
-
+            <a class="btn-tool btn-warning" href="/member/admin/late_members">
+                ⚠️ 迟付名单
+            </a>
+        </div>
     </div>
 
-    <h1>月费管理员</h1>
-
     {% if session.get("member_admin") %}
-        <div class="ok">
-            ✅ 管理员已登录
-        </div>
+    <div class="alert alert-success">
+        ✅ 管理员已登录
 
-        <div style="margin-bottom:15px;">
-            <a href="/member/admin/logout"
-               style="color:red;font-size:18px;">
+        <div style="margin-top:12px;">
+            <a class="btn-tool btn-danger" href="/member/admin/logout">
                 🚪 退出管理员
             </a>
         </div>
+    </div>
     {% endif %}
 
     {% if error %}
-    <div class="error">{{ error }}</div>
+    <div class="alert alert-danger">
+        ❌ {{ error }}
+    </div>
     {% endif %}
 
-    <form method="post" action="/member/admin">
+    <div class="card">
+        {% if not session.get("member_admin") %}
 
-    {% if not session.get("member_admin") %}
+        <div class="section-title">🔐 管理员登录</div>
 
-        <label>管理员 PIN</label>
+        <form method="post" action="/member/admin">
+            <div class="form-group">
+                <label>管理员 PIN</label>
 
-        <input
-            id="member_admin_pin"
-            name="admin_pin"
-            type="password"
-            inputmode="numeric"
-            autocomplete="new-password"
-            readonly
-            onfocus="this.removeAttribute('readonly');"
-            required
-        >
+                <input
+                    class="form-input"
+                    id="member_admin_pin"
+                    name="admin_pin"
+                    type="password"
+                    inputmode="numeric"
+                    autocomplete="new-password"
+                    readonly
+                    onfocus="this.removeAttribute('readonly');"
+                    required
+                >
+            </div>
 
-        <button type="submit">
-            登录管理员
-        </button>
-
-    {% else %}
-
-        <label>月费编号 / 姓名</label>
-
-        <div style="display:flex; gap:10px; align-items:center;">
-            <button
-                type="button"
-                id="branch_btn"
-                onclick="toggleBranch()"
-                style="width:100px;height:58px;font-size:24px;font-weight:bold;background:#28a745;color:white;border:none;border-radius:14px;cursor:pointer;flex-shrink:0;">
-                CHE
+            <button class="btn-tool btn-primary" type="submit" style="width:100%;">
+                登录管理员
             </button>
+        </form>
 
-            <input type="hidden" id="branch" name="branch" value="CHE">
+        {% else %}
 
-            <input
-                name="member_id"
-                placeholder="例如：108 / 张三 / zhangsan"
-                autocomplete="off"
-                style="flex:1;"
-            >
-        </div>
+        <div class="section-title">🔍 查询会员</div>
 
-        <button type="submit">
-            查找会员
-        </button>
+        <form method="post" action="/member/admin">
+            <div class="form-group">
+                <label>月费编号 / 姓名 / 英文名</label>
 
-    {% endif %}
+                <div class="member-search-row">
+                    <button
+                        type="button"
+                        id="branch_btn"
+                        class="branch-btn"
+                        onclick="toggleBranch()"
+                    >
+                        CHE
+                    </button>
 
-    </form>
+                    <input type="hidden" id="branch" name="branch" value="CHE">
+
+                    <input
+                        class="form-input"
+                        name="member_id"
+                        placeholder="例如：108 / 张三 / zhangsan"
+                        autocomplete="off"
+                    >
+                </div>
+            </div>
+
+            <button class="btn-tool btn-primary" type="submit" style="width:100%;">
+                查找会员
+            </button>
+        </form>
+
+        {% endif %}
+    </div>
 
     {% if member %}
-    <div class="member-card">
+    <div class="info-card">
+        <div class="section-title">👤 会员资料</div>
 
-        <div class="member-title">
+        <div class="person-name">
             {{ member.name }}
-            <small>｜月费编号：{{ member.member_id }}</small>
         </div>
 
-        <div class="member-info">
+        <div class="person-meta">
+            月费编号：<b>{{ member.member_id }}</b><br>
             {% if member.english_name %}
-                英文名：{{ member.english_name }}<br>
+            英文名：{{ member.english_name }}<br>
             {% endif %}
             电话：{{ member.phone or "-" }}
         </div>
+    </div>
 
-        {% if summary %}
-        <div class="summary-grid">
-            <div class="summary-box">
-                <div class="summary-title">已付月费总额</div>
-                <div class="summary-value">RM {{ "%.2f"|format(summary.total_payment or 0) }}</div>
+    {% if summary %}
+    <div class="card">
+        <div class="section-title">📊 月费统计</div>
+
+        <div class="info-summary-grid">
+
+            <div class="info-summary-box">
+                <div class="info-summary-title">已付月费总额</div>
+                <div class="info-summary-value">
+                    RM {{ "%.2f"|format(summary.total_payment or 0) }}
+                </div>
             </div>
 
-            <div class="summary-box">
-                <div class="summary-title">累计已付月数</div>
-                <div class="summary-value">{{ summary.total_months or 0 }} 个月</div>
+            <div class="info-summary-box">
+                <div class="info-summary-title">累计已付月数</div>
+                <div class="info-summary-value">
+                    {{ summary.total_months or 0 }} 个月
+                </div>
             </div>
 
-            <div class="summary-box">
-                <div class="summary-title">月费已缴至</div>
-                <div class="summary-value">
+            <div class="info-summary-box">
+                <div class="info-summary-title">月费已缴至</div>
+                <div class="info-summary-value">
                     {% if summary.paid_until %}
                         {{ summary.paid_until.strftime("%Y-%m") }}
                     {% else %}
@@ -3416,75 +3865,72 @@ th{
                     {% endif %}
                 </div>
             </div>
+
         </div>
 
-        <div class="last-payment-box">
-            <div class="summary-title">最后付款记录</div>
-            <div class="summary-value">
+        <div class="info-summary-box" style="margin-top:14px;">
+            <div class="info-summary-title">最后付款记录</div>
+            <div class="info-summary-value">
                 {% if summary.last_payment_date %}
                     {{ summary.last_payment_date.strftime("%Y-%m-%d") }}
-                    {% if summary.last_payment_amount %}
-                        ｜RM {{ "%.2f"|format(summary.last_payment_amount or 0) }}
-                    {% endif %}
+                    ｜RM {{ "%.2f"|format(summary.last_payment_amount or 0) }}
                 {% else %}
                     暂无记录
                 {% endif %}
             </div>
         </div>
-        {% endif %}
+    </div>
+    {% endif %}
 
-        {% if warnings %}
-        <div class="warning">
-            <b>⚠️ 系统发现可能有错误：</b>
-            <ul>
-                {% for w in warnings %}
-                    <li>{{ w }}</li>
-                {% endfor %}
-            </ul>
-        </div>
-        {% endif %}
+    {% if warnings %}
+    <div class="alert alert-warning">
+        <b>⚠️ 系统发现可能有错误：</b>
+        <ul>
+            {% for w in warnings %}
+                <li>{{ w }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    <div class="card">
+        <div class="section-title">📋 缴费记录</div>
 
         {% if payments %}
-        <h3>缴费记录</h3>
+        <div class="table-responsive">
+            <table class="record-table">
+                <tr>
+                    <th>日期<br>Date</th>
+                    <th>收据编号<br>Official Receipt No</th>
+                    <th>编号 No.</th>
+                    <th>捐款人<br>姓名</th>
+                    <th>START MONTH</th>
+                    <th>END MONTH</th>
+                    <th>No. of Mth</th>
+                    <th>Total Amt</th>
+                    <th>操作</th>
+                </tr>
 
-        <table>
-            <tr>
-                <th>日期<br>Date</th>
-                <th>收据编号<br>Official Receipt No</th>
-                <th>编号 No/</th>
-                <th>捐款人<br>姓名</th>
-                <th>START MONTH</th>
-                <th>END MONTH</th>
-                <th>No/ of Mth</th>
-                <th>Total Amt</th>
-                <th>操作</th>
-            </tr>
-
-            {% for p in payments %}
-            <tr>
-                <td>{{ p.payment_date.strftime("%d/%m/%Y") if p.payment_date else "-" }}</td>
-                <td>{{ p.receipt_no }}</td>
-                <td>{{ p.member_id.replace("CHE-", "").replace("STW-", "") if p.member_id else "-" }}</td>
-                <td>{{ p.name or member.name }}</td>
-                <td>{{ p.start_month.strftime("%b-%y") if p.start_month else "-" }}</td>
-                <td>{{ p.end_month.strftime("%b-%y") if p.end_month else "-" }}</td>
-                <td>{{ p.month_count }}</td>
-                <td>{{ "%.2f"|format(p.amount or 0) }}</td>
-                <td>
-                    <a href="/member/payment/edit/{{ p.id }}"
-                        style="
-                            background:#2d7ff9;
-                            color:white;
-                            padding:6px 12px;
-                            border-radius:6px;
-                            font-size:14px;
-                        ">
-                        ✏ 编辑
-                    </a>
-                </td>
-            </tr>
-            {% endfor %}
-        </table>
+                {% for p in payments %}
+                <tr>
+                    <td>{{ p.payment_date.strftime("%d/%m/%Y") if p.payment_date else "-" }}</td>
+                    <td>{{ p.receipt_no }}</td>
+                    <td>{{ p.member_id.replace("CHE-", "").replace("STW-", "") if p.member_id else "-" }}</td>
+                    <td>{{ p.name or member.name }}</td>
+                    <td>{{ p.start_month.strftime("%b-%y") if p.start_month else "-" }}</td>
+                    <td>{{ p.end_month.strftime("%b-%y") if p.end_month else "-" }}</td>
+                    <td>{{ p.month_count }}</td>
+                    <td>{{ "%.2f"|format(p.amount or 0) }}</td>
+                    <td>
+                        <a class="btn-tool btn-primary mini-btn"
+                           href="/member/payment/edit/{{ p.id }}">
+                            ✏ 编辑
+                        </a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
 
         {% if total_pages and total_pages > 1 %}
         <div class="pagination">
@@ -3499,13 +3945,17 @@ th{
         {% endif %}
 
         {% else %}
-        <div class="no-record">
-            这个会员目前没有缴费记录。
+        <div class="empty-state">
+            <div class="empty-icon">📭</div>
+            <div class="empty-title">暂无缴费记录</div>
+            <div class="empty-text">这个会员目前没有缴费记录。</div>
         </div>
         {% endif %}
     </div>
     {% endif %}
+
 </div>
+
 <script>
 function toggleBranch() {
     const btn = document.getElementById("branch_btn");
@@ -3514,11 +3964,11 @@ function toggleBranch() {
     if (branch.value === "CHE") {
         branch.value = "STW";
         btn.innerText = "STW";
-        btn.style.background = "#dc3545";
+        btn.style.background = "#dc2626";
     } else {
         branch.value = "CHE";
         btn.innerText = "CHE";
-        btn.style.background = "#28a745";
+        btn.style.background = "#16a34a";
     }
 }
 </script>
@@ -3534,90 +3984,132 @@ PAYMENT_EDIT_HTML = """
 <meta charset="utf-8">
 <title>修改缴费记录</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{
-    font-family:Arial,"Microsoft YaHei",sans-serif;
-    background:#f5f5f5;
-    padding:20px;
-}
-.box{
-    max-width:700px;
-    margin:auto;
-    background:white;
-    padding:24px;
-    border-radius:16px;
-    box-shadow:0 2px 10px rgba(0,0,0,.08);
-}
-label{
-    font-weight:bold;
-    display:block;
-    margin-top:14px;
-}
-input{
-    width:100%;
-    font-size:20px;
-    padding:12px;
-    box-sizing:border-box;
-    border:1px solid #ccc;
-    border-radius:8px;
-}
-button{
-    width:100%;
-    margin-top:20px;
-    font-size:24px;
-    padding:14px;
-    border:0;
-    border-radius:10px;
-    background:#2d7ff9;
-    color:white;
-    font-weight:bold;
-}
-.error{
-    background:#ffe5e5;
-    color:#a10000;
-    padding:12px;
-    border-radius:10px;
-}
-</style>
+
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
 </head>
+
 <body>
 
-<div class="box">
-    <a href="/member/admin?member_id={{ payment.member_id }}">← 返回会员记录</a>
+<div class="page">
 
-    <h1>修改缴费记录</h1>
+    <h1 class="page-title">✏ 修改缴费记录</h1>
+    <p class="page-subtitle">请确认日期、收据编号、月份与金额是否正确</p>
+
+    <div class="card">
+        <a class="btn-tool btn-secondary"
+           href="/member/admin?member_id={{ payment.member_id }}">
+            ← 返回会员记录
+        </a>
+    </div>
 
     {% if error %}
-    <div class="error">{{ error }}</div>
+    <div class="alert alert-danger">
+        ❌ {{ error }}
+    </div>
     {% endif %}
 
-    <form method="post">
-        <label>日期 Date</label>
-        <input type="date" name="payment_date" value="{{ payment.payment_date.strftime('%Y-%m-%d') if payment.payment_date else '' }}" required>
+    <div class="card">
+        <div class="section-title">📋 缴费资料</div>
 
-        <label>收据编号 Official Receipt No</label>
-        <input name="receipt_no" value="{{ payment.receipt_no or '' }}" required>
+        <form method="post">
 
-        <label>编号 No/</label>
-        <input value="{{ payment.member_id.replace('CHE-', '').replace('STW-', '') }}" disabled>
+            <div class="form-group">
+                <label>日期 Date</label>
+                <input
+                    class="form-input"
+                    type="date"
+                    name="payment_date"
+                    value="{{ payment.payment_date.strftime('%Y-%m-%d') if payment.payment_date else '' }}"
+                    required
+                >
+            </div>
 
-        <label>捐款人 姓名 Name</label>
-        <input name="name" value="{{ payment.name or '' }}" required>
-        
-        <label>START MONTH</label>
-        <input type="month" name="start_month" value="{{ payment.start_month.strftime('%Y-%m') if payment.start_month else '' }}" required>
+            <div class="form-group">
+                <label>收据编号 Official Receipt No</label>
+                <input
+                    class="form-input"
+                    name="receipt_no"
+                    value="{{ payment.receipt_no or '' }}"
+                    required
+                >
+            </div>
 
-        <label>END MONTH</label>
-        <input type="month" name="end_month" value="{{ payment.end_month.strftime('%Y-%m') if payment.end_month else '' }}" required>
+            <div class="form-group">
+                <label>编号 No.</label>
+                <input
+                    class="form-input"
+                    value="{{ payment.member_id.replace('CHE-', '').replace('STW-', '') }}"
+                    disabled
+                >
+            </div>
 
-        <label>No/ of Mth</label>
-        <input type="number" name="month_count" value="{{ payment.month_count or 1 }}" required>
+            <div class="form-group">
+                <label>捐款人 姓名 Name</label>
+                <input
+                    class="form-input"
+                    name="name"
+                    value="{{ payment.name or '' }}"
+                    required
+                >
+            </div>
 
-        <label>Total Amt</label>
-        <input type="number" step="0.01" name="amount" value="{{ payment.amount or 0 }}" required>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label>START MONTH</label>
+                    <input
+                        class="form-input"
+                        type="month"
+                        name="start_month"
+                        value="{{ payment.start_month.strftime('%Y-%m') if payment.start_month else '' }}"
+                        required
+                    >
+                </div>
 
-        <button type="submit">保存修改</button>
-    </form>
+                <div class="form-group">
+                    <label>END MONTH</label>
+                    <input
+                        class="form-input"
+                        type="month"
+                        name="end_month"
+                        value="{{ payment.end_month.strftime('%Y-%m') if payment.end_month else '' }}"
+                        required
+                    >
+                </div>
+            </div>
+
+            <div class="form-grid">
+                <div class="form-group">
+                    <label>No. of Mth</label>
+                    <input
+                        class="form-input"
+                        type="number"
+                        name="month_count"
+                        value="{{ payment.month_count or 1 }}"
+                        required
+                    >
+                </div>
+
+                <div class="form-group">
+                    <label>Total Amt</label>
+                    <input
+                        class="form-input"
+                        type="number"
+                        step="0.01"
+                        name="amount"
+                        value="{{ payment.amount or 0 }}"
+                        required
+                    >
+                </div>
+            </div>
+
+            <button class="btn-tool btn-primary" type="submit" style="width:100%;">
+                💾 保存修改
+            </button>
+
+        </form>
+    </div>
+
 </div>
 
 </body>
@@ -3631,87 +4123,123 @@ CHANGE_PIN_HTML = """
 <meta charset="utf-8">
 <title>更改月费密码</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{font-family:Arial,"Microsoft YaHei",sans-serif;background:#f5f5f5;margin:0;padding:20px;}
-.box{max-width:480px;margin:auto;background:white;padding:24px;border-radius:16px;box-shadow:0 2px 10px rgba(0,0,0,.08);}
-a{text-decoration:none;color:#555;}
-h1{text-align:center;}
-label{font-weight:bold;display:block;margin-top:14px;}
-input{width:100%;font-size:20px;padding:12px;box-sizing:border-box;border:1px solid #ccc;border-radius:10px;margin-top:6px;}
-button{width:100%;margin-top:22px;font-size:22px;padding:14px;border:0;border-radius:12px;background:#2d7ff9;color:white;font-weight:bold;}
-.error{background:#ffe5e5;color:#a10000;padding:12px;border-radius:10px;margin-bottom:15px;}
-.ok{background:#e8f7e8;color:#176b2c;padding:12px;border-radius:10px;margin-bottom:15px;}
-</style>
+
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
 </head>
+
 <body>
-<div class="box">
-    <a href="/member">← 返回月费查询</a>
-    <h1>更改月费密码</h1>
+
+<div class="page">
+
+    <h1 class="page-title">🔐 更改月费密码</h1>
+    <p class="page-subtitle">请输入会员编号、旧密码及新密码</p>
+
+    <div class="card">
+        <a class="btn-tool btn-secondary" href="/member">
+            ← 返回月费查询
+        </a>
+    </div>
 
     {% if error %}
-    <div class="error">{{ error }}</div>
+    <div class="alert alert-danger">
+        ❌ {{ error }}
+    </div>
     {% endif %}
 
     {% if ok %}
-    <div class="ok">{{ ok }}</div>
+    <div class="alert alert-success">
+        ✅ {{ ok }}
+    </div>
     {% endif %}
 
-    <form method="post">
+    <div class="card">
 
-    <label>月费编号</label>
-    <input
-        name="member_id"
-        placeholder="例如：108 / CHE-108 / 0108"
-        autocomplete="off"
-        required
-    >
+        <div class="section-title">
+            🔑 修改密码
+        </div>
 
-    <label>旧密码</label>
-    <input
-        name="old_pin"
-        type="password"
-        inputmode="numeric"
-        autocomplete="new-password"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck="false"
-        readonly
-        onfocus="this.removeAttribute('readonly');"
-        required
-    >
+        <form method="post">
 
-    <label>新密码</label>
-    <input
-        name="new_pin"
-        type="password"
-        inputmode="numeric"
-        autocomplete="new-password"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck="false"
-        readonly
-        onfocus="this.removeAttribute('readonly');"
-        required
-    >
+            <div class="form-group">
+                <label>月费编号</label>
 
-    <label>确认新密码</label>
-    <input
-        name="confirm_pin"
-        type="password"
-        inputmode="numeric"
-        autocomplete="new-password"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck="false"
-        readonly
-        onfocus="this.removeAttribute('readonly');"
-        required
-    >
+                <input
+                    class="form-input"
+                    name="member_id"
+                    placeholder="例如：108 / CHE-108 / STW-108"
+                    autocomplete="off"
+                    required
+                >
+            </div>
 
-    <button type="submit">确认更改</button>
+            <div class="form-group">
+                <label>旧密码</label>
 
-</form>
+                <input
+                    class="form-input"
+                    name="old_pin"
+                    type="password"
+                    inputmode="numeric"
+                    autocomplete="new-password"
+                    autocorrect="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    readonly
+                    onfocus="this.removeAttribute('readonly');"
+                    required
+                >
+            </div>
+
+            <div class="form-group">
+                <label>新密码</label>
+
+                <input
+                    class="form-input"
+                    name="new_pin"
+                    type="password"
+                    inputmode="numeric"
+                    autocomplete="new-password"
+                    autocorrect="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    readonly
+                    onfocus="this.removeAttribute('readonly');"
+                    required
+                >
+            </div>
+
+            <div class="form-group">
+                <label>确认新密码</label>
+
+                <input
+                    class="form-input"
+                    name="confirm_pin"
+                    type="password"
+                    inputmode="numeric"
+                    autocomplete="new-password"
+                    autocorrect="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    readonly
+                    onfocus="this.removeAttribute('readonly');"
+                    required
+                >
+            </div>
+
+            <button
+                class="btn-tool btn-primary"
+                style="width:100%;"
+                type="submit">
+                💾 确认更改密码
+            </button>
+
+        </form>
+
+    </div>
+
 </div>
+
 </body>
 </html>
 """
@@ -3766,105 +4294,109 @@ PAYMENT_HISTORY_DETAIL_HTML = """
 <meta charset="utf-8">
 <title>修改历史详情</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{
-    font-family:Arial,"Microsoft YaHei",sans-serif;
-    background:#f3f4f6;
-    padding:20px;
-}
-.box{
-    max-width:900px;
-    margin:auto;
-    background:white;
-    padding:28px;
-    border-radius:18px;
-    box-shadow:0 3px 12px rgba(0,0,0,.08);
-}
-a{
-    color:#555;
-    text-decoration:none;
-}
-h1{
-    font-size:36px;
-    margin-top:20px;
-}
-.info{
-    background:#f8f9fa;
-    border:1px solid #ddd;
-    border-radius:12px;
-    padding:16px;
-    line-height:1.8;
-    margin-bottom:20px;
-}
-table{
-    width:100%;
-    border-collapse:collapse;
-    background:white;
-}
-th,td{
-    border:1px solid #ddd;
-    padding:12px;
-    text-align:center;
-    font-size:17px;
-}
-th{
-    background:#eeeeee;
-}
-.old{
-    color:#a10000;
-    font-weight:bold;
-}
-.new{
-    color:#176b2c;
-    font-weight:bold;
-}
-.no-change{
-    background:#fff7d6;
-    padding:14px;
-    border-radius:10px;
-    color:#6b4b00;
-}
-</style>
+
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
 </head>
+
 <body>
 
-<div class="box">
-    <a href="/member/finance-upload">← 返回月费资料管理中心</a>
+<div class="page">
 
-    <h1>修改历史详情</h1>
+    <h1 class="page-title">📝 修改历史详情</h1>
+    <p class="page-subtitle">查看这笔缴费记录曾经修改过的内容</p>
 
-    <div class="info">
-        时间：
-        {{ (h.changed_at + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M") if h.changed_at else "-" }}
-        <br>
-        会员编号：{{ h.member_id }}<br>
-        收据编号：{{ h.receipt_no }}<br>
-        修改者：{{ h.changed_by }}
+    <div class="card">
+        <a class="btn-tool btn-secondary"
+           href="/member/finance-upload">
+            ← 返回月费资料管理中心
+        </a>
     </div>
 
-    <h2>修改内容</h2>
+    <div class="info-card">
 
-    {% if changes %}
-    <table>
-        <tr>
-            <th>项目</th>
-            <th>修改前</th>
-            <th>修改后</th>
-        </tr>
+        <div class="section-title">
+            📄 基本资料
+        </div>
 
-        {% for c in changes %}
-        <tr>
-            <td>{{ c.label }}</td>
-            <td class="old">{{ c.old }}</td>
-            <td class="new">{{ c.new }}</td>
-        </tr>
-        {% endfor %}
-    </table>
-    {% else %}
-    <div class="no-change">
-        没有发现明显变化。
+        <div class="person-meta">
+            <b>修改时间：</b>
+            {{ (h.changed_at + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M") if h.changed_at else "-" }}
+            <br>
+
+            <b>会员编号：</b>{{ h.member_id }}
+            <br>
+
+            <b>收据编号：</b>{{ h.receipt_no }}
+            <br>
+
+            <b>修改者：</b>{{ h.changed_by }}
+        </div>
+
     </div>
-    {% endif %}
+
+    <div class="card">
+
+        <div class="section-title">
+            🔍 修改内容
+        </div>
+
+        {% if changes %}
+
+        <div class="table-responsive">
+
+            <table class="record-table">
+
+                <tr>
+                    <th>项目</th>
+                    <th>修改前</th>
+                    <th>修改后</th>
+                </tr>
+
+                {% for c in changes %}
+                <tr>
+
+                    <td>
+                        {{ c.label }}
+                    </td>
+
+                    <td style="color:#dc2626;font-weight:bold;">
+                        {{ c.old }}
+                    </td>
+
+                    <td style="color:#16a34a;font-weight:bold;">
+                        {{ c.new }}
+                    </td>
+
+                </tr>
+                {% endfor %}
+
+            </table>
+
+        </div>
+
+        {% else %}
+
+        <div class="empty-state">
+
+            <div class="empty-icon">
+                📭
+            </div>
+
+            <div class="empty-title">
+                没有发现明显变化
+            </div>
+
+            <div class="empty-text">
+                这次修改没有记录到任何字段差异。
+            </div>
+
+        </div>
+
+        {% endif %}
+
+    </div>
+
 </div>
 
 </body>

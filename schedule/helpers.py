@@ -1,11 +1,15 @@
 # helpers.py
 
+import os
 import calendar
+import pandas as pd
 
 from opencc import OpenCC
 from db import get_db, get_conn
 from psycopg2.extras import RealDictCursor
+from schedule.builders.time_utils import malaysia_now
 from datetime import datetime, timedelta, date, timezone
+
 
 cc = OpenCC("t2s")
 
@@ -48,41 +52,126 @@ def time_to_minutes(t):
 
     return None
 
+def clean_phone(phone):
+    """只保留数字"""
+    return "".join(ch for ch in str(phone or "") if ch.isdigit())
+
+
 def find_volunteer_by_keyword(keyword):
+
     keyword = str(keyword or "").strip()
+
     if not keyword:
         return []
 
     key_simple = to_simple(keyword)
-    keyword_id = normalize_vol_id_for_search(keyword)
+    keyword_upper = keyword.upper()
+    keyword_phone = clean_phone(keyword)
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
             cur.execute("""
-                select id, name
+                select
+                    id,
+                    name,
+                    phone,
+                    branch,
+                    status
                 from volunteers
-                where status = '在册'
+                where status='在册'
             """)
+
             volunteers = cur.fetchall()
 
-    # 1. 编号完全符合 → 直接返回这个人
-    id_matches = []
+    # =========
+    # 1. 编号 / 电话 完全符合
+    # =========
+
+    exact_matches = []
+
+    keyword_num = None
+
+    if keyword.isdigit():
+        keyword_num = int(keyword)
+
     for v in volunteers:
-        vid = str(v["id"] or "").strip()
-        if vid == keyword_id or vid == keyword.upper():
-            id_matches.append(v)
 
-    if id_matches:
-        return id_matches
+        vid = str(v["id"] or "").strip().upper()
 
-    # 2. 姓名简繁体模糊匹配 → 返回全部
+        phone = clean_phone(v.get("phone"))
+
+        # 输入完整编号
+        if vid == keyword_upper:
+            exact_matches.append(v)
+            continue
+
+        # 输入数字，例如 69
+        if keyword_num is not None:
+
+            if (
+                vid == f"CHE-{keyword_num}"
+                or vid == f"STW-{keyword_num}"
+            ):
+                exact_matches.append(v)
+                continue
+
+        # 电话
+        if keyword_phone and phone == keyword_phone:
+            exact_matches.append(v)
+            continue
+
+    if exact_matches:
+        return exact_matches
+
+    # =========
+    # 2. 姓名（简繁体）
+    # =========
+
     name_matches = []
+
     for v in volunteers:
+
         name = str(v["name"] or "").strip()
+
         if key_simple in to_simple(name):
             name_matches.append(v)
 
     return name_matches
+
+def get_daily_buddha_quote():
+    """
+    从 daily_quotes.xlsx 读取每日佛言佛语。
+    马来西亚时间每天 18:00 后自动切换到下一句。
+    """
+
+    try:
+        file_path = os.path.join(
+            os.path.dirname(__file__),
+            "daily_quotes.xlsx"
+        )
+
+        df = pd.read_excel(file_path)
+
+        df = df[df["active"] == True]
+
+        if df.empty:
+            return "发心护持道场，就是培福培慧。"
+
+        now = malaysia_now()
+
+        if now.hour >= 18:
+            quote_date = now.date() + timedelta(days=1)
+        else:
+            quote_date = now.date()
+
+        idx = quote_date.toordinal() % len(df)
+
+        return str(df.iloc[idx]["content"]).strip()
+
+    except Exception as e:
+        print("读取每日佛言失败:", e)
+        return "发心护持道场，就是培福培慧。"
 
 def build_monthly_signup_text(year, month):
     year = int(year)

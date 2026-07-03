@@ -1,5 +1,5 @@
 # app.py
-# 蕉赖观音堂义工签到系统 v3
+# 蕉赖共修会义工签到系统 v3
 # 功能：
 # 1) 编号查找、PIN验证、签到、签退
 # 2) 今日记录修改/删除、自动备份、秒按缓存
@@ -12,17 +12,13 @@ from __future__ import annotations
 import os
 import io
 import sys
-import shutil
-import atexit
-import socket
-import qrcode
-import base64
+
+
+
 import psycopg2
-import threading
-import subprocess
 import pandas as pd
 
-from io import BytesIO
+
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -30,17 +26,12 @@ from admin_web import admin_bp
 from db import db_query, get_conn
 from member_web import member_bp
 from pypinyin import lazy_pinyin
+from manifest import manifest_bp
 from reading_web import reading_bp
 from finance_web import finance_bp
-from schedule.schedule_web import schedule_bp
-from utils import get_text, get_lang
-from sqlalchemy import create_engine, text
 from psycopg2.extras import RealDictCursor
-from openpyxl import Workbook, load_workbook
-from psycopg2.pool import SimpleConnectionPool
-from datetime import datetime, date, time, timedelta
-from excel_style_utils import beautify_attendance_file
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from schedule.schedule_web import schedule_bp
+from datetime import datetime, date, timedelta
 from flask import (
     Flask, request, redirect, url_for,
     render_template_string, flash, jsonify,
@@ -110,6 +101,7 @@ app = Flask(__name__)
 app.secret_key = "change-this-simple-secret"
 app.permanent_session_lifetime = timedelta(hours=2)
 app.register_blueprint(schedule_bp)
+app.register_blueprint(manifest_bp)
 app.register_blueprint(reading_bp)
 app.register_blueprint(finance_bp)
 app.register_blueprint(member_bp)
@@ -124,7 +116,7 @@ ADMIN_HOME_HTML = """
 
 <link rel="manifest" href="/manifest.json">
 
-<title>观音堂管理员入口</title>
+<title>共修会管理员入口</title>
 
 <style>
 
@@ -235,16 +227,6 @@ def get_today_stats():
     }
 
 # =========================
-# 已弃用（改用 Supabase）
-# =========================
-ATT_CACHE = []
-ATT_CACHE_LOADED = True
-ATT_DIRTY = False
-ATT_LOCK = threading.Lock()
-SAVE_INTERVAL_SEC = 5
-
-
-# =========================
 # 2) 语言工具
 # =========================
 @app.route("/set_lang/<lang>")
@@ -254,35 +236,6 @@ def set_lang(lang):
     resp = make_response(redirect(request.referrer or url_for("index")))
     resp.set_cookie("lang", lang, max_age=60 * 60 * 24 * 365)
     return resp
-
-
-# =========================
-# 3) 工具函数
-# =========================
-
-
-
-def backup_attendance() -> None:
-    if ATTENDANCE_FILE.exists():
-        BACKUP_DIR.mkdir(exist_ok=True)
-        ts = datetime.now(MY_TZ).strftime("%Y%m%d_%H%M%S")
-        shutil.copy2(ATTENDANCE_FILE, BACKUP_DIR / f"attendance_{ts}.xlsx")
-
-
-def safe_save_workbook(wb, path: Path) -> None:
-    tmp_path = path.with_suffix(".tmp.xlsx")
-    wb.save(tmp_path)
-    os.replace(tmp_path, path)
-
-
-def reload_attendance_cache() -> None:
-    return
-
-# =========================
-# 4) Excel 读取 / 建立
-# =========================
-def ensure_attendance_file() -> None:
-    return
 
 
 def load_volunteers() -> list[dict]:
@@ -312,33 +265,6 @@ def get_member_paid_until(member_id):
     """, (member_id,), fetchone=True)
 
     return row.get("paid_until") if row else ""
-
-
-def _load_attendance_rows_from_excel() -> list[dict]:
-    return []
-
-
-def mark_attendance_dirty() -> None:
-    global ATT_DIRTY
-    ATT_DIRTY = True
-
-
-def flush_attendance_to_excel(force: bool = False) -> None:
-    return
-
-
-def background_saver():
-    while True:
-        threading.Event().wait(SAVE_INTERVAL_SEC)
-        try:
-            flush_attendance_to_excel(force=False)
-        except Exception as e:
-            print("后台保存 attendance.xlsx 失败：", e)
-
-
-def start_background_saver_once():
-    t = threading.Thread(target=background_saver, daemon=True)
-    t.start()
 
 
 def format_date_value(d) -> str:
@@ -514,18 +440,6 @@ def delete_record(row_number: int, pin: str) -> tuple[bool, str]:
 
     return True, f"已删除 {name} 的这笔记录。"
 
-def get_member_payment(member_id):
-    rows = db_query("""
-        select paid_month
-        from member_payments
-        where member_id = %s
-        order by paid_month
-    """, (member_id,), fetchall=True)
-
-    months = [r["paid_month"] for r in rows]
-    latest = months[-1] if months else ""
-
-    return months, latest  
 
 # =========================
 # 6) 页面
@@ -537,263 +451,404 @@ PAGE = """
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ t.system_title }}</title>
+
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/toolbox.css') }}">
+
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Microsoft YaHei", Arial, sans-serif; background:#f6f6f6; margin:0; font-size: 22px;}
-    .wrap { max-width: 900px; margin: 0 auto; padding: 18px; }
-    .card { background:white; border-radius:18px; padding:24px; margin-bottom:18px; box-shadow:0 2px 12px rgba(0,0,0,.08); }
-    h1 { font-size: 30px; margin: 6px 0 18px; }
-    h2 { font-size: 24px; margin: 0 0 14px; }
-    label { font-size: 20px; font-weight: 700; display:block; margin-bottom:8px; }
-    input, select { width:100%; font-size: 30px; padding: 16px; border-radius: 14px; border:1px solid #ccc; box-sizing:border-box; }
-    .row { display:grid; grid-template-columns: 1fr 1fr; gap:14px; }
-    button { font-size: 28px; font-weight: 800; padding: 14px 18px; border:0; border-radius: 16px; cursor:pointer; }
-    .btn-find { background:#0d6efd; color:white; width:100%; margin-top:16px; }
-    .btn-in { background:#198754; color:white; width:100%; margin-top:16px; font-size:30px; }
-    .btn-out { background:#dc3545; color:white; }
-    .btn-admin { background:#6f42c1; color:white; width:100%; margin-top:16px; }
-    .btn-lang { display:inline-block; font-size:18px; padding:8px 12px; background:white; border-radius:999px; text-decoration:none; color:#333; border:1px solid #ddd; margin-right:6px; }
-    .msg { padding:18px; border-radius:14px; font-size:20px; margin-bottom:14px; white-space:pre-wrap; }
-    .ok { background:#d1e7dd; color:#0f5132; }
-    .bad { background:#f8d7da; color:#842029; }
-    .person { font-size: 26px; line-height:1.8; background:#f8f9fa; padding:16px; border-radius:14px; margin-top:12px; }
-    table { width:100%; border-collapse: collapse; font-size:20px; }
-    th, td { padding:12px; border-bottom:1px solid #eee; text-align:left; vertical-align:top; }
-    th { background:#f1f1f1; }
-    .muted { color:#666; font-size:18px; }
-    .pill { display:inline-block; background:#eee; border-radius:999px; padding:4px 10px; }
-    .topbar { margin-bottom:12px; }
-    @media (max-width: 700px) { .row { grid-template-columns: 1fr; } h1 {font-size:26px;} table {font-size:17px;} button{font-size:22px;} }
+    .center { text-align:center; }
+    .small-note { font-size:16px; color:#666; margin-top:10px; text-align:center; }
+    .two-card-grid {
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:18px;
+    }
+    .branch-row {
+        display: grid;
+        grid-template-columns: 72px 1fr;
+        gap: 10px;
+        align-items: end;
+    }
+    .branch-btn {
+      width:100px;
+      flex-shrink:0;
+    }
+    .footer {
+      text-align:center;
+      color:#777;
+      font-size:16px;
+      margin:20px 0;
+    }
+    .sign-page .btn-row {
+    display: flex;
+    gap: 16px;
+    width: 100%;
+    }
+
+    .sign-page .btn-row .btn-tool {
+    flex: 1;
+    width: 100%;
+    justify-content: center;
+    }
+
+    .sign-page .single-btn-row .btn-tool {
+    max-width: none;
+    width: 100%;
+    }
+
+    .sign-page .small-action-btn {
+    max-width: 260px;
+    margin: 0 auto;
+    }
+    .login-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+        align-items: end;
+    }
+
+    .form-two-col {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        align-items: end;
+    }
+
+    .branch-input-row {
+        display: flex;
+        align-items: stretch;
+        gap: 8px;
+    }
+
+    .branch-btn {
+        width: 72px;
+        height: 72px;
+        padding: 0;
+        font-size: 20px;
+    }
+
+    .branch-row .form-input,
+    .login-row > .form-group > .form-input {
+        height: 72px;
+        box-sizing: border-box;
+    }
+
+    .branch-input-row .form-input,
+    .form-two-col .form-input {
+        height: 44px;
+        box-sizing: border-box;
+    }
+
+    @media (max-width: 700px) {
+        .form-two-col {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    @media (max-width: 700px) {
+    .login-row {
+        grid-template-columns: 1fr;
+    }
+    }
+    @media (max-width:700px) {
+      .two-card-grid {
+        grid-template-columns:1fr;
+      }
+    }
   </style>
 </head>
+
 <body>
-<div class="wrap">
 
-  <div class="topbar">
-    <span class="muted">{{ t.language }}：</span>
-    <a class="btn-lang" href="{{ url_for('set_lang', lang='zh') }}">{{ t.chinese }}</a>
-    <a class="btn-lang" href="{{ url_for('set_lang', lang='en') }}">{{ t.english }}</a>
-    <a class="btn-lang" href="{{ url_for('change_pin_page') }}">{{ t.change_pin }}</a>
-  </div>
+<div class="page sign-page">
 
-  <h1>{{ t.system_title }}</h1>
+  <div class="card center">
+    <div style="font-size:34px;">🌺</div>
 
-    <div style="
-    display:flex;
-    gap:12px;
-    justify-content:center;
-    margin:12px 0 20px 0;
-    flex-wrap:wrap;
-    ">
+    <h1 class="page-title">{{ t.system_title }}</h1>
 
-        <div style="
-            background:#f8f9fa;
-            border-radius:12px;
-            padding:10px 22px;
-            text-align:center;
-            min-width:120px;
-            box-shadow:0 2px 6px rgba(0,0,0,.08);
-        ">
-            <div style="font-size:16px;color:#666;">👥 已签到</div>
-            <div style="font-size:30px;font-weight:bold;color:#0d6efd;">
-                {{ today_count }}
-            </div>
-        </div>
-
-        <div style="
-            background:#f8f9fa;
-            border-radius:12px;
-            padding:10px 22px;
-            text-align:center;
-            min-width:120px;
-            box-shadow:0 2px 6px rgba(0,0,0,.08);
-        ">
-            <div style="font-size:16px;color:#666;">⏳ 值班中</div>
-            <div style="font-size:30px;font-weight:bold;color:#fd7e14;">
-                {{ not_out }}
-            </div>
-        </div>
-
-        <div style="
-            background:#f8f9fa;
-            border-radius:12px;
-            padding:10px 22px;
-            text-align:center;
-            min-width:120px;
-            box-shadow:0 2px 6px rgba(0,0,0,.08);
-        ">
-            <div style="font-size:16px;color:#666;">🚪 已签退</div>
-            <div style="font-size:30px;font-weight:bold;color:#198754;">
-                {{ done_out }}
-            </div>
-        </div>
-
+    <div class="page-subtitle">
+      {{ t.header_subtitle_1 }}
+      {{ t.header_subtitle_2 }}
     </div>
 
-    {% with messages = get_flashed_messages(with_categories=true) %}
+    <div class="page-subtitle" style="margin-top:12px;">
+      {{ t.language }}：
+      <a href="{{ url_for('set_lang', lang='zh') }}">{{ t.chinese }}</a>
+      |
+      <a href="{{ url_for('set_lang', lang='en') }}">{{ t.english }}</a>
+      |
+      <a href="{{ url_for('change_pin_page') }}">{{ t.change_pin }}</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 class="section-title">📊 {{ t.today_stats }}</h2>
+
+    <div class="summary-grid">
+      <div class="summary-box">
+        <div class="summary-title">👥 {{ t.checked_in }}</div>
+        <div class="summary-value">{{ today_count }}</div>
+      </div>
+
+      <div class="summary-box">
+        <div class="summary-title">🕒 {{ t.on_duty }}</div>
+        <div class="summary-value">{{ not_out }}</div>
+      </div>
+
+      <div class="summary-box">
+        <div class="summary-title">✅ {{ t.checked_out }}</div>
+        <div class="summary-value">{{ done_out }}</div>
+      </div>
+    </div>
+  </div>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, message in messages %}
-      <div class="msg {{ 'ok' if category == 'ok' else 'bad' }}">{{ message }}</div>
+      <div class="alert {{ 'alert-success' if category == 'ok' else 'alert-danger' }}">
+        {{ message }}
+      </div>
     {% endfor %}
   {% endwith %}
 
   <div class="card">
-    <h2>✅ {{ t.check_in }}</h2>
+    <h2 class="section-title">✅ {{ t.check_in }}</h2>
 
-    <form method="post" action="{{ url_for('do_sign_in') }}" onsubmit="return quickSignIn();">
+    <form method="post"
+          action="{{ url_for('do_sign_in') }}"
+          onsubmit="return quickSignIn();">
 
-        <div class="row">
+      <div class="login-row">
 
-        <div>
-            <label>{{ t.enter_id }}</label>
+        <div class="form-group">
+          <label class="form-label">{{ t.enter_id }}</label>
 
-            <div style="display:flex; gap:10px; align-items:center;">
+          <div class="branch-row">
             <button
-                type="button"
-                id="branch_btn"
-                onclick="toggleBranch()"
-                style="width:100px;height:58px;font-size:24px;font-weight:bold;background:#28a745;color:white;border:none;border-radius:14px;cursor:pointer;flex-shrink:0;">
-                CHE
+              type="button"
+              id="branch_btn"
+              onclick="toggleBranch()"
+              class="btn-tool btn-success branch-btn">
+              CHE
             </button>
 
             <input type="hidden" id="branch" name="branch" value="CHE">
 
             <input
-                id="volunteer_id"
-                name="volunteer_id"
-                inputmode="numeric"
-                autocomplete="off"
-                placeholder="{{ t.id_placeholder }}"
-                required
-                style="flex:1;"
+              class="form-input"
+              id="volunteer_id"
+              name="volunteer_id"
+              inputmode="numeric"
+              autocomplete="off"
+              placeholder="{{ t.id_placeholder }}"
+              required
             >
-            </div>
+          </div>
         </div>
 
-        <div>
-            <label>{{ t.pin }}</label>
-            <input
-                id="pin"
-                name="pin"
-                type="password"
-                inputmode="numeric"
-                pattern="[0-9]*"
-                autocomplete="new-password"
-                autocorrect="off"
-                autocapitalize="off"
-                spellcheck="false"
-                value=""
-                placeholder="{{ t.pin_placeholder }}"
-                readonly
-                onfocus="this.removeAttribute('readonly');"
-                required
-            >
-        </div>
-
-        </div>
-
-        {% if today_code_enabled %}
-        <div style="margin-top:16px;">
-        <label>{{ t.today_code }}</label>
-        <input
-            id="today_code"
-            type="tel"
-            name="today_code"
+        <div class="form-group">
+          <label class="form-label">{{ t.pin }}</label>
+          <input
+            class="form-input"
+            id="pin"
+            name="pin"
+            type="password"
             inputmode="numeric"
             pattern="[0-9]*"
-            placeholder="{{ t.today_code_placeholder }}"
+            autocomplete="new-password"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+            value=""
+            placeholder="{{ t.pin_placeholder }}"
+            readonly
+            onfocus="this.removeAttribute('readonly');"
             required
-        >
+          >
         </div>
-        {% endif %}
 
-        <button type="button" class="btn-find" onclick="lookupVolunteer()">
-        {{ t.find_volunteer }}
-        </button>
+      </div>
 
-        <div id="personBox" class="person" style="display:none;"></div>
-
-        <label style="margin-top:16px;">{{ t.role }}</label>
-        <select id="role" name="role" required>
-        {% for role in roles %}
-            <option value="{{ role }}">{{ role_label(role) }}</option>
-        {% endfor %}
-        </select>
-
-        <label style="margin-top:16px;">
-        {{ t.card_no_label }}
-        </label>
-
+      {% if today_code_enabled %}
+      <div class="form-group">
+        <label class="form-label">{{ t.today_code }}</label>
         <input
-        type="text"
-        id="card_no"
-        name="card_no"
-        placeholder="{{ t.card_no_placeholder }}"
-        />
-
-        <button id="signInBtn" class="btn-in" type="submit">
-            ✅ {{ t.check_in }}
-        </button>
-
-    </form>
-
-    <div style="margin-top:16px;">
-        <form method="post"
-            action="{{ url_for('do_sign_out') }}"
-            onsubmit="return askQuickSignOut();">
-
-        <input type="hidden" id="signout_volunteer_id" name="volunteer_id">
-        <input type="hidden" id="signout_pin" name="pin">
-
-        <button
-            class="btn-out"
-            type="submit"
-            style="width:100%;font-size:30px;padding:14px;">
-            ⛔ {{ t.sign_out }}
-        </button>
-
-        </form>
-    </div>
-
-  </div>
-
-  <div class="card">
-    <h2>{{ t.bhff_title }}</h2>
-
-    <a href="/reading">
-      <button style="width:100%;font-size:26px;padding:18px;border-radius:14px;background:#0d6efd;color:white;">
-        {{ t.bhff_enter }}
-      </button>
-    </a>
-
-    <div style="font-size:16px;color:#666;margin-top:10px;">
-      {{ t.bhff_desc }}
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>🔐 {{ t.admin_tools }}</h2>
-
-    <form method="post" action="{{ url_for('admin.admin_report') }}">
-      <label>{{ t.admin_pin }}</label>
-      <input
-          id="admin_pin"
-          name="admin_pin"
-          type="password"
+          class="form-input"
+          id="today_code"
+          type="tel"
+          name="today_code"
           inputmode="numeric"
           pattern="[0-9]*"
-          autocomplete="new-password"
-          autocorrect="off"
-          autocapitalize="off"
-          spellcheck="false"
-          value=""
-          placeholder="{{ t.pin_placeholder }}"
-          readonly
-          onfocus="this.removeAttribute('readonly');"
+          placeholder="{{ t.today_code_placeholder }}"
           required
-      >
-      <button class="btn-admin" type="submit">📊 {{ t.generate_report }}</button>
+        >
+      </div>
+      {% endif %}
+
+      <div class="btn-row single-btn-row">
+        <button type="button"
+                class="btn-tool btn-primary"
+                onclick="lookupVolunteer()">
+            {{ t.search_volunteer }}
+        </button>
+        </div>
+
+      <div id="personBox"
+           class="alert alert-success"
+           style="display:none;">
+      </div>
+
+      <div class="form-row">
+
+        <div class="form-group form-col">
+
+            <label class="form-label">
+                {{ t.role }}
+            </label>
+
+            <select
+                class="form-input"
+                name="role"
+                id="role"
+                onchange="toggleCardNo()">
+
+                {% for role in roles %}
+                    <option value="{{ role }}">{{ role_label(role) }}</option>
+                {% endfor %}
+
+            </select>
+
+        </div>
+
+        <div
+            class="form-group form-col"
+            id="card_no_group">
+
+            <label class="form-label">
+                {{ t.card_no_duty_only }}
+            </label>
+
+            <input
+                class="form-input"
+                type="text"
+                name="card_no"
+                id="card_no"
+                placeholder="{{ t.card_no_duty_placeholder }}">
+
+        </div>
+
+    </div>
+
+      <div class="btn-row">
+        <button id="signInBtn"
+                class="btn-tool btn-success"
+                type="submit">
+            {{ t.check_in }}
+        </button>
+
+        <button class="btn-tool btn-danger"
+                type="button"
+                onclick="submitQuickSignOut();">
+            {{ t.sign_out }}
+        </button>
+      </div>
+
     </form>
-    
+
+    <form id="quickSignOutForm"
+          method="post"
+          action="{{ url_for('do_sign_out') }}">
+      <input type="hidden" id="signout_volunteer_id" name="volunteer_id">
+      <input type="hidden" id="signout_pin" name="pin">
+    </form>
+
+    <div class="small-note">
+      💡 {{ t.card_no_duty_tip }}。
+    </div>
   </div>
+
+  <div class="two-card-grid">
+
+    <div class="card center">
+      <h2 class="section-title">📖 {{ t.bhff_title }}</h2>
+
+      <div class="page-subtitle">
+        {{ t.study_records_desc }}
+      </div>
+
+      <div class="btn-row single-btn-row">
+        <a class="btn-tool btn-primary small-action-btn" href="/reading">
+            {{ t.bhff_enter }}
+        </a>
+      </div>
+
+      <div class="small-note">
+        👉 {{ t.bhff_desc }}
+      </div>
+    </div>
+
+    <div class="card center">
+      <h2 class="section-title">🔐 {{ t.admin_entry }}</h2>
+
+      <div class="page-subtitle">
+        {{ t.admin_entry_desc }}
+      </div>
+
+      <div class="btn-row single-btn-row">
+        <button
+            type="button"
+            class="btn-tool btn-purple small-action-btn"
+            onclick="toggleAdminBox()">
+            {{ t.admin_entry }}
+        </button>
+      </div>
+
+      <div id="adminBox" style="display:none; margin-top:16px;">
+
+        <form method="post" action="{{ url_for('admin.admin_report') }}">
+
+          <div class="form-group">
+            <label class="form-label">{{ t.admin_pin }}</label>
+            <input
+              class="form-input"
+              id="admin_pin"
+              name="admin_pin"
+              type="password"
+              inputmode="numeric"
+              pattern="[0-9]*"
+              autocomplete="new-password"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+              value=""
+              placeholder="{{ t.pin_placeholder }}"
+              readonly
+              onfocus="this.removeAttribute('readonly');"
+              required
+            >
+          </div>
+
+          <div class="btn-row">
+            <button class="btn-tool btn-purple" type="submit">
+              {{ t.admin_login }}
+            </button>
+          </div>
+
+        </form>
+
+      </div>
+
+      <div class="small-note">
+        🛡️ {{ t.admin_pin_required }}
+      </div>
+    </div>
+
+  </div>
+
+  <div class="footer">
+    © {{ t.footer_text }} 💚
+  </div>
+
+</div>
 
 <script>
 const TXT = {
@@ -807,7 +862,7 @@ const TXT = {
   signout_prompt: {{ t.signout_prompt|tojson }},
   pin_empty: {{ t.pin_empty|tojson }},
   paid_until: {{ t.paid_until|tojson }},
-  pin_wrong: {{ t.pin_wrong|tojson }},
+  pin_wrong: {{ t.pin_wrong|tojson }}
 };
 
 async function lookupVolunteer() {
@@ -816,16 +871,18 @@ async function lookupVolunteer() {
   let finalId;
 
   if (branch === "STW") {
-  finalId = "STW-" + id;
+    finalId = "STW-" + id;
   } else {
-      finalId = id;
+    finalId = id;
   }
+
   const box = document.getElementById('personBox');
   const btn = document.getElementById('signInBtn');
 
   if (!id) {
     box.style.display = 'block';
-    box.innerHTML = '<span style="color:#842029;">' + TXT.enter_id_first + '</span>';
+    box.className = 'alert alert-danger';
+    box.innerHTML = TXT.enter_id_first;
     return;
   }
 
@@ -843,91 +900,91 @@ async function lookupVolunteer() {
   box.style.display = 'block';
 
   if (data.ok) {
-    
+
+    box.className = 'alert alert-success';
+
     let html =
       `${TXT.name}：<b>${data.volunteer.姓名}</b><br>` +
       `${TXT.status}：${data.volunteer.状态 || '-'}`;
 
     if (data.volunteer.pin_ok) {
-      html += `<br>${TXT.phone}：${data.volunteer.电话号码 || TXT.not_registered}`;
+      html += `<br>${TXT.phone}：${data.volunteer.电话号码 || '-'}`;
 
       const paidUntil = data.volunteer["月费已缴费至"];
 
       if (paidUntil && paidUntil !== "-") {
         html += `<br>${TXT.paid_until}：${paidUntil}`;
-      } else {
-        html += `<br>${TXT.no_contribution}`;
       }
-
     } else if (pin) {
       html += `<br><span style="color:#842029;">${TXT.pin_wrong}</span>`;
     }
 
     if (data.today_assignments && data.today_assignments.length > 0) {
 
-        html += `<br><hr>`;
-        html += `<b style="color:#198754;">📅 今天正式安排</b>`;
+      html += `<br><hr>`;
+      html += `<b>📅 今天正式安排</b>`;
 
-        data.today_assignments.forEach(a => {
-
-            html += `
-                <div style="
-                    margin-top:10px;
-                    padding:10px;
-                    background:#f3fff4;
-                    border:1px solid #b9e5c0;
-                    border-radius:10px;
-                ">
-                    📍 <b>${a.assigned_place || "-"}</b><br>
-                    👷 ${a.role || "-"}<br>
-                    🕒 ${a.start_time || "-"} ～ ${a.end_time || "-"}
-                </div>
-            `;
-
-        });
+      data.today_assignments.forEach(a => {
+        html += `
+          <div style="margin-top:10px;">
+            地点：<b>${a.assigned_place || "-"}</b><br>
+            岗位：${a.role || "-"}<br>
+            时间：${a.start_time || "-"} ～ ${a.end_time || "-"}
+          </div>
+        `;
+      });
 
     } else {
-
-        html += `
-            <br><hr>
-            <div style="
-                color:#b02a37;
-                font-weight:bold;
-            ">
-            ❌ 今天没有正式安排
-            </div>
-        `;
-
+      html += `
+        <br><hr>
+        <b style="color:#b02a37;">今天没有正式安排</b>
+      `;
     }
 
     box.innerHTML = html;
     btn.disabled = false;
 
   } else {
-    box.innerHTML = `<span style="color:#842029;">${TXT.not_found_id}：${finalId}</span>`;
+    box.className = 'alert alert-danger';
+    box.innerHTML = `${TXT.not_found_id}：${finalId}`;
   }
 }
+
 function toggleBranch() {
+  const btn = document.getElementById("branch_btn");
+  const branch = document.getElementById("branch");
 
-    const btn = document.getElementById("branch_btn");
-    const branch = document.getElementById("branch");
+  if (branch.value === "CHE") {
+    branch.value = "STW";
+    btn.innerText = "STW";
+    btn.className = "btn-tool btn-danger branch-btn";
+  } else {
+    branch.value = "CHE";
+    btn.innerText = "CHE";
+    btn.className = "btn-tool btn-success branch-btn";
+  }
+}
 
-    if (branch.value === "CHE") {
+function toggleCardNo() {
+    const role = document.getElementById("role").value;
+    const group = document.getElementById("card_no_group");
 
-        branch.value = "STW";
-
-        btn.innerText = "STW";
-        btn.style.background = "#dc3545";
-
+    if (role === "值班") {
+        group.style.display = "block";
     } else {
-
-        branch.value = "CHE";
-
-        btn.innerText = "CHE";
-        btn.style.background = "#28a745";
-
+        group.style.display = "none";
     }
 
+}
+
+function toggleAdminBox() {
+  const box = document.getElementById("adminBox");
+
+  if (box.style.display === "none") {
+    box.style.display = "block";
+  } else {
+    box.style.display = "none";
+  }
 }
 
 function quickSignIn() {
@@ -949,50 +1006,65 @@ function quickSignIn() {
   return true;
 }
 
-function askSignOutPin(form) {
-  const pin = prompt(TXT.signout_prompt);
-  if (pin === null) return false;
-  if (!pin.trim()) {
-    alert(TXT.pin_empty);
-    return false;
+let pendingSignOutId = "";
+
+function submitQuickSignOut() {
+  const volunteerId = document.getElementById("volunteer_id").value.trim();
+
+  if (!volunteerId) {
+    alert("请先输入义工编号");
+    return;
   }
-  form.querySelector('input[name="pin"]').value = pin.trim();
-  return true;
+
+  const branch = document.getElementById("branch").value;
+
+  pendingSignOutId = volunteerId;
+
+  if (
+    branch === "STW" &&
+    volunteerId &&
+    !volunteerId.toUpperCase().startsWith("STW")
+  ) {
+    pendingSignOutId = "STW-" + volunteerId;
+  }
+
+  document.getElementById("dialog_pin").value = "";
+  document.getElementById("signOutDialog").style.display = "flex";
+
+  setTimeout(function() {
+    document.getElementById("dialog_pin").focus();
+  }, 100);
 }
 
-async function askQuickSignOut() {
-    const volunteerId = document.getElementById("volunteer_id").value.trim();
+function closeSignOutDialog() {
+  document.getElementById("signOutDialog").style.display = "none";
+}
 
-    if (!volunteerId) {
-        alert("请先输入义工编号");
-        return false;
-    }
+function confirmSignOut() {
+  const pin = document.getElementById("dialog_pin").value.trim();
 
-    const pin = prompt("请输入PIN进行签退");
+  if (!pin) {
+    alert("请输入 PIN");
+    document.getElementById("dialog_pin").focus();
+    return;
+  }
 
-    if (pin === null) return false;
+  document.getElementById("signout_volunteer_id").value = pendingSignOutId;
+  document.getElementById("signout_pin").value = pin;
 
-    if (!pin.trim()) {
-        alert("PIN不能为空");
-        return false;
-    }
+  document.getElementById("quickSignOutForm").submit();
+}
 
-    const branch = document.getElementById("branch").value;
-    let finalId = volunteerId;
-
-    if (branch === "STW" && volunteerId && !volunteerId.toUpperCase().startsWith("STW")) {
-        finalId = "STW-" + volunteerId;
-    }
-
-    document.getElementById("signout_volunteer_id").value = finalId;
-    document.getElementById("signout_pin").value = pin.trim();
-
-    return true;
+function toggleDialogPin(cb) {
+  const input = document.getElementById("dialog_pin");
+  input.type = cb.checked ? "text" : "password";
 }
 
 setTimeout(() => {
-  document.querySelectorAll('.msg.ok').forEach(el => {
-    el.style.display = 'none';
+  document.querySelectorAll('.alert-success').forEach(el => {
+    if (el.id !== 'personBox') {
+      el.style.display = 'none';
+    }
   });
 }, 10000);
 
@@ -1033,9 +1105,67 @@ window.addEventListener("load", function() {
   if (pinInput) pinInput.value = "";
   if (todayCodeInput) todayCodeInput.value = "";
   if (adminPin) adminPin.value = "";
-});
 
+  toggleCardNoBox();
+});
 </script>
+
+<div id="signOutDialog" class="dialog-mask" style="display:none;">
+
+    <div class="dialog-card">
+
+        <h2 class="section-title">
+            {{ t.confirm_signout }}
+        </h2>
+
+        <div class="page-subtitle">
+            请输入该义工 PIN
+        </div>
+
+        <div class="form-group">
+
+            <input
+                id="dialog_pin"
+                class="form-input"
+                type="password"
+                placeholder="请输入 PIN">
+
+        </div>
+
+        <label style="display:flex;align-items:center;gap:10px;margin-bottom:20px;">
+
+            <input
+                type="checkbox"
+                onchange="toggleDialogPin(this)">
+
+            显示 PIN
+
+        </label>
+
+        <div class="btn-row">
+
+            <button
+                class="btn-tool btn-secondary"
+                onclick="closeSignOutDialog()">
+
+                取消
+
+            </button>
+
+            <button
+                class="btn-tool btn-danger"
+                onclick="confirmSignOut()">
+
+                确认签退
+
+            </button>
+
+        </div>
+
+    </div>
+
+</div>
+
 </body>
 </html>
 """
@@ -1048,86 +1178,130 @@ EDIT_PAGE = """
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ t.edit_title }}</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Microsoft YaHei", Arial, sans-serif; background:#f6f6f6; margin:0; }
-    .wrap { max-width: 760px; margin: 0 auto; padding: 18px; }
-    .card { background:white; border-radius:18px; padding:20px; box-shadow:0 2px 12px rgba(0,0,0,.08); }
-    h1 { font-size: 28px; }
-    label { font-size: 20px; font-weight: 700; display:block; margin-top:14px; margin-bottom:8px; }
-    input, select { width:100%; font-size: 24px; padding: 14px; border-radius: 12px; border:1px solid #ccc; box-sizing:border-box; }
-    button { font-size: 22px; font-weight: 800; padding: 14px 18px; border:0; border-radius: 14px; cursor:pointer; margin-top:16px; }
-    .save { background:#198754; color:white; width:100%; }
-    .delete { background:#dc3545; color:white; width:100%; }
-    .back { display:inline-block; margin-bottom:14px; font-size:20px; }
-    .info { font-size:22px; line-height:1.7; background:#f8f9fa; padding:12px; border-radius:12px; }
-  </style>
+
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/toolbox.css') }}">
 </head>
+
 <body>
-<div class="wrap">
-  <a class="back" href="{{ url_for('index', lang=lang) }}">← {{ t.back_home }}</a>
+
+<div class="page">
+
   <div class="card">
-    <h1>{{ t.edit_title }}</h1>
-    <div class="info">
-      {{ t.name }}：<b>{{ record.get('姓名','') }}</b><br>
-      {{ t.date }}：{{ record.get('日期','') }}
+
+    <h1 class="page-title">✏️ {{ t.edit_title }}</h1>
+
+    <div class="summary-grid">
+      <div class="summary-box">
+        <div class="summary-title">{{ t.name }}</div>
+        <div class="summary-value">{{ record.get('姓名','') }}</div>
+      </div>
+
+      <div class="summary-box">
+        <div class="summary-title">{{ t.date }}</div>
+        <div class="summary-value">{{ record.get('日期','') }}</div>
+      </div>
     </div>
 
     <form method="post" action="{{ url_for('save_edit', lang=lang) }}">
       <input type="hidden" name="row_number" value="{{ row_number }}">
 
-      <label>{{ t.role }}</label>
-      <select name="role" required>
-        {% for role in roles %}
-          <option value="{{ role }}" {% if role == record.get('岗位') %}selected{% endif %}>{{ role_label(role) }}</option>
-        {% endfor %}
-      </select>
+      <div class="form-group">
+        <label class="form-label">{{ t.role }}</label>
+        <select class="form-input" name="role" required>
+          {% for role in roles %}
+            <option value="{{ role }}"
+              {% if role == record.get('岗位') %}selected{% endif %}>
+              {{ role_label(role) }}
+            </option>
+          {% endfor %}
+        </select>
+      </div>
 
-      <label>{{ t.card_no_label }}</label>
-      <input
+      <div class="form-group">
+        <label class="form-label">{{ t.card_no_label }}</label>
+        <input
+          class="form-input"
           type="text"
           name="card_no"
           value="{{ record.get('card_no','') }}"
           placeholder="{{ t.card_no_placeholder }}"
-      >
+        >
+      </div>
 
-      <label>{{ t.start_time }}</label>
-      <input name="start_time" value="{{ record.get('开始时间','') }}" placeholder="10:00am">
+      <div class="form-group">
+        <label class="form-label">{{ t.start_time }}</label>
+        <input
+          class="form-input"
+          name="start_time"
+          value="{{ record.get('开始时间','') }}"
+          placeholder="10:00am"
+        >
+      </div>
 
-      <label>{{ t.end_time }}</label>
-      <input name="end_time" value="{{ record.get('结束时间','') }}" placeholder="">
+      <div class="form-group">
+        <label class="form-label">{{ t.end_time }}</label>
+        <input
+          class="form-input"
+          name="end_time"
+          value="{{ record.get('结束时间','') }}"
+        >
+      </div>
 
-      <label>{{ t.remark }}</label>
-      <input name="remark" value="{{ record.get('备注','') }}">
+      <div class="form-group">
+        <label class="form-label">{{ t.remark }}</label>
+        <input
+          class="form-input"
+          name="remark"
+          value="{{ record.get('备注','') }}"
+        >
+      </div>
 
-      <button class="save" type="submit">{{ t.save_edit }}</button>
+      <div class="btn-row">
+        <button class="btn-tool btn-success" type="submit">
+          {{ t.save_edit }}
+        </button>
+      </div>
+
     </form>
+
+    <hr>
 
     <form method="post"
-      action="{{ url_for('delete_edit', lang=lang) }}"
-      onsubmit="return confirm({{ t.delete_confirm|tojson }});">
+          action="{{ url_for('delete_edit', lang=lang) }}"
+          onsubmit="return confirm({{ t.delete_confirm|tojson }});">
 
-    <input type="hidden" name="row_number" value="{{ row_number }}">
+      <input type="hidden" name="row_number" value="{{ row_number }}">
 
-    <input
-        type="password"
-        name="pin"
-        placeholder="{{ t.pin_placeholder }}"
-        required
-        style="
-            font-size:24px;
-            padding:12px;
-            width:100%;
-            margin-bottom:12px;
-        "
-    >
+      <div class="form-group">
+        <label class="form-label">{{ t.admin_pin }}</label>
+        <input
+          class="form-input"
+          type="password"
+          name="pin"
+          placeholder="{{ t.pin_placeholder }}"
+          required
+        >
+      </div>
 
-    <button class="delete" type="submit">
-        {{ t.delete_record }}
-    </button>
+      <div class="btn-row">
+        <button class="btn-tool btn-danger" type="submit">
+          {{ t.delete_record }}
+        </button>
+      </div>
 
     </form>
+
+    <div class="btn-row">
+      <a class="btn-tool btn-secondary"
+         href="{{ url_for('index', lang=lang) }}">
+        {{ t.back_home }}
+      </a>
+    </div>
+
   </div>
+
 </div>
+
 </body>
 </html>
 """
@@ -1137,59 +1311,128 @@ PIN_PAGE = """
 <!doctype html>
 <html lang="{{ t.html_lang }}">
 <head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+
 <title>{{ t.change_pin_title }}</title>
-<style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Microsoft YaHei",Arial,sans-serif;background:#f6f6f6;padding:20px}
-.card{max-width:600px;margin:auto;background:white;border-radius:18px;padding:20px;box-shadow:0 2px 12px rgba(0,0,0,.08)}
-input{width:100%;font-size:24px;margin:10px 0;padding:14px;border-radius:12px;border:1px solid #ccc;box-sizing:border-box}
-button{font-size:24px;padding:14px;width:100%;border:0;border-radius:14px;background:#198754;color:white;font-weight:800}
-a{font-size:20px}
-.msg { padding:14px; border-radius:12px; font-size:20px; margin-bottom:14px; }
-.ok { background:#d1e7dd; color:#0f5132; }
-.bad { background:#f8d7da; color:#842029; }
-</style>
+
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
+
 </head>
+
 <body>
-<div class="card">
-<a href="{{ url_for('index') }}">← {{ t.back_home }}</a>
-<h2>{{ t.change_pin_title }}</h2>
 
-{% with messages = get_flashed_messages(with_categories=true) %}
-  {% for category, message in messages %}
-    <div class="msg {{ 'ok' if category == 'ok' else 'bad' }}">{{ message }}</div>
-  {% endfor %}
-{% endwith %}
+<div class="page">
 
-<form method="post">
-<input name="id" placeholder="{{ t.enter_id }}" inputmode="numeric" required>
-<input name="old" type="password" placeholder="{{ t.old_pin }}" inputmode="numeric" required>
-<input name="new" type="password" placeholder="{{ t.new_pin }}" inputmode="numeric" required>
-<input name="confirm" type="password" placeholder="{{ t.confirm_new_pin }}" inputmode="numeric" required>
-<button type="submit">{{ t.save }}</button>
-</form>
+    <div class="card">
+
+        <h1 class="page-title">
+            🔑 {{ t.change_pin_title }}
+        </h1>
+
+        <div class="page-subtitle">
+            为了帐号安全，请定期更换 PIN。
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% for category, message in messages %}
+                <div class="alert {{ 'alert-success' if category == 'ok' else 'alert-danger' }}">
+                    {{ message }}
+                </div>
+            {% endfor %}
+        {% endwith %}
+
+        <form method="post">
+
+            <div class="form-group">
+                <label class="form-label">
+                    {{ t.enter_id }}
+                </label>
+
+                <input
+                    class="form-input"
+                    name="id"
+                    inputmode="numeric"
+                    placeholder="{{ t.enter_id }}"
+                    required>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">
+                    {{ t.old_pin }}
+                </label>
+
+                <input
+                    class="form-input"
+                    name="old"
+                    type="password"
+                    inputmode="numeric"
+                    placeholder="{{ t.old_pin }}"
+                    required>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">
+                    {{ t.new_pin }}
+                </label>
+
+                <input
+                    class="form-input"
+                    name="new"
+                    type="password"
+                    inputmode="numeric"
+                    placeholder="{{ t.new_pin }}"
+                    required>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">
+                    {{ t.confirm_new_pin }}
+                </label>
+
+                <input
+                    class="form-input"
+                    name="confirm"
+                    type="password"
+                    inputmode="numeric"
+                    placeholder="{{ t.confirm_new_pin }}"
+                    required>
+            </div>
+
+            <div class="btn-row">
+
+                <button
+                    class="btn-tool btn-success"
+                    type="submit">
+
+                    {{ t.save }}
+
+                </button>
+
+            </div>
+
+        </form>
+
+        <div class="btn-row">
+
+            <a
+                class="btn-tool btn-secondary"
+                href="{{ url_for('index') }}">
+
+                {{ t.back_home }}
+
+            </a>
+
+        </div>
+
+    </div>
+
 </div>
+
 </body>
 </html>
 """
-
-def get_local_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-    except:
-        ip = "127.0.0.1"
-    finally:
-        s.close()
-    return ip
-
-
-def make_qr_base64(text):
-    img = qrcode.make(text)
-    buffer = BytesIO()
-    img.save(buffer, format="PNG")
-    return base64.b64encode(buffer.getvalue()).decode()
 
 # =========================
 # 7) 路由
@@ -1210,75 +1453,6 @@ def index():
         not_out=stats["open"],
         done_out=stats["finished"],
     )
-
-
-@app.route("/qr")
-def qr_page():
-    ip = get_local_ip()
-    url = f"http://{ip}:5000"
-    qr_base64 = make_qr_base64(url)
-
-    return f"""
-    <!DOCTYPE html>
-    <html lang="zh">
-    <head>
-        <meta charset="UTF-8">
-        <title>扫码签到</title>
-        <style>
-            body {{
-                font-family: "Microsoft YaHei", Arial, sans-serif;
-                text-align: center;
-                background: #fff8e7;
-                padding: 30px;
-            }}
-            .card {{
-                max-width: 520px;
-                margin: auto;
-                background: white;
-                border-radius: 24px;
-                padding: 30px;
-                box-shadow: 0 8px 30px rgba(0,0,0,0.12);
-            }}
-            h1 {{
-                font-size: 34px;
-                margin-bottom: 8px;
-            }}
-            h2 {{
-                font-size: 22px;
-                color: #8a5a00;
-                margin-top: 0;
-            }}
-            img {{
-                width: 320px;
-                height: 320px;
-                margin: 20px 0;
-            }}
-            .url {{
-                font-size: 18px;
-                word-break: break-all;
-                color: #333;
-            }}
-            .tip {{
-                font-size: 20px;
-                margin-top: 18px;
-                color: #555;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h1>义工值班签到系统</h1>
-            <h2>蕉赖观音堂分会</h2>
-
-            <img src="data:image/png;base64,{qr_base64}">
-
-            <div class="url">{url}</div>
-            <div class="tip">请用手机扫码签到 / 签退</div>
-            <div class="tip">请输入义工编号与 PIN</div>
-        </div>
-    </body>
-    </html>
-    """
 
 @app.route("/signin", methods=["POST"])
 def do_sign_in():
@@ -1544,153 +1718,6 @@ def get_member_payment(member_id):
     return months, latest
 
 
-@app.route("/member_old", methods=["GET", "POST"])
-def member_page():
-    lang = request.args.get("lang", "zh")
-    t = TEXT.get(lang, TEXT["zh"])
-
-    result = None
-    error = ""
-
-    if request.method == "POST":
-        raw_id = request.form.get("member_id", "")
-        pin = request.form.get("pin", "")
-        member_id = normalize_member_query_id(raw_id)
-
-        member = db_query("""
-            select *
-            from members
-            where member_id = %s
-        """, (member_id,), fetchone=True)
-
-        if not member:
-            error = t["member_not_found"]
-        elif not verify_member_pin(member, pin):
-            error = "❌ PIN 不正确"
-        else:
-            months, latest = get_member_payment(member_id)
-            if latest:
-                y, m = latest.split("-")
-                latest_display = f"{y}年{int(m)}月"
-            else:
-                latest_display = "暂无记录"
-            result = {
-                "member_id": member_id,
-                "name": member.get("name") or "",
-                "english_name": member.get("english_name") or "",
-                "phone": member.get("phone") or "",
-                "months": months,
-                "latest": latest_display,
-            }
-
-
-    return render_template_string("""
-<!doctype html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>月费查询</title>
-<style>
-body {
-    font-family: "Microsoft YaHei", Arial, sans-serif;
-    background:#f6f6f6;
-    padding:20px;
-}
-.card {
-    max-width:650px;
-    margin:auto;
-    background:white;
-    border-radius:18px;
-    padding:22px;
-    box-shadow:0 2px 12px rgba(0,0,0,.08);
-}
-input {
-    width:100%;
-    font-size:26px;
-    padding:14px;
-    margin:8px 0 16px;
-    border-radius:12px;
-    border:1px solid #ccc;
-    box-sizing:border-box;
-}
-button {
-    width:100%;
-    font-size:26px;
-    padding:14px;
-    border:0;
-    border-radius:14px;
-    background:#198754;
-    color:white;
-    font-weight:bold;
-}
-.result {
-    margin-top:20px;
-    font-size:22px;
-    line-height:1.8;
-    background:#f8f9fa;
-    padding:16px;
-    border-radius:12px;
-}
-.error {
-    margin-top:20px;
-    font-size:22px;
-    color:#842029;
-    background:#f8d7da;
-    padding:14px;
-    border-radius:12px;
-}
-a { font-size:20px; }
-</style>
-</head>
-<body>
-<div class="card">
-<a href="/">← 返回签到首页</a>
-<h1>月费查询</h1>
-
-<form method="post">
-    <label>月费编号</label>
-    <input name="member_id" placeholder="例如：108 / CHE-108 / 0108" required>
-
-    <label>PIN</label>
-    <input
-        id="pin"
-        name="pin"
-        type="password"
-        inputmode="numeric"
-        pattern="[0-9]*"
-        autocomplete="new-password"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck="false"
-        value=""
-        placeholder="{{ t.pin_placeholder }}"
-        readonly
-        onfocus="this.removeAttribute('readonly');"
-        required
-    >
-
-    <button type="submit">查询</button>
-</form>
-
-{% if error %}
-<div class="error">{{ error }}</div>
-{% endif %}
-
-{% if result %}
-<div class="result">
-    姓名：<b>{{ result.name }}</b><br>
-    英文名：{{ result.english_name or "-" }}<br>
-    电话：{{ result.phone or "-" }}<br>
-    月费编号：{{ result.member_id }}<br>
-    已缴费月份：{{ ", ".join(result.months) if result.months else "暂无记录" }}<br>
-    已缴费至：<b>{{ result.latest or "暂无记录" }}</b>
-</div>
-{% endif %}
-</div>
-</body>
-</html>
-""", result=result, error=error)
-
 @app.route("/api/volunteer/<volunteer_id>", methods=["POST"])
 def api_volunteer(volunteer_id):
     try:
@@ -1766,41 +1793,6 @@ def api_volunteer(volunteer_id):
             "error": str(e)
         })
     
-@app.route("/member_old", methods=["GET", "POST"])
-def member():
-    if request.method == "POST":
-        member_id = request.form.get("member_id")
-        pin = request.form.get("pin")
-
-        # 查人
-        m = db_query("""
-            select * from members where member_id = %s
-        """, (member_id,), fetchone=True)
-
-        if not m:
-            return "❌ 找不到佛友"
-
-        # PIN 验证
-        real_pin = m.get("pin") or m.get("phone")[-4:]
-        if str(pin) != str(real_pin):
-            return "❌ PIN 错误"
-
-        months, latest = get_member_payment(member_id)
-
-        return f"""
-        姓名：{m['name']}<br>
-        已缴费月份：{', '.join(months)}<br>
-        已缴费至：{latest}
-        """
-
-    return """
-    <form method="post">
-        编号：<input name="member_id"><br>
-        PIN：<input name="pin"><br>
-        <button>查询</button>
-    </form>
-    """
-
 # =========================
 # 8) 修改 PIN
 # =========================
@@ -1831,25 +1823,6 @@ def change_pin(volunteer_id: str, old_pin: str, new_pin: str, confirm_pin: str):
     """, (new_pin, normalize_member_id(volunteer_id)))
 
     return True, "PIN 已更新"
-
-
-@app.route('/manifest.json')
-def manifest():
-    return {
-        "name": "蕉赖观音堂管理员",
-        "short_name": "管理员",
-        "start_url": "/admin-home",
-        "display": "standalone",
-        "background_color": "#7a0000",
-        "theme_color": "#7a0000",
-        "icons": [
-            {
-                "src": "/static/icon.png",
-                "sizes": "512x512",
-                "type": "image/png"
-            }
-        ]
-    }
 
 
 @app.route("/change_pin", methods=["GET", "POST"])

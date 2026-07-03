@@ -4,6 +4,7 @@ from functools import lru_cache
 
 from db import get_conn
 from psycopg2.extras import RealDictCursor
+from schedule.builders.time_utils import malaysia_now
 
 
 @lru_cache(maxsize=1)
@@ -53,3 +54,41 @@ def save_schedule_setting(key, value):
 
     # 清除缓存，下次重新读取数据库
     get_schedule_settings.cache_clear()
+
+def get_schedule_setting(key, default="false"):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                select value
+                from schedule_settings
+                where key = %s
+            """, (key,))
+            row = cur.fetchone()
+
+    if not row:
+        return default
+
+    return row["value"]
+
+def set_schedule_setting(key, value, updated_by="admin"):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                insert into schedule_settings (key, value, updated_at, updated_by)
+                values (%s, %s, %s, %s)
+                on conflict (key)
+                do update set
+                    value = excluded.value,
+                    updated_at = excluded.updated_at,
+                    updated_by = excluded.updated_by
+            """, (
+                key,
+                value,
+                malaysia_now(),
+                updated_by
+            ))
+        conn.commit()
+
+
+def is_schedule_setting_on(key):
+    return get_schedule_setting(key) == "true"

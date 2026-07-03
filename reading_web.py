@@ -130,6 +130,7 @@ def get_today_attendees():
 
     return sorted([r["name"] for r in rows if r.get("name")])
 
+
 @reading_bp.route("/reading", methods=["GET", "POST"])
 def reading():
     t = get_text()
@@ -385,6 +386,7 @@ def reading():
         topic_options=topic_options
     )
 
+    
 @reading_bp.route("/reading_delete/<int:record_id>")
 def reading_delete(record_id):
     db_query("""
@@ -419,22 +421,112 @@ def reading_edit(record_id):
         return redirect(url_for("reading.reading"))
 
     html = """
-    <h2>修改白话佛法记录</h2>
-    <form method="post">
-        <p>姓名：{{ name }}</p>
-        <p>身份：{{ identity }}</p>
+    <!doctype html>
+    <html lang="zh">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
 
-        <p>主题：</p>
-        <input name="topic" value="{{ topic }}" style="font-size:22px;width:320px;">
+        <title>修改白话佛法记录</title>
 
-        <p>场次 / 备注：</p>
-        <input name="session" value="{{ session }}" style="font-size:22px;width:320px;">
+        <link rel="stylesheet"
+            href="{{ url_for('static', filename='css/toolbox.css') }}">
+    </head>
 
-        <br><br>
-        <button type="submit" style="font-size:22px;">保存修改</button>
-    </form>
-    <br>
-    <a href="/reading">返回</a>
+    <body>
+
+    <div class="page">
+
+        <div class="card">
+
+            <h1 class="page-title">
+                ✏️ 修改白话佛法记录
+            </h1>
+
+            <div class="summary-grid">
+
+                <div class="summary-box">
+                    <div class="summary-title">
+                        姓名
+                    </div>
+
+                    <div class="summary-value">
+                        {{ name }}
+                    </div>
+                </div>
+
+                <div class="summary-box">
+                    <div class="summary-title">
+                        身份
+                    </div>
+
+                    <div class="summary-value">
+                        {{ identity }}
+                    </div>
+                </div>
+
+            </div>
+
+            <form method="post">
+
+                <div class="form-group">
+
+                    <label class="form-label">
+                        共修主题
+                    </label>
+
+                    <input
+                        class="form-input"
+                        name="topic"
+                        value="{{ topic }}">
+
+                </div>
+
+                <div class="form-group">
+
+                    <label class="form-label">
+                        场次 / 备注
+                    </label>
+
+                    <input
+                        class="form-input"
+                        name="session"
+                        value="{{ session }}">
+
+                </div>
+
+                <div class="btn-row">
+
+                    <button
+                        class="btn-tool btn-success"
+                        type="submit">
+
+                        保存修改
+
+                    </button>
+
+                </div>
+
+            </form>
+
+            <div class="btn-row">
+
+                <a
+                    class="btn-tool btn-secondary"
+                    href="{{ url_for('reading.reading') }}">
+
+                    返回共修记录
+
+                </a>
+
+            </div>
+
+        </div>
+
+    </div>
+
+    </body>
+    </html>
     """
 
     return render_template_string(

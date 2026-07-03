@@ -15,7 +15,8 @@ from schedule.builders.schedule_builder import (
 )
 
 def build_shortage_summary_for_admin(date_str):
-    msg = build_shortage_notice_from_assignments(date_str)
+
+    msg = build_shortage_notice_from_assignments(date_str) or ""
 
     lines = []
 
@@ -67,45 +68,67 @@ def build_shortage_notice_from_assignments(date_str):
                 if key in counts:
                     counts[key] += 1
 
-    shortages = []
+    morning_need = (
+        max(0, targets["橙观音堂"] - counts["橙观音堂"])
+        + max(0, targets["橙活动中心"] - counts["橙活动中心"])
+    )
 
-    for key, target in targets.items():
+    afternoon_need = (
+        max(0, targets["黄观音堂"] - counts["黄观音堂"])
+        + max(0, targets["黄活动中心"] - counts["黄活动中心"])
+    )
 
-        current = counts.get(key, 0)
+    cleaning_need = max(
+        0,
+        targets["卫生"] - counts["卫生"]
+    )
 
-        if current < target:
+    # ===== 今日 / 明日 =====
 
-            shortages.append(
-                f"🔴 {key}：缺 {target-current} 位"
-            )
+    today = malaysia_today()
 
-        elif current == target:
+    if date_obj == today:
+        day_text = "今日"
+    elif date_obj == today + timedelta(days=1):
+        day_text = "明日"
+    else:
+        day_text = f"{date_obj.month}月{date_obj.day}日"
 
-            shortages.append(
-                f"🟢 {key}：已满"
-            )
+    date_text = f"{date_obj.month}月{date_obj.day}日"
 
-        else:
+    # ===== 全部足够 =====
 
-            shortages.append(
-                f"🟢 {key}：充足"
-            )
+    if (
+        morning_need == 0
+        and afternoon_need == 0
+        and cleaning_need == 0
+    ):
 
-    msg = "师兄们，大家好！\n\n"
+        return (
+            f"✅ {day_text}义工已足够，无需发送通知。"
+        )
 
-    msg += f"📅 日期：{date_str}\n"
-    msg += f"🌙 {special_day_info['lunar_text']}\n"
+    # ===== WhatsApp =====
 
-    if special_day_info["is_special"]:
-        msg += f"🛕 {'、'.join(special_day_info['special_names'])}\n"
+    msg = (
+        "师兄们，大家好！🙏\n\n"
+        f"📅 {day_text}（{date_text}）义工尚需\n\n"
+    )
 
-    msg += f"📋 模板：{special_day_info['template_text']}\n\n"
+    # 今日不显示卫生
+    if day_text != "今日" and cleaning_need > 0:
+        msg += f"🧹 卫生义工　{cleaning_need} 位\n"
 
-    msg += "明天义工岗位情况：\n\n"
+    if morning_need > 0:
+        msg += f"🕙 10:00am ～ 2:00pm　{morning_need} 位\n"
 
-    msg += "\n".join(shortages)
+    if afternoon_need > 0:
+        msg += f"🕑 2:00pm ～ 6:00pm　{afternoon_need} 位\n"
 
-    msg += "\n\n欢迎大家随缘发心护持观音堂。\n\n感恩大家 🙏🙏🙏"
+    msg += (
+        "\n欢迎有空的师兄随喜报名护持。\n\n"
+        "感恩大家 🙏🙏🙏"
+    )
 
     return msg
 

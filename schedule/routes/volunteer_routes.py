@@ -2,7 +2,7 @@
 
 import calendar
 
-from flask import request, redirect, url_for, render_template_string, redirect, session
+from flask import request, redirect, url_for, render_template_string, redirect, session, jsonify
 from psycopg2.extras import RealDictCursor
 
 from db import get_conn
@@ -12,11 +12,15 @@ from utils import apply_branch_prefix
 from schedule.helpers import (
     find_volunteer_by_keyword,
     build_monthly_signup_text,
+    get_daily_buddha_quote,
 )
 
 from lunar_rules import get_special_day_info
 from schedule.constants import TIME_OPTIONS
-from schedule.builders.schedule_builder import patch_schedule_for_date
+from schedule.services.quote_service import get_daily_dharma
+from schedule.services.settings_service import is_schedule_setting_on
+
+from schedule.builders.schedule_builder import sync_schedule_after_signup_change
 from schedule.builders.time_utils import time_to_minutes, malaysia_today, malaysia_now
 from schedule.services.publish_service import is_schedule_published
 from schedule.services.whatsapp_service import build_whatsapp_from_assigned
@@ -41,6 +45,9 @@ def volunteer_home():
 
     now = malaysia_now()
     today = now.date()
+
+    multi_day_signup_open = is_schedule_setting_on("multi_day_signup_open")
+    meal_signup_open = is_schedule_setting_on("meal_signup_open")
 
     if today.month == 12:
         prebook_year = today.year + 1
@@ -105,21 +112,26 @@ def volunteer_home():
         meal_date=meal_date,
         meal_button_date=meal_button_date,
         meal_count=meal_count,
+        multi_day_signup_open=multi_day_signup_open,
+        meal_signup_open=meal_signup_open,
     )
 
 @schedule_bp.route("/volunteer/signup", methods=["POST"])
 def volunteer_signup():
+
     keyword = request.form.get("keyword", "").strip()
     signup_date = request.form.get("signup_date", "").strip()
     role = request.form.get("role", "").strip()
     start_time = request.form.get("start_time", "").strip()
     end_time = request.form.get("end_time", "").strip()
     branch = request.form.get("branch", "CHE").strip().upper()
-    keyword = apply_branch_prefix(keyword, branch)
 
-    if keyword.isdigit():
-        if branch == "STW":
-            keyword = f"STW-{keyword}"
+    keyword = apply_branch_prefix(keyword, branch)
+    daily_quote = get_daily_buddha_quote()
+
+    if keyword.isdigit() and branch == "STW":
+        keyword = f"STW-{keyword}"
+
     matches = find_volunteer_by_keyword(keyword)
 
     if not matches:
@@ -132,7 +144,14 @@ def volunteer_signup():
     vol_id = str(vol["id"])
     name = str(vol["name"])
 
+    meal_role = None
+
+    # =========================
+    # 处理岗位时间
+    # =========================
+
     if role == "值班":
+
         s_min = time_to_minutes(start_time)
         e_min = time_to_minutes(end_time)
 
@@ -143,10 +162,31 @@ def volunteer_signup():
             return "❌ 结束时间必须比开始时间迟<br><a href='/volunteer'>返回</a>"
 
     elif role == "卫生":
+
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    select count(*) as cnt
+                    from volunteer_schedule_signups
+                    where signup_date = %s
+                    and role = '卫生'
+                    and coalesce(status, 'pending') <> 'cancelled'
+                """, (signup_date,))
+
+                cleaning_count = int(cur.fetchone()["cnt"] or 0)
+
+        if cleaning_count >= 3:
+            return """
+            <h2>❌ 卫生岗位已满</h2>
+            <p>感恩您的发心，今天卫生已有 3 位义工报名。</p>
+            <p>请改报其他日期或联系负责人。</p>
+            <a href="/volunteer">返回义工报名</a>
+            """
+
         date_obj = datetime.strptime(signup_date, "%Y-%m-%d").date()
         special_info = get_special_day_info(date_obj)
 
-        if special_info["template_type"] == "buddhist_festival":
+        if special_info.get("template_type") == "buddhist_festival":
             start_time = "6:00am"
             end_time = "8:00am"
         else:
@@ -154,6 +194,7 @@ def volunteer_signup():
             end_time = "10:00am"
 
     elif role == "供台":
+
         date_obj = datetime.strptime(signup_date, "%Y-%m-%d").date()
         special_info = get_special_day_info(date_obj)
 
@@ -169,8 +210,8 @@ def volunteer_signup():
         end_time = "8:00am"
 
     elif role == "膳食":
-        selected_date = datetime.strptime(signup_date, "%Y-%m-%d").date()
 
+        selected_date = datetime.strptime(signup_date, "%Y-%m-%d").date()
         meal_date, special_info = find_next_meal_signup_date(selected_date, days_ahead=7)
 
         if not meal_date:
@@ -185,23 +226,16 @@ def volunteer_signup():
         start_time = "8:00am"
         end_time = "2:00pm"
 
-    elif role == "膳食":
-        date_obj = datetime.strptime(signup_date, "%Y-%m-%d").date()
-        special_info = get_special_day_info(date_obj)
+    else:
+        return "❌ 岗位错误，请重新选择<br><a href='/volunteer'>返回</a>"
 
-        if special_info.get("template_type") not in ["lunar_1_15", "buddhist_festival"]:
-            return """
-            <h1>❌ 这一天不开放膳食组报名</h1>
-            <p>膳食组通常只开放在初一、十五或佛诞大日子。</p>
-            <p>请检查日期是否选错。</p>
-            <a href="/volunteer">返回重新报名</a>
-            """
-
-        start_time = "8:00am"
-        end_time = "2:00pm"
+    # =========================
+    # 新增 / 更新报名
+    # =========================
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
             cur.execute("""
                 select id
                 from volunteer_schedule_signups
@@ -213,35 +247,6 @@ def volunteer_signup():
             """, (vol_id, signup_date, role))
 
             existing = cur.fetchone()
-            
-            if existing:
-                cur.execute("""
-                    update volunteer_schedule_signups
-                    set start_time = %s,
-                        end_time = %s,
-                        status = 'pending',
-                        assigned_place = null,
-                        remarks = '义工网页更新报名'
-                    where id = %s
-                """, (
-                    start_time,
-                    end_time,
-                    existing["id"]
-                ))
-
-                conn.commit()
-
-                return f"""
-                <h1>✅ 已更新报名</h1>
-                <p>{name}</p>
-                <p>{signup_date}</p>
-                <p>{role}：{start_time} ~ {end_time}</p>
-                <p>系统已用新的资料覆盖旧报名。</p>
-                <a href="/volunteer/day_schedule?date={signup_date}">查看当天值班表</a><br>
-                <a href="/volunteer">继续报名</a>
-                """
-            
-            meal_role = None
 
             if role == "膳食":
                 cur.execute("""
@@ -252,50 +257,166 @@ def volunteer_signup():
                     and coalesce(status, 'pending') <> 'cancelled'
                 """, (signup_date,))
 
-                meal_count = cur.fetchone()["cnt"]
+                meal_count = int(cur.fetchone()["cnt"] or 0)
 
-                if meal_count < 9:
+                if existing:
+                    meal_role = None
+                elif meal_count < 9:
                     meal_role = "派餐义工"
                 else:
                     meal_role = "候补义工"
-                        
-            cur.execute("""
-                insert into volunteer_schedule_signups
-                (volunteer_id, name, signup_date, role, start_time, end_time, status, remarks, meal_role)
-                values (%s, %s, %s, %s, %s, %s, 'pending', '义工报名', %s)
-                returning id
-            """, (
-                vol_id,
-                name,
-                signup_date,
-                role,
-                start_time,
-                end_time,
-                meal_role
-            ))
 
-            signup_id = cur.fetchone()["id"]
+            if existing:
+
+                signup_id = existing["id"]
+
+                cur.execute("""
+                    update volunteer_schedule_signups
+                    set start_time = %s,
+                        end_time = %s,
+                        status = 'pending',
+                        assigned_place = null,
+                        remarks = '义工网页更新报名',
+                        meal_role = %s
+                    where id = %s
+                """, (
+                    start_time,
+                    end_time,
+                    meal_role,
+                    signup_id
+                ))
+
+                result_title = "✅ 已更新报名"
+
+            else:
+
+                cur.execute("""
+                    insert into volunteer_schedule_signups
+                    (
+                        volunteer_id,
+                        name,
+                        signup_date,
+                        role,
+                        start_time,
+                        end_time,
+                        status,
+                        remarks,
+                        meal_role
+                    )
+                    values
+                    (
+                        %s, %s, %s, %s, %s, %s,
+                        'pending',
+                        '义工报名',
+                        %s
+                    )
+                    returning id
+                """, (
+                    vol_id,
+                    name,
+                    signup_date,
+                    role,
+                    start_time,
+                    end_time,
+                    meal_role
+                ))
+
+                signup_id = cur.fetchone()["id"]
+
+                result_title = "🎉 报名成功"
 
             conn.commit()
 
-            if is_schedule_published(signup_date):
-                try:
-                    date_str = signup_date.strftime("%Y-%m-%d") if hasattr(signup_date, "strftime") else str(signup_date)
-                    inserted = patch_schedule_for_date(date_str, only_signup_id=signup_id)
-                    print(f"✅ 自动补排完成，共新增 {inserted} 笔")
-                except Exception as e:
-                    print("自动补排失败：", e)
+    # =========================
+    # V2 同步：只走统一函数
+    # =========================
 
-            if role == "膳食":
+    sync_schedule_after_signup_change(
+        signup_id,
+        action="upsert",
+        changed_by="volunteer"
+    )
+
+    # =========================
+    # 判断发布状态与安排结果
+    # =========================
+
+    published = is_schedule_published(signup_date)
+    
+    assignment_rows = []
+
+    if published:
+
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
                 cur.execute("""
-                    select name
-                    from volunteer_schedule_signups
-                    where signup_date = %s
-                    and role = '膳食'
-                    and coalesce(status, 'pending') <> 'cancelled'
-                    order by created_at, id
-                """, (signup_date,))
+                    select
+                        assigned_place,
+                        shift_label,
+                        start_time,
+                        end_time
+                    from volunteer_schedule_assignments
+                    where signup_id = %s
+                    order by start_time, id
+                """, (signup_id,))
 
+                assignment_rows = cur.fetchall()
+    if published and assignment_rows:
+
+        assignment_lines = ""
+
+        for a in assignment_rows:
+            shift = a.get("shift_label") or ""
+            place = a.get("assigned_place") or ""
+            s = a.get("start_time") or ""
+            e = a.get("end_time") or ""
+
+            assignment_lines += f"""
+            <div class="assignment-line">
+                ✅ {shift} {place}<br>
+                <span>{s} ~ {e}</span>
+            </div>
+            """
+
+        status_html = f"""
+        <div class="alert alert-success">
+            🟢 状态：已加入正式值班表<br><br>
+            {assignment_lines}
+            <br>
+            请依照以上岗位值班。若负责人之后有更新，请以最新正式值班表为准。
+        </div>
+        """
+
+    elif published and not assignment_rows:
+
+        status_html = """
+        <div class="alert alert-warning">
+            🟡 状态：报名成功，等待系统安排<br><br>
+            系统暂时还没有找到适合岗位。<br>
+            负责人会查看后再处理，请以最新正式值班表为准。
+        </div>
+        """
+
+    else:
+
+        status_html = """
+        <div class="alert alert-warning">
+            🟡 状态：等待负责人安排<br><br>
+            ⚠️ 当前属于报名阶段。<br>
+            最终岗位安排请以负责人公布的正式值班表为准。<br>
+            请多留意义工群信息，感恩大家护持观音堂 🙏
+        </div>
+        """
+
+    # =========================
+    # 膳食报名成功页
+    # =========================
+
+    if role == "膳食":
+
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
                     select id, name
                     from volunteer_schedule_signups
@@ -307,135 +428,150 @@ def volunteer_signup():
 
                 all_rows = cur.fetchall()
 
-                my_no = None
-                for i, row in enumerate(all_rows, start=1):
-                    if row["id"] == signup_id:
-                        my_no = i
-                        break
+        my_no = None
 
-                if my_no <= 9:
-                    my_meal_role = "派餐义工"
-                else:
-                    my_meal_role = "候补义工"
+        for i, row in enumerate(all_rows, start=1):
+            if row["id"] == signup_id:
+                my_no = i
+                break
 
-                rows = cur.fetchall()
+        if my_no and my_no <= 9:
+            my_meal_role = "派餐义工"
+        else:
+            my_meal_role = "候补义工"
 
-                meal_rows = rows[:9]
-                backup_rows = rows[9:]
+        meal_rows = all_rows[:9]
+        backup_rows = all_rows[9:]
 
-                lines = ""
-                for i in range(1, 10):
-                    person = meal_rows[i - 1]["name"] if i <= len(meal_rows) else ""
-                    lines += f"<div class='name-line'>{i}）{person}</div>"
+        lines = ""
 
-                leader_lines = ""
-                for i, row in enumerate(backup_rows, start=10):
-                    leader_lines += f"<div class='name-line'>{i}）{row['name']}</div>"
+        for i in range(1, 10):
+            person = meal_rows[i - 1]["name"] if i <= len(meal_rows) else ""
+            lines += f"<div class='name-line'>{i}）{person}</div>"
 
-                festival_name = special_info.get("festival_name") or special_info.get("name") or ""
-                lunar_text = special_info.get("lunar_text") or special_info.get("lunar_date") or "农历初一 / 十五"
+        backup_lines = ""
 
-                festival_line = ""
-                if festival_name:
-                    festival_line = f"<div class='festival'>🙏 {festival_name}</div>"
+        for i, row in enumerate(backup_rows, start=10):
+            backup_lines += f"<div class='name-line'>{i}）{row['name']}</div>"
 
-                return f"""
-                <style>
-                body {{
-                    font-family: Arial, "Microsoft YaHei", sans-serif;
-                    background:#f7f2e8;
-                    padding:20px;
-                    font-size:22px;
-                }}
-                .card {{
-                    max-width:760px;
-                    margin:auto;
-                    background:white;
-                    border-radius:20px;
-                    padding:28px;
-                    box-shadow:0 4px 18px rgba(0,0,0,0.12);
-                }}
-                h1 {{
-                    font-size:34px;
-                    margin-bottom:10px;
-                }}
-                .big-green {{
-                    font-size:30px;
-                    color:#168a3a;
-                    font-weight:bold;
-                    line-height:1.5;
-                }}
-                .info {{
-                    background:#fff7dc;
-                    border-radius:16px;
-                    padding:18px;
-                    margin:18px 0;
-                    line-height:1.7;
-                }}
-                .festival {{
-                    font-size:26px;
-                    color:#b15b00;
-                    font-weight:bold;
-                }}
-                .section {{
-                    margin-top:24px;
-                    padding-top:18px;
-                    border-top:2px solid #ddd;
-                }}
-                .name-line {{
-                    font-size:24px;
-                    padding:8px 0;
-                }}
-                .btn {{
-                    display:block;
-                    margin-top:28px;
-                    background:#1f9d55;
-                    color:white;
-                    text-align:center;
-                    padding:18px;
-                    border-radius:14px;
-                    text-decoration:none;
-                    font-size:26px;
-                    font-weight:bold;
-                }}
-                </style>
+        return render_template_string("""
+        <!doctype html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
 
-                <div class="card">
+        <style>
+        body {
+            font-family:"Microsoft YaHei", Arial;
+            background:#f7f2e8;
+            padding:20px;
+            font-size:22px;
+        }
 
-                <h1>🍱 素食结缘报名成功</h1>
+        .card {
+            max-width:760px;
+            margin:auto;
+            background:white;
+            border-radius:20px;
+            padding:28px;
+            box-shadow:0 4px 18px rgba(0,0,0,0.12);
+        }
 
-                <div class="info">
-                    <div><b>{lunar_text}</b></div>
-                    {festival_line}
-                    <div><b>日期：</b>{signup_date}</div>
-                    <div><b>开放堂食：</b>11:00am</div>
-                </div>
+        h1 {
+            font-size:34px;
+            margin-bottom:10px;
+        }
 
-                <div class="big-green">
-                    您是第 {my_no} 位膳食组义工<br>
-                    您的岗位：{my_meal_role}
-                </div>
+        .big-green {
+            font-size:30px;
+            color:#168a3a;
+            font-weight:bold;
+            line-height:1.5;
+        }
 
-                <div class="section">
-                    <h2>🍱 派餐义工（最多9位）</h2>
-                    {lines}
-                </div>
+        .info {
+            background:#fff7dc;
+            border-radius:16px;
+            padding:18px;
+            margin:18px 0;
+            line-height:1.7;
+        }
 
-                <div class="section">
-                    <h2>👥 候补义工</h2>
-                    {leader_lines if leader_lines else "<p>暂时还没有候补义工</p>"}
-                </div>
+        .section {
+            margin-top:24px;
+            padding-top:18px;
+            border-top:2px solid #ddd;
+        }
 
-                <div class="section">
-                    <p>✅ 派餐义工最迟 <b>10:45am</b> 开始站岗</p>
-                    <p>✅ 所有报名义工需要在 <b>9:30am</b> 前报到</p>
-                    <p>✅ 活动结束后协助清理场地及餐具</p>
-                </div>
+        .name-line {
+            font-size:24px;
+            padding:8px 0;
+        }
 
-                <a class="btn" href="/volunteer">返回义工首页</a>
+        .btn {
+            display:block;
+            margin-top:18px;
+            background:#1f9d55;
+            color:white;
+            text-align:center;
+            padding:14px;
+            border-radius:14px;
+            text-decoration:none;
+            font-size:22px;
+            font-weight:bold;
+        }
+        </style>
+        </head>
 
-                </div>
-                """
+        <body>
+
+        <div class="card">
+
+            <h1>🍱 素食结缘报名成功</h1>
+
+            <div class="info">
+                <div><b>日期：</b>{{ signup_date }}</div>
+                <div><b>开放堂食：</b>11:00am</div>
+            </div>
+
+            <div class="big-green">
+                您是第 {{ my_no }} 位膳食组义工<br>
+                您的岗位：{{ my_meal_role }}
+            </div>
+
+            <div class="section">
+                <h2>🍱 派餐义工（最多9位）</h2>
+                {{ lines|safe }}
+            </div>
+
+            <div class="section">
+                <h2>👥 候补义工</h2>
+                {{ backup_lines|safe if backup_lines else "<p>暂时还没有候补义工</p>"|safe }}
+            </div>
+
+            <div class="section">
+                <p>✅ 派餐义工最迟 <b>10:45am</b> 开始站岗</p>
+                <p>✅ 所有报名义工需要在 <b>9:30am</b> 前报到</p>
+                <p>✅ 活动结束后协助清理场地及餐具</p>
+            </div>
+
+            <a class="btn" href="/volunteer">返回义工首页</a>
+
+        </div>
+
+        </body>
+        </html>
+        """,
+        signup_date=signup_date,
+        my_no=my_no,
+        my_meal_role=my_meal_role,
+        lines=lines,
+        backup_lines=backup_lines)
+
+    # =========================
+    # 普通报名成功页
+    # =========================
 
     return render_template_string("""
     <!doctype html>
@@ -443,24 +579,26 @@ def volunteer_signup():
     <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/toolbox.css') }}">
 
     <style>
-    body{
+    body {
         font-family:"Microsoft YaHei";
         background:#f5f5f5;
         padding:20px;
     }
 
-    .box{
-        max-width:700px;
-        margin:auto;
+    .box {
+        max-width:760px;
+        margin:30px auto;
         background:white;
         border-radius:20px;
         padding:30px;
         text-align:center;
     }
 
-    .success{
+    .success {
         background:#e8f5e9;
         border:2px solid #4CAF50;
         border-radius:15px;
@@ -468,52 +606,93 @@ def volunteer_signup():
         margin-bottom:25px;
     }
 
-    .success h1{
+    .success h1 {
         color:#2e7d32;
         margin-top:0;
-        font-size:42px;
+        font-size:38px;
     }
 
-    .info{
-        font-size:26px;
+    .info {
+        font-size:25px;
         line-height:1.9;
     }
 
-    .notice{
-        background:#fff8e1;
-        border-radius:12px;
+    .quote-box {
+        margin-top:20px;
         padding:18px;
-        margin:20px 0;
-        color:#8d6e00;
-        font-size:22px;
-        line-height:1.7;
+        background:#fff5f5;
+        border:2px solid #efc8c8;
+        border-radius:18px;
+        text-align:center;
     }
 
-    .btn{
-        display:block;
-        text-decoration:none;
-        color:white;
-        padding:18px;
-        margin:12px 0;
+    .quote-title {
+        font-size:21px;
+        font-weight:bold;
+        color:#9b6b00;
+    }
+
+    .quote-content {
+        font-size:23px;
+        line-height:1.8;
+        color:#b84a4a;
+    }
+
+    .notice {
+        border-radius:16px;
+        padding:22px;
+        margin:22px 0;
+        font-size:23px;
+        line-height:1.8;
+    }
+
+    .yellow-notice {
+        background:#fff8e1;
+        color:#8d6e00;
+    }
+
+    .green-notice {
+        background:#e8f5e9;
+        color:#1b6e34;
+        border:2px solid #7acb8a;
+    }
+
+    .assignment-line {
+        background:white;
         border-radius:12px;
-        font-size:24px;
+        padding:12px;
+        margin:10px 0;
         font-weight:bold;
     }
 
-    .blue{
-        background:#2196F3;
+    .assignment-line span {
+        font-weight:normal;
+        color:#555;
     }
+    
+    @media (max-width:700px) {
+        body {
+            padding:12px;
+        }
 
-    .orange{
-        background:#FF9800;
-    }
+        .box {
+            padding:20px;
+            margin:15px auto;
+        }
 
-    .green{
-        background:#4CAF50;
-    }
+        .success h1 {
+            font-size:32px;
+        }
 
-    .gray{
-        background:#607D8B;
+        .info,
+        .notice {
+            font-size:21px;
+        }
+
+        .btn {
+            font-size:20px;
+            padding:13px;
+        }
     }
     </style>
     </head>
@@ -522,74 +701,108 @@ def volunteer_signup():
 
     <div class="box">
 
-    <div class="success">
+        <div class="success">
 
-    <h1>🎉 报名成功</h1>
+            <h1>{{ result_title }}</h1>
 
-    <div class="info">
+            <div class="info">
 
-    🙏 感恩发心护持观音堂<br><br>
+                🙏 感恩发心护持观音堂<br><br>
 
-    义工：{{ name }}<br>
+                义工：{{ name }}<br>
+                日期：{{ signup_date }}<br>
+                岗位：{{ role }}
 
-    日期：{{ signup_date }}<br>
+                {% if role == "值班" %}
+                <br>
+                时间：{{ start_time }} ~ {{ end_time }}
+                {% endif %}
 
-    岗位：{{ role }}
+            </div>
 
-    {% if role == "值班" %}
-    <br>
-    时间：{{ start_time }} ~ {{ end_time }}
-    {% endif %}
+        </div>
 
-    <br><br>
+        <div class="quote-card">
 
-    状态：等待负责人安排
+            <div class="quote-title">
+                🌸 每日佛言佛语
+            </div>
 
-    </div>
+            <div class="quote-content">
+                {{ daily_quote }}
+            </div>
 
-    </div>
+        </div>
 
-    <div class="notice">
+        {{ status_html|safe }}
 
-    ⚠️ 当前属于报名阶段。<br>
+        <div class="btn-row">
 
-    最终岗位安排请以负责人公布的正式值班表为准。<br>
+            <a class="btn-tool btn-blue btn-full"
+            href="/volunteer/my_schedule_search">
+                📋 查看我的报名
+            </a>
 
-    请多留意义工群信息，感恩大家护持观音堂 🙏
+            <a class="btn-tool btn-orange btn-full"
+            href="/volunteer/day_schedule?date={{ signup_date }}">
+                📅 查看当天值班表
+            </a>
 
-    </div>
+            <a class="btn-tool btn-green btn-full"
+            href="/volunteer">
+                ➕ 继续报名
+            </a>
 
-    <a class="btn blue"
-    href="/volunteer/my_schedule_search">
-    📋 查看我的报名
-    </a>
+        </div>
 
-    <a class="btn orange"
-    href="/volunteer/day_schedule?date={{ signup_date }}">
-    📅 查看当天值班表
-    </a>
-                                  
-    <a class="btn orange"
-    href="/volunteer/meal_status?date={{ signup_date }}">
-        🍱 查看膳食组报名名单
-    </a>
-
-    <a class="btn green"
-    href="/volunteer">
-    ➕ 继续报名
-    </a>
-    
     </div>
 
     </body>
     </html>
     """,
+    result_title=result_title,
     name=name,
     signup_date=signup_date,
     role=role,
     start_time=start_time,
-    end_time=end_time
-    )
+    end_time=end_time,
+    daily_quote=daily_quote,
+    status_html=status_html)
+
+
+@schedule_bp.route("/volunteer/query_volunteer")
+def query_volunteer_api():
+
+    keyword = request.args.get("keyword", "").strip()
+    branch = request.args.get("branch", "CHE").strip()
+
+    if not keyword:
+        return jsonify({
+            "ok": False,
+            "message": "请输入编号 / 姓名 / 电话"
+        })
+    
+    matches = find_volunteer_by_keyword(keyword)
+
+    if not matches:
+        return jsonify({
+            "ok": False,
+            "message": "找不到义工"
+        })
+
+    if len(matches) > 1:
+        return jsonify({
+            "ok": False,
+            "message": "找到多个义工，请输入完整编号"
+        })
+
+    v = matches[0]
+
+    return jsonify({
+        "ok": True,
+        "volunteer_id": v.get("id") or v.get("volunteer_id"),
+        "name": v.get("name")
+    })
 
 
 @schedule_bp.route("/volunteer/meal_status")
@@ -982,7 +1195,9 @@ def volunteer_my_schedule():
                 状态：<span class="status">{status_text}</span>
             """
 
-            if status == "pending":
+            signup_date_obj = r["signup_date"]
+
+            if str(signup_date_obj) != str(malaysia_today()):
                 html += f"""
                 <form method="get" action="/volunteer/edit_signup/{r['id']}">
                     <button class="big-btn edit-btn" type="submit">
@@ -1001,7 +1216,7 @@ def volunteer_my_schedule():
             else:
                 html += """
                 <p style="color:#b36b00; font-size:26px;">
-                    ⚠️ 已进入正式排班，如需取消请联系负责人。
+                    🚫 今天值班如需更改或取消，请务必通知负责人。
                 </p>
                 """
 
@@ -1016,6 +1231,115 @@ def volunteer_my_schedule():
     """
 
     return html
+
+
+@schedule_bp.route("/volunteer/guide")
+def volunteer_guide():
+    return render_template_string("""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>义工须知</title>
+
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
+<style>
+.guide-wrap{
+    max-width:900px;
+    margin:auto;
+    padding:24px;
+}
+
+.guide-content{
+    font-size:26px;
+    line-height:1.8;
+}
+
+.guide-content h2{
+    margin-top:30px;
+    font-size:32px;
+}
+</style>
+</head>
+
+<body>
+
+<div class="guide-wrap">
+
+    <div class="card">
+
+        <h1 class="page-title">📖 义工须知</h1>
+
+        <p class="page-subtitle">
+            感恩您发心护持观音堂，请先了解报名与值班规则。
+        </p>
+
+        <div class="guide-content">
+
+            <h2>🙏 感恩发心护持道场</h2>
+            <p>
+                感恩您发心参与观音堂义工服务。每一位义工都是护持道场的重要力量，
+                愿大家互相配合，共同成就道场。
+            </p>
+
+            <h2>📝 关于报名</h2>
+            <p>
+                报名后，系统会根据当天需要自动安排岗位。负责人也可能因现场情况调整岗位或时间。
+                报名成功并不代表最终岗位。
+            </p>
+
+            <h2>📢 正式值班表</h2>
+            <p>
+                每天约 <b>10:00pm</b> 发布正式值班表。请以最新正式值班表为准。
+                发布后如有调整，请以负责人通知为准。
+            </p>
+
+            <h2>✏️ 修改或取消报名</h2>
+            <p>
+                正式发布前，可自行进入系统修改或取消报名。正式发布后，请联络负责人处理。
+            </p>
+
+            <h2>🚫 值班当天无法出席</h2>
+            <p>
+                若当天因突发情况无法值班，请尽快通知负责人，以便安排其他义工补位。
+                请不要直接缺席，以免影响当天道场运作。
+            </p>
+
+            <h2>⏰ 请准时签到</h2>
+            <p>
+                到达观音堂后，请先签到。签到后请依照系统显示的岗位值班。
+                如负责人现场有调整，请以负责人安排为准。
+            </p>
+
+            <h2>🤝 值班期间</h2>
+            <p>
+                请礼貌待人，配合负责人安排。如有任何疑问，可随时向负责人请教。
+                请穿着整齐仪容：有义工服者请穿义工服；尚未领取义工服者，请穿红色上衣及黑色长裤。
+            </p>
+
+            <h2>❤️ 感恩大家</h2>
+            <p>
+                愿大家发心护持道场，广结善缘，福慧增长。
+                🙏 感恩每一位义工。
+            </p>
+
+        </div>
+
+        <div class="btn-row">
+            <a class="btn-tool btn-gray btn-full" href="/volunteer">
+                ⬅ 返回义工首页
+            </a>
+        </div>
+
+    </div>
+
+</div>
+
+</body>
+</html>
+""")
 
 
 @schedule_bp.route("/volunteer/edit_signup/<int:signup_id>", methods=["GET"])
@@ -1038,149 +1362,111 @@ def volunteer_edit_signup(signup_id):
     <!doctype html>
     <html>
     <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-
-    <style>
-
-    body{
-        font-family:"Microsoft YaHei";
-        background:#f5f5f5;
-        padding:20px;
-    }
-
-    .box{
-        max-width:800px;
-        margin:auto;
-        background:white;
-        padding:30px;
-        border-radius:20px;
-        box-shadow:0 3px 12px rgba(0,0,0,.1);
-    }
-
-    h1{
-        text-align:center;
-        font-size:46px;
-        color:#2e7d32;
-    }
-
-    .name{
-        text-align:center;
-        font-size:34px;
-        font-weight:bold;
-        margin-bottom:25px;
-    }
-
-    label{
-        display:block;
-        font-size:28px;
-        font-weight:bold;
-        margin-top:18px;
-    }
-
-    input,
-    select{
-        width:100%;
-        font-size:30px;
-        padding:16px;
-        border-radius:12px;
-        box-sizing:border-box;
-        margin-top:8px;
-    }
-
-    .save{
-        width:100%;
-        margin-top:30px;
-        padding:22px;
-        font-size:32px;
-        background:#4CAF50;
-        color:white;
-        border:0;
-        border-radius:15px;
-        font-weight:bold;
-    }
-
-    .back{
-        display:block;
-        margin-top:18px;
-        text-align:center;
-        text-decoration:none;
-        background:#607D8B;
-        color:white;
-        padding:18px;
-        border-radius:15px;
-        font-size:28px;
-        font-weight:bold;
-    }
-
-    </style>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>修改报名</title>
+        <link rel="stylesheet"
+              href="{{ url_for('static', filename='css/toolbox.css') }}">
     </head>
 
     <body>
 
-    <div class="box">
+    <div class="page-wrap">
 
-    <h1>✏️ 修改报名</h1>
+        <div class="card">
 
-    <div class="name">
-    {{ row.name }}
-    </div>
+            <div class="result-icon" style="text-align:center;">✏️</div>
+            <div class="result-title" style="text-align:center;">修改报名</div>
 
-    <form method="post"
-        action="/volunteer/edit_signup/{{ row.id }}"
-        onsubmit="return confirm('确定修改这次报名？');">
+            <div class="name" style="text-align:center;font-size:32px;font-weight:bold;margin-bottom:20px;">
+                {{ row.name }}
+            </div>
 
-    <label>📅 日期</label>
-    <input type="date"
-        name="signup_date"
-        value="{{ row.signup_date }}"
-        required>
+            <form method="post"
+                action="/volunteer/edit_signup/{{ row.id }}"
+                onsubmit="return confirm('确定修改这次报名？');">
 
-    <label>👷 岗位</label>
+                <div class="form-grid">
 
-    <select name="role">
+                    <div class="form-group">
+                        <label class="form-label">📅 日期</label>
 
-    <option value="值班"
-    {% if row.role=="值班" %}selected{% endif %}>
-    值班
-    </option>
+                        <input
+                            class="form-input"
+                            type="date"
+                            name="signup_date"
+                            value="{{ row.signup_date }}"
+                            required>
+                    </div>
 
-    <option value="卫生"
-    {% if row.role=="卫生" %}selected{% endif %}>
-    卫生
-    </option>
+                    <div class="form-group">
+                        <label class="form-label">👷 岗位</label>
 
-    <option value="供台"
-    {% if row.role=="供台" %}selected{% endif %}>
-    供台
-    </option>
+                        <select
+                            class="form-select"
+                            name="role">
 
-    </select>
+                            <option value="值班"
+                                {% if row.role=="值班" %}selected{% endif %}>
+                                值班
+                            </option>
 
-    <label>🕙 开始时间</label>
+                            <option value="卫生"
+                                {% if row.role=="卫生" %}selected{% endif %}>
+                                卫生
+                            </option>
 
-    <input
-    name="start_time"
-    value="{{ row.start_time }}">
+                            <option value="供台"
+                                {% if row.role=="供台" %}selected{% endif %}>
+                                供台
+                            </option>
 
-    <label>🕒 结束时间</label>
+                        </select>
+                    </div>
 
-    <input
-    name="end_time"
-    value="{{ row.end_time }}">
+                    <div class="form-group">
+                        <label class="form-label">🕙 开始时间</label>
 
-    <button class="save">
-    ✅ 确认修改报名
-    </button>
+                        <input
+                            class="form-input"
+                            name="start_time"
+                            value="{{ row.start_time }}">
+                    </div>
 
-    </form>
+                    <div class="form-group">
+                        <label class="form-label">🕒 结束时间</label>
 
-    <a class="back"
-    href="/volunteer/my_schedule?keyword={{ row.volunteer_id }}">
+                        <input
+                            class="form-input"
+                            name="end_time"
+                            value="{{ row.end_time }}">
+                    </div>
 
-    ⬅ 返回我的报名
+                </div>
 
-    </a>
+                <div class="btn-row">
+
+                    <button
+                        class="btn-tool btn-green btn-full"
+                        type="submit">
+
+                        ✅ 确认修改报名
+
+                    </button>
+
+                    <a
+                        class="btn-tool btn-gray btn-full"
+                        href="/volunteer/my_schedule?keyword={{ row.volunteer_id }}">
+
+                        ⬅ 返回我的报名
+
+                    </a>
+
+                </div>
+
+            </form>
+
+        </div>
 
     </div>
 
@@ -1209,7 +1495,108 @@ def volunteer_edit_signup_post(signup_id):
             old = cur.fetchone()
 
             if not old:
-                return "❌ 找不到旧报名，或已经取消<br><a href='/volunteer'>返回</a>"
+
+                return render_template_string("""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <title>找不到报名记录</title>
+                    <link rel="stylesheet"
+                          href="{{ url_for('static', filename='css/toolbox.css') }}">
+                </head>
+                <body>
+
+                <div class="page-wrap">
+
+                    <div class="card result-card">
+
+                        <div class="result-icon">❌</div>
+
+                        <div class="result-title">
+                            找不到报名记录
+                        </div>
+
+                        <p>
+                            这笔报名不存在，或已经取消，无法修改。
+                        </p>
+
+                        <div class="btn-row">
+                            <a class="btn-tool btn-gray" href="/volunteer">
+                                返回首页
+                            </a>
+                        </div>
+
+                    </div>
+
+                </div>
+
+                </body>
+                </html>
+                """)
+            
+            today = malaysia_today()
+
+            if str(old["signup_date"]) == str(today):
+
+                return render_template_string("""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <title>今天不能修改报名</title>
+                    <link rel="stylesheet"
+                          href="{{ url_for('static', filename='css/toolbox.css') }}">
+                </head>
+                <body>
+
+                <div class="page-wrap">
+
+                    <div class="card result-card">
+
+                        <div class="result-icon">🚫</div>
+
+                        <div class="result-title">
+                            今天不能修改报名
+                        </div>
+
+                        <div class="info-box">
+
+                            <div class="info-row">
+                                <span class="info-label">姓名</span>
+                                <span class="info-value">{{ old.name }}</span>
+                            </div>
+
+                            <div class="info-row">
+                                <span class="info-label">日期</span>
+                                <span class="info-value">{{ old.signup_date }}</span>
+                            </div>
+
+                            <div class="info-row">
+                                <span class="info-label">岗位</span>
+                                <span class="info-value">{{ old.role }}</span>
+                            </div>
+
+                        </div>
+
+                        <p class="text-red" style="font-weight:bold;">
+                            今天已经是值班当天，如需修改，请通知负责人处理。
+                        </p>
+
+                        <div class="btn-row">
+                            <a class="btn-tool btn-gray"
+                            href="/volunteer/my_schedule?keyword={{ old.volunteer_id }}">
+                                返回我的报名
+                            </a>
+                        </div>
+
+                    </div>
+
+                </div>
+
+                </body>
+                </html>
+                """, old=old)
 
             cur.execute("""
                 update volunteer_schedule_signups
@@ -1238,12 +1625,18 @@ def volunteer_edit_signup_post(signup_id):
 
         conn.commit()
 
-    try:
-        if is_schedule_published(new_date):
-            patch_schedule_for_date(new_date, only_signup_id=new_signup_id)
-    except Exception as e:
-        print("修改报名后 patch 失败：", e)
+    sync_schedule_after_signup_change(
+        signup_id,
+        action="cancel",
+        changed_by="volunteer"
+    )
 
+    sync_schedule_after_signup_change(
+        new_signup_id,
+        action="upsert",
+        changed_by="volunteer"
+    )
+    
     return redirect(f"/volunteer/my_schedule?keyword={old['volunteer_id']}")
 
 @schedule_bp.route(
@@ -1252,12 +1645,15 @@ def volunteer_edit_signup_post(signup_id):
 )
 def volunteer_cancel_signup(signup_id):
 
+    today = malaysia_today()
+
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
             cur.execute("""
                 select
                     id,
+                    volunteer_id,
                     name,
                     signup_date,
                     role,
@@ -1269,35 +1665,113 @@ def volunteer_cancel_signup(signup_id):
             row = cur.fetchone()
 
             if not row:
-                return """
-                <h1>❌ 找不到报名记录</h1>
-                <a href="/volunteer">返回</a>
-                """
 
-            if row["status"] == "assigned":
-                return f"""
-                <h1>❌ 已安排值班</h1>
+                return render_template_string("""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <title>找不到报名记录</title>
+                    <link rel="stylesheet"
+                          href="{{ url_for('static', filename='css/toolbox.css') }}">
+                </head>
+                <body>
 
-                <p>
-                {row["name"]}
-                </p>
+                <div class="page-wrap">
 
-                <p>
-                {row["signup_date"]}
-                </p>
+                    <div class="card result-card">
 
-                <p>
-                {row["role"]}
-                </p>
+                        <div class="result-icon">❌</div>
 
-                <p style="color:red;">
-                已经安排值班，请联系负责人取消。
-                </p>
+                        <div class="result-title">
+                            找不到报名记录
+                        </div>
 
-                <a href="/volunteer">
-                返回
-                </a>
-                """
+                        <p>
+                            这笔报名记录不存在，可能已经删除或取消。
+                        </p>
+
+                        <div class="btn-row">
+
+                            <a class="btn-tool btn-gray"
+                            href="/volunteer">
+                                返回首页
+                            </a>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+                </body>
+                </html>
+                """)
+
+            signup_date = row["signup_date"]
+
+            if str(signup_date) == str(today):
+
+                return render_template_string("""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <title>今天不能取消报名</title>
+                    <link rel="stylesheet"
+                          href="{{ url_for('static', filename='css/toolbox.css') }}">
+                </head>
+                <body>
+
+                <div class="page-wrap">
+
+                    <div class="card result-card">
+
+                        <div class="result-icon">🚫</div>
+
+                        <div class="result-title">
+                            今天不能取消报名
+                        </div>
+
+                        <div class="info-box">
+
+                            <div class="info-row">
+                                <span class="info-label">姓名</span>
+                                <span class="info-value">{{ row.name }}</span>
+                            </div>
+
+                            <div class="info-row">
+                                <span class="info-label">日期</span>
+                                <span class="info-value">{{ row.signup_date }}</span>
+                            </div>
+
+                            <div class="info-row">
+                                <span class="info-label">岗位</span>
+                                <span class="info-value">{{ row.role }}</span>
+                            </div>
+
+                        </div>
+
+                        <p style="color:#dc2626;font-weight:bold;">
+                            今天已经是值班当天，如需取消，请通知负责人处理。
+                        </p>
+
+                        <div class="btn-row" style="justify-content:center;">
+
+                            <a class="btn-tool btn-gray"
+                            href="/volunteer/my_schedule?keyword={{ row.volunteer_id }}">
+                                返回我的报名
+                            </a>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+                </body>
+                </html>
+                """, row=row)
 
             cur.execute("""
                 update volunteer_schedule_signups
@@ -1310,13 +1784,70 @@ def volunteer_cancel_signup(signup_id):
 
             conn.commit()
 
-    return """
-    <h1>✅ 已取消报名</h1>
+    sync_schedule_after_signup_change(
+        signup_id,
+        action="cancel",
+        changed_by="volunteer"
+    )
 
-    <a href="/volunteer">
-    返回义工报名
-    </a>
-    """
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>已取消报名</title>
+        <link rel="stylesheet"
+              href="{{ url_for('static', filename='css/toolbox.css') }}">
+    </head>
+    <body>
+
+    <div class="page-wrap">
+
+        <div class="card result-card">
+
+            <div class="result-icon">✅</div>
+            <div class="result-title">已取消报名</div>
+
+            <div class="info-box">
+
+                <div class="info-row">
+                    <span class="info-label">姓名</span>
+                    <span class="info-value">{{ row.name }}</span>
+                </div>
+
+                <div class="info-row">
+                    <span class="info-label">日期</span>
+                    <span class="info-value">{{ row.signup_date }}</span>
+                </div>
+
+                <div class="info-row">
+                    <span class="info-label">岗位</span>
+                    <span class="info-value">{{ row.role }}</span>
+                </div>
+
+                <div class="info-row">
+                    <span class="info-label">状态</span>
+                    <span class="info-value">已取消</span>
+                </div>
+
+            </div>
+
+            <p>你的报名已经取消，系统会自动同步正式值班表。</p>
+
+            <div class="btn-row" style="justify-content:center;">
+                <a class="btn-tool btn-blue"
+                href="/volunteer/my_schedule?keyword={{ row.volunteer_id }}">
+                    返回我的报名
+                </a>
+            </div>
+
+        </div>
+
+    </div>
+
+    </body>
+    </html>
+    """, row=row)
 
 @schedule_bp.route("/volunteer/today_schedule")
 def volunteer_today_schedule():
@@ -1810,9 +2341,10 @@ def volunteer_prebook():
                         end_time,
                         existing["id"]
                     ))
+
                     updated += 1
 
-                    new_signup_items.append((new_signup_id, signup_date))
+                    new_signup_items.append((existing["id"], signup_date))
                 else:
                     cur.execute("""
                         insert into volunteer_schedule_signups
@@ -1836,23 +2368,19 @@ def volunteer_prebook():
 
     for signup_id, signup_date in new_signup_items:
 
-        if not is_schedule_published(signup_date):
-            continue
-
         try:
-            if hasattr(signup_date, "strftime"):
-                date_str = signup_date.strftime("%Y-%m-%d")
-            else:
-                date_str = str(signup_date)
-
-            inserted = patch_schedule_for_date(date_str, only_signup_id=signup_id)
+            synced = sync_schedule_after_signup_change(
+                signup_id,
+                action="upsert",
+                changed_by="volunteer_multi_signup"
+            )
 
             print(
-                f"✅ {signup_date} 自动补排完成，共新增 {inserted} 笔"
+                f"✅ {signup_date} 同步完成，共新增 {synced} 笔 assignment"
             )
 
         except Exception as e:
-            print(f"自动补排失败：{signup_date}：{e}")
+            print(f"多日报名同步失败：{signup_date}：{e}")
 
     return f"""
     <h1>✅ 多日报名完成</h1>
@@ -1874,85 +2402,141 @@ def volunteer_my_schedule_search():
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>我的报名</title>
+
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
+
 <style>
-body { font-family:"Microsoft YaHei"; background:#f5f5f5; padding:20px; font-size:24px; }
-.box { background:white; max-width:700px; margin:auto; padding:25px; border-radius:15px; }
-input, button { font-size:28px; padding:14px; width:100%; box-sizing:border-box; margin:10px 0; }
-a { font-size:22px; }
-</style>
-</head>
-<body>
-<div class="box">
-
-<h1>🔍 我的报名</h1>
-
-<form method="get" action="/volunteer/my_schedule">
-    <label>
-    义工编号 / 电话 / 姓名
-    </label>
-
-    <div style="display:flex; gap:10px; align-items:center;">
-
-        <button
-            type="button"
-            id="branch_btn"
-            onclick="toggleBranch()"
-            style="
-                width:95px;
-                height:58px;
-                font-size:20px;
-                font-weight:bold;
-                background:#28a745;
-                color:white;
-                border:none;
-                border-radius:12px;
-                cursor:pointer;
-                flex-shrink:0;
-            ">
-            CHE
-        </button>
-
-        <input
-            type="hidden"
-            id="branch"
-            name="branch"
-            value="CHE">
-
-        <input
-            name="keyword"
-            id="keyword"
-            required
-            placeholder="例如：108 / 姓名 / 电话"
-            style="flex:1;">
-
-    </div>
-    <button type="submit">查询我的报名</button>
-</form>
-
-<br>
-<a href="/volunteer">⬅ 返回首页</a>
-
-</div>
-<script>
-
-function toggleBranch(){
-
-    const btn=document.getElementById("branch_btn");
-    const branch=document.getElementById("branch");
-
-    if(branch.value==="CHE"){
-        branch.value="STW";
-        btn.innerText="STW";
-        btn.style.background="#dc3545";
-    }else{
-        branch.value="CHE";
-        btn.innerText="CHE";
-        btn.style.background="#28a745";
-    }
-
+.search-wrap{
+    max-width:760px;
+    margin:auto;
+    padding:24px;
 }
 
+.branch-search-row{
+    display:grid;
+    grid-template-columns:110px 1fr;
+    gap:12px;
+    align-items:center;
+}
+
+.branch-toggle-btn{
+    height:66px;
+    font-size:26px;
+    font-weight:bold;
+    color:white;
+    border:none;
+    border-radius:16px;
+    cursor:pointer;
+}
+
+@media (max-width:700px){
+    .branch-search-row{
+        grid-template-columns:1fr;
+    }
+}
+</style>
+
+<script>
+window.addEventListener("DOMContentLoaded", function(){
+    document.getElementById("keyword").focus();
+});
 </script>
+
+</head>
+
+<body>
+
+<div class="search-wrap">
+
+    <div class="card">
+
+        <h1 class="page-title">🔍 我的报名</h1>
+
+        <p class="page-subtitle">
+            查看已报名日期、修改报名、取消报名或查看正式岗位。
+        </p>
+
+        <div class="alert alert-info">
+            💡 可输入义工编号、电话或姓名查询。
+        </div>
+
+        <form method="get" action="/volunteer/my_schedule">
+
+            <div class="form-group">
+
+                <label class="form-label">
+                    义工编号 / 电话 / 姓名
+                </label>
+
+                <div class="branch-search-row">
+
+                    <button
+                        type="button"
+                        id="branch_btn"
+                        onclick="toggleBranch()"
+                        class="branch-toggle-btn"
+                        style="background:#28a745;">
+                        CHE
+                    </button>
+
+                    <input
+                        type="hidden"
+                        id="branch"
+                        name="branch"
+                        value="CHE">
+
+                    <input
+                        class="form-input"
+                        name="keyword"
+                        id="keyword"
+                        required
+                        placeholder="例如：108 / 姓名 / 电话">
+
+                </div>
+
+            </div>
+
+            <div class="btn-row">
+
+                <button
+                    class="btn-tool btn-blue btn-full"
+                    type="submit">
+                    📋 查询我的报名
+                </button>
+
+                <a
+                    class="btn-tool btn-gray btn-full"
+                    href="/volunteer">
+                    ⬅ 返回义工首页
+                </a>
+
+            </div>
+
+        </form>
+
+    </div>
+
+</div>
+
+<script>
+function toggleBranch(){
+
+    const btn = document.getElementById("branch_btn");
+    const branch = document.getElementById("branch");
+
+    if(branch.value === "CHE"){
+        branch.value = "STW";
+        btn.innerText = "STW";
+        btn.style.background = "#dc3545";
+    }else{
+        branch.value = "CHE";
+        btn.innerText = "CHE";
+        btn.style.background = "#28a745";
+    }
+}
+</script>
+
 </body>
 </html>
 """)

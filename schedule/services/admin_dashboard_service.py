@@ -24,11 +24,14 @@ from schedule.services.supply_service import (
 
 from schedule.services.publish_service import (
     is_schedule_published,
+    get_schedule_republish_info,
 )
 
 from schedule.services.settings_service import (
-    get_schedule_settings,
+    get_schedule_settings, 
 )
+
+from schedule.services.settings_service import is_schedule_setting_on
 
 
 def load_admin_dashboard_data(mode, override_date):
@@ -39,6 +42,8 @@ def load_admin_dashboard_data(mode, override_date):
     ).date()
 
     special_day_info = get_special_day_info(selected_date)
+    multi_day_signup_open = is_schedule_setting_on("multi_day_signup_open")
+    meal_signup_open = is_schedule_setting_on("meal_signup_open")
 
     template_text = {
         "normal": "平时值班模板",
@@ -78,6 +83,10 @@ def load_admin_dashboard_data(mode, override_date):
         override_date
     )
 
+    republish_info = get_schedule_republish_info(
+        override_date
+    )
+
     pending_counts, day_summary, day_flags = (
         load_schedule_admin_dashboard_data(
             override_date
@@ -109,6 +118,7 @@ def load_admin_dashboard_data(mode, override_date):
         "supply_signups": supply_signups,
         "supply_alerts": supply_alerts,
         "is_published": published,
+        "republish_info": republish_info,
         "pending_counts": pending_counts,
         "day_summary": day_summary,
         "day_flags": day_flags,
@@ -116,4 +126,6 @@ def load_admin_dashboard_data(mode, override_date):
         "default_year": next_year,
         "default_month": next_month,
         "records": display_records,
+        "multi_day_signup_open": multi_day_signup_open,
+        "meal_signup_open": meal_signup_open,
     }

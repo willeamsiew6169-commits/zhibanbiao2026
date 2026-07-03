@@ -6,336 +6,461 @@ VOLUNTEER_SIGNUP_HTML = """
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>蕉赖观音堂义工报名</title>
+<link rel="manifest" href="/volunteer-manifest.json">
+<link rel="icon" href="/static/volunteer_icon.png?v=1">
+
+<title>蕉赖共修会义工报名</title>
+
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
 
 <style>
-body {
-    font-family:"Microsoft YaHei", Arial;
-    background:#f8f3ea;
-    padding:20px;
-    font-size:24px;
-}
+/* =========================
+   Volunteer Signup V4
+   只保留本页专用样式，其余交给 toolbox.css
+========================= */
 
-.box {
-    background:white;
-    max-width:1200px;
+.volunteer-wrap{
+    max-width:980px;
     margin:auto;
-    padding:35px;
-    border-radius:20px;
-    box-shadow:0 4px 15px rgba(0,0,0,0.08);
-}
-
-.hero {
-    text-align:center;
-    margin-bottom:25px;
-}
-
-.hero .lotus {
-    font-size:60px;
-}
-
-.hero h1 {
-    color:#8b5a2b;
-    margin:10px 0;
-    font-size:42px;
-}
-
-.hero p {
-    color:#666;
-    line-height:1.8;
-    font-size:22px;
-}
-
-.top-actions {
-    display:flex;
-    justify-content:center;
-    gap:20px;
-    flex-wrap:wrap;
-    margin-bottom:20px;
-}
-
-small {
-    color:#777;
-    font-size:18px;
-    font-weight:normal;
-}
-
-
-.top-btn {
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    width:280px;
-    min-height:100px;
-    border-radius:18px;
-    color:white;
-    text-decoration:none;
-    font-size:28px;
-    font-weight:bold;
-    text-align:center;
-    padding:10px;
-    box-sizing:border-box;
-}
-
-.green  { background:#4CAF50; }
-.blue   { background:#5B8DEF; }
-.orange { background:#c58b39; }
-.yellow { background:#F4D35E; }
-
-.notice {
-    background:#fff8e6;
-    color:#8b5a2b;
-    border:2px solid #f3d9a5;
-    padding:18px;
-    border-radius:15px;
-    margin:0 auto 25px auto;
-    max-width:900px;
-    font-size:22px;
-    line-height:1.8;
-    text-align:center;
-}
-
-.admin {
-    text-align:right;
-    font-size:18px;
-    margin-bottom:20px;
-}
-
-.signup-card {
-    background:#fafafa;
-    border:2px solid #eee;
-    border-radius:20px;
-    padding:25px;
-}
-
-label {
-    font-weight:bold;
-    color:#5c3b1e;
-}
-
-input, select, button {
-    font-size:24px;
-    padding:12px;
-    margin:8px 0 18px 0;
-    width:100%;
-    box-sizing:border-box;
-}
-
-input, select {
-    border:1px solid #d6c7b0;
-    border-radius:12px;
-    background:white;
-}
-
-button {
-    cursor:pointer;
-    background:#4CAF50;
-    color:white;
-    border:0;
-    border-radius:15px;
-    font-weight:bold;
     padding:20px;
-    font-size:28px;
 }
 
-.top-actions .top-btn.meal{
-    background:#c0392b;
-    color:#fff;
-    display:flex;
+.volunteer-hero{
+    text-align:center;
+    padding:24px 18px 12px;
+}
+
+.volunteer-lotus{
+    font-size:58px;
+    line-height:1;
+    margin-bottom:10px;
+}
+
+.volunteer-title{
+    font-size:46px;
+    font-weight:800;
+    margin:8px 0;
+    color:#8b5a2b;
+}
+
+.volunteer-subtitle{
+    font-size:26px;
+    color:#6b7280;
+    line-height:1.7;
+    margin:10px 0 0;
+}
+
+.volunteer-actions{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:18px;
+    margin:24px 0;
+}
+
+.volunteer-actions .btn-tool{
+    min-height:92px;
     flex-direction:column;
-    justify-content:center;
-    align-items:center;
-    line-height:1.4;
+    line-height:1.35;
+    text-align:center;
 }
 
-.top-actions .top-btn.meal .title{
-    font-size:28px;
+.action-main-text{
+    font-size:30px;
     font-weight:bold;
 }
 
-.top-actions .top-btn.meal .sub{
-    font-size:20px;
+.action-sub-text{
+    font-size:21px;
     font-weight:bold;
+    opacity:.95;
     margin-top:6px;
 }
 
-@media (max-width:700px) {
-    body {
-        padding:10px;
+.signup-section{
+    display:none;
+    margin-top:24px;
+}
+
+.branch-search-row{
+    display:grid;
+    grid-template-columns:120px 1fr;
+    gap:14px;
+    align-items:center;
+}
+
+.branch-toggle-btn{
+    height:72px;
+    font-size:28px;
+    font-weight:bold;
+    background:#28a745;
+    color:white;
+    border:none;
+    border-radius:16px;
+    cursor:pointer;
+}
+
+.signup-form-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:20px;
+}
+
+.time-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:20px;
+}
+
+.lookup-result{
+    font-size:24px;
+    margin-top:10px;
+    min-height:32px;
+}
+
+.form-card-title{
+    font-size:36px;
+    font-weight:bold;
+    text-align:center;
+    margin:0 0 18px;
+}
+
+.form-card-desc{
+    font-size:24px;
+    text-align:center;
+    color:#6b7280;
+    line-height:1.6;
+    margin-bottom:26px;
+}
+
+.admin-link{
+    text-align:right;
+    font-size:22px;
+    margin:16px 0 0;
+}
+
+.confirm-overlay{
+    position:fixed;
+    inset:0;
+    background:rgba(0,0,0,.45);
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    z-index:9999;
+    padding:18px;
+}
+
+.confirm-box{
+    background:white;
+    width:100%;
+    max-width:560px;
+    border-radius:22px;
+    padding:26px;
+    box-shadow:0 8px 25px rgba(0,0,0,.25);
+}
+
+.confirm-box h2{
+    margin-top:0;
+    color:#8b5a2b;
+    text-align:center;
+    font-size:34px;
+}
+
+.confirm-content{
+    font-size:26px;
+    line-height:1.7;
+    color:#333;
+}
+
+.confirm-actions{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:14px;
+    margin-top:24px;
+}
+
+#keyword::placeholder{
+    color:#b79b6b;
+}
+
+#keyword:focus{
+    background:#fff6d8;
+    border-color:#d6a100;
+    outline:none;
+    box-shadow:0 0 0 4px rgba(214,161,0,.18);
+}
+
+@media (max-width:700px){
+    .volunteer-wrap{
+        padding:12px;
+    }
+
+    .volunteer-title{
+        font-size:36px;
+    }
+
+    .volunteer-subtitle{
         font-size:22px;
     }
 
-    .box {
-        padding:20px;
+    .volunteer-actions,
+    .signup-form-grid,
+    .time-grid,
+    .branch-search-row,
+    .confirm-actions{
+        grid-template-columns:1fr;
     }
 
-    .hero h1 {
-        font-size:34px;
+    .volunteer-actions .btn-tool{
+        min-height:82px;
     }
-    
-    .top-btn {
-        width:100%;
-        min-height:85px;
-        font-size:24px;
+
+    .action-main-text{
+        font-size:26px;
+    }
+
+    .action-sub-text{
+        font-size:19px;
     }
 }
 </style>
 </head>
 
 <body>
-<div class="box">
+<div class="volunteer-wrap">
 
-<div class="hero">
-    <div class="lotus">🪷</div>
-    <h1>蕉赖观音堂义工报名</h1>
-    <p>
-        感恩师兄们发心护持观音堂 🙏<br>
-        随缘报名，共同护持道场
-    </p>
-</div>
+    <div class="card">
 
-<div class="top-actions">
-    <a class="top-btn green" href="/volunteer/today_schedule">
-        📋 {{ schedule_label }}
-    </a>
-
-    <a class="top-btn blue" href="/volunteer/prebook">
-        📅 多日报名
-    </a>
-
-    <a class="top-btn yellow" href="/volunteer/monthly_signup_list?year={{ prebook_year }}&month={{ prebook_month }}">
-        📖 查看预报名名单
-    </a>
-    
-    <a class="top-btn orange" href="/volunteer/my_schedule_search">
-        🔍 我的报名
-    </a>
-
-    <a class="top-btn meal"
-    href="/volunteer/meal_status?date={{ meal_date }}">
-
-        <div class="title">
-            🍱 派餐义工名单
+        <div class="volunteer-hero">
+            <div class="volunteer-lotus">🪷</div>
+            <div class="volunteer-title">蕉赖共修会义工报名</div>
+            <p class="volunteer-subtitle">
+                感恩师兄们发心护持观音堂 🙏<br>
+                随缘报名，共同护持道场
+            </p>
         </div>
 
-        <div class="sub">
-            {{ meal_button_date }}　👥 {{ meal_count }}/9
+        <div class="volunteer-actions">
+
+            <button
+                type="button"
+                class="btn-tool btn-green"
+                onclick="showDailySignup()">
+                <span class="action-main-text">📝 每日报名</span>
+                <span class="action-sub-text">今天 / 明天值班报名</span>
+            </button>
+
+            <a
+                class="btn-tool btn-purple"
+                href="/volunteer/my_schedule_search">
+                <span class="action-main-text">📋 我的报名</span>
+                <span class="action-sub-text">查看 / 修改 / 取消</span>
+            </a>
+
+            {% if multi_day_signup_open %}
+            <a
+                class="btn-tool btn-blue"
+                href="/volunteer/prebook">
+                <span class="action-main-text">📅 下个月多日报名</span>
+                <span class="action-sub-text">一次报名多个日期</span>
+            </a>
+            {% endif %}
+
+            {% if meal_signup_open %}
+            <a
+                class="btn-tool btn-red"
+                href="/volunteer/meal_status?date={{ meal_date }}">
+                <span class="action-main-text">🍱 派餐义工名单</span>
+                <span class="action-sub-text">{{ meal_button_date }}　👥 {{ meal_count }}/9</span>
+            </a>
+            {% endif %}
+
         </div>
 
-    </a>
-</div>
+        <div class="alert alert-warning">
+            🌸 报名后将由系统安排岗位，必要时负责人会调整。<br>
+            📢 10:00pm 正式发布前，可自行修改或取消。<br>
+            🚫 值班当天如需更改或取消，请必须通知负责人。<br>
+            🙏 请以最新正式值班表为准，感恩护持。
+        </div>
 
-<div class="notice">
-    🌸 报名后将由负责人统一安排岗位。<br>
-    📢 请以最终公布的值班表为准。<br>
-    🙏 感恩您的发心与护持。
-</div>
+        <div class="btn-row" style="margin-top:18px;">
+            <a class="btn-tool btn-blue" href="/volunteer/guide">
+                📖 义工须知
+            </a>
+        </div>
 
-<div class="admin">
-    <a href="/schedule/admin">🔐 管理员入口</a>
-</div>
-
-<div class="signup-card">
-<form method="post"
-      action="/volunteer/signup"
-      onsubmit="return confirmSignup();">
-
-    <label>
-    义工编号 / 电话 / 姓名
-    </label>
-
-    <div style="display:flex; gap:10px; align-items:center;">
-
-        <button
-            type="button"
-            id="branch_btn"
-            onclick="toggleBranch()"
-            style="
-                width:95px;
-                height:58px;
-                font-size:20px;
-                font-weight:bold;
-                background:#28a745;
-                color:white;
-                border:none;
-                border-radius:12px;
-                cursor:pointer;
-                flex-shrink:0;
-            ">
-            CHE
-        </button>
-
-        <input
-            type="hidden"
-            id="branch"
-            name="branch"
-            value="CHE">
-
-        <input
-            name="keyword"
-            id="keyword"
-            required
-            placeholder="例如：108 / 姓名 / 电话"
-            style="flex:1;">
+        <div class="admin-link">
+            <a href="/schedule/admin">🔐 管理员入口</a>
+        </div>
 
     </div>
 
-<label>
-日期<br>
-<small>Date</small>
-</label>
-<input type="date" name="signup_date" value="{{ default_date }}" required>
+    <div
+        id="daily_signup_box"
+        class="card signup-section">
 
-<label>
-岗位<br>
-<small>Duty Type</small>
-</label>
-<select name="role" id="role_select" required onchange="toggleTimeSection()">
-    <option value="值班">值班 Duty</option>
-    <option value="卫生">卫生 Cleaning</option>
-    <option value="供台">供台 Offering Table</option>
-    <option value="膳食">膳食组 Meal Team</option>
-</select>
+        <h2 class="form-card-title">📝 每日报名</h2>
+        <div class="form-card-desc">
+            请填写义工资料、日期、岗位和时间。提交前系统会让您再次确认。
+        </div>
 
-<div id="time_section">
+        <form
+            id="daily_signup_form"
+            method="post"
+            action="/volunteer/signup">
 
-<label>
-开始时间<br>
-<small>Start Time</small>
-</label>
-<select
-    name="start_time"
-    id="start_time"
-    onchange="updateTimeOptions()"
->
-{% for t in times %}
-<option value="{{ t }}">{{ t }}</option>
-{% endfor %}
-</select>
+            <div class="form-group">
+                <label class="form-label">
+                    义工编号 / 姓名 / 电话
+                </label>
 
-<label>
-结束时间<br>
-<small>End Time</small>
-</label>
-<select
-    name="end_time"
-    id="end_time"
-    onchange="updateTimeOptions()"
->
-{% for t in times %}
-<option value="{{ t }}">{{ t }}</option>
-{% endfor %}
-</select>
+                <div class="branch-search-row">
 
-</div>
+                    <button
+                        type="button"
+                        id="branch_btn"
+                        onclick="toggleBranch()"
+                        class="branch-toggle-btn">
+                        CHE
+                    </button>
 
-<button type="submit">
-🙏 提交报名<br>
-<small>Submit Signup</small>
-</button>
+                    <input
+                        type="hidden"
+                        id="branch"
+                        name="branch"
+                        value="CHE">
 
-</form>
-</div>
+                    <input
+                        class="form-input"
+                        name="keyword"
+                        id="keyword"
+                        required
+                        placeholder="例如：108 / 张三 / 0123456789"
+                        oninput="lookupVolunteer()">
+
+                </div>
+
+                <div id="volunteer_lookup_result" class="lookup-result"></div>
+            </div>
+
+            <div class="signup-form-grid">
+
+                <div class="form-group">
+                    <label class="form-label">
+                        日期
+                        <span class="form-help">Date</span>
+                    </label>
+
+                    <input
+                        class="form-input"
+                        type="date"
+                        name="signup_date"
+                        value="{{ default_date }}"
+                        required>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">
+                        岗位
+                        <span class="form-help">Duty Type</span>
+                    </label>
+
+                    <select
+                        class="form-select"
+                        name="role"
+                        id="role_select"
+                        required
+                        onchange="toggleTimeSection()">
+
+                        <option value="值班">值班 Duty</option>
+                        <option value="卫生">卫生 Cleaning</option>
+                        <option value="供台">供台 Offering Table</option>
+                        <option value="膳食">膳食组 Meal Team</option>
+
+                    </select>
+                </div>
+
+            </div>
+
+            <div id="time_section" class="time-grid">
+
+                <div class="form-group">
+                    <label class="form-label">
+                        开始时间
+                        <span class="form-help">Start Time</span>
+                    </label>
+
+                    <select
+                        class="form-select"
+                        name="start_time"
+                        id="start_time"
+                        onchange="updateTimeOptions()">
+
+                        {% for t in times %}
+                        <option value="{{ t }}">{{ t }}</option>
+                        {% endfor %}
+
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">
+                        结束时间
+                        <span class="form-help">End Time</span>
+                    </label>
+
+                    <select
+                        class="form-select"
+                        name="end_time"
+                        id="end_time"
+                        onchange="updateTimeOptions()">
+
+                        {% for t in times %}
+                        <option value="{{ t }}">{{ t }}</option>
+                        {% endfor %}
+
+                    </select>
+                </div>
+
+            </div>
+
+            <div class="btn-row">
+                <button
+                    type="button"
+                    class="btn-tool btn-green btn-full"
+                    onclick="openSignupConfirm(event)">
+                    🙏 提交报名
+                </button>
+            </div>
+
+        </form>
+
+        <div id="confirm_modal" class="confirm-overlay" style="display:none;">
+            <div class="confirm-box">
+                <h2>📋 确认报名资料</h2>
+
+                <div id="confirm_content" class="confirm-content"></div>
+
+                <div class="confirm-actions">
+                    <button
+                        type="button"
+                        class="btn-tool btn-gray"
+                        onclick="closeSignupConfirm()">
+                        取消
+                    </button>
+
+                    <button
+                        type="button"
+                        class="btn-tool btn-green"
+                        onclick="submitSignupForm()">
+                        确认报名
+                    </button>
+                </div>
+            </div>
+        </div>
+
+    </div>
 
 </div>
 
@@ -387,7 +512,7 @@ function toggleTimeSection() {
     if (role === "卫生" || role === "供台" || role === "膳食") {
         timeSection.style.display = "none";
     } else {
-        timeSection.style.display = "block";
+        timeSection.style.display = "grid";
         updateTimeOptions();
     }
 }
@@ -438,11 +563,8 @@ function applyTimeFilter(today, nowMin, dutyStartMin) {
     }
 
     // 只有当前选择已经失效时才重选
-
     if (start.options[start.selectedIndex]?.disabled) {
-
         for (let i = 0; i < start.options.length; i++) {
-
             if (!start.options[i].disabled) {
                 start.selectedIndex = i;
                 break;
@@ -464,17 +586,14 @@ function applyTimeFilter(today, nowMin, dutyStartMin) {
     }
 
     if (end.options[end.selectedIndex]?.disabled) {
-
         for (let i = 0; i < end.options.length; i++) {
-
             if (!end.options[i].disabled) {
                 end.selectedIndex = i;
                 break;
             }
         }
     }
-
-    }
+}
 
 document.addEventListener("DOMContentLoaded", function () {
     toggleTimeSection();
@@ -493,8 +612,8 @@ document.addEventListener("DOMContentLoaded", function () {
             const startSelect = document.getElementById("start_time");
             const endSelect = document.getElementById("end_time");
 
-            if (startSelect) startSelect.selectedIndex = 0;
-            if (endSelect) endSelect.selectedIndex = 0;
+            if (startSelect) startSelect.value = "10:00am";
+            if (endSelect) endSelect.value = "6:00pm";
 
             updateTimeOptions();
         });
@@ -508,57 +627,74 @@ document.addEventListener("DOMContentLoaded", function () {
         endSelect.addEventListener("change", updateTimeOptions);
     }
 
+    if (startSelect) startSelect.value = "10:00am";
+    if (endSelect) endSelect.value = "6:00pm";
+
     updateTimeOptions();
 });
-function confirmSignup() {
 
-    const keyword = document.querySelector("input[name='keyword']").value;
+let signupFormSubmitting = false;
+let currentVolunteerText = "";
+
+async function openSignupConfirm(event){
+    if(event){
+        event.preventDefault();
+    }
+
+    if(signupFormSubmitting){
+        return false;
+    }
+
+    const keyword = document.getElementById("keyword").value.trim();
+    const branch = document.getElementById("branch").value;
     const role = document.getElementById("role_select").value;
     const date = document.querySelector("input[name='signup_date']").value;
 
-    let msg =
-`📋 请确认报名资料
+    let volunteerText = keyword;
 
-义工编号 / 姓名：
-${keyword}
+    try {
+        const r = await fetch(`/volunteer/query_volunteer?keyword=${encodeURIComponent(keyword)}&branch=${encodeURIComponent(branch)}`);
+        const data = await r.json();
 
-日期：
-${date}
+        if(data.ok){
+            volunteerText = `${data.volunteer_id}　${data.name}`;
+            currentVolunteerText = volunteerText;
+        }
+    } catch(e) {}
 
-岗位：
-${role}`;
+    let html = `
+        <p><b>义工：</b><br>${volunteerText}</p>
+        <p><b>日期：</b><br>${date}</p>
+        <p><b>岗位：</b><br>${role}</p>
+    `;
 
-    if (role === "值班") {
-
+    if(role === "值班"){
         const start = document.getElementById("start_time").value;
         const end = document.getElementById("end_time").value;
 
-        msg += `
-
-时间：
-${start} ～ ${end}`;
+        html += `
+            <p><b>时间：</b><br>${start} ～ ${end}</p>
+        `;
     }
 
-    msg += `
+    document.getElementById("confirm_content").innerHTML = html;
+    document.getElementById("confirm_modal").style.display = "flex";
 
-━━━━━━━━━━━━━━━━━━
+    return false;
+}
 
-确定提交报名吗？
+function closeSignupConfirm(){
+    document.getElementById("confirm_modal").style.display = "none";
+}
 
-⚠️ 请确认以上资料正确。
-
-⚠️ 如需取消，请尽早通知负责人。
-
-🙏 感恩您的发心护持。`;
-
-    return confirm(msg);
+function submitSignupForm(){
+    signupFormSubmitting = true;
+    document.getElementById("daily_signup_form").submit();
 }
 </script>
 
 <script>
-
 function toggleBranch(){
-
     const btn=document.getElementById("branch_btn");
     const branch=document.getElementById("branch");
 
@@ -571,13 +707,61 @@ function toggleBranch(){
         btn.innerText="CHE";
         btn.style.background="#28a745";
     }
-
 }
 
+function showDailySignup(){
+    const box = document.getElementById("daily_signup_box");
+
+    box.style.display = "block";
+
+    setTimeout(function(){
+        box.scrollIntoView({
+            behavior:"smooth",
+            block:"start"
+        });
+    },100);
+}
+
+let lookupTimer = null;
+
+function lookupVolunteer(){
+    clearTimeout(lookupTimer);
+
+    lookupTimer = setTimeout(function(){
+        const keyword = document.getElementById("keyword").value.trim();
+        const branch = document.getElementById("branch").value;
+        const result = document.getElementById("volunteer_lookup_result");
+
+        currentVolunteerText = "";
+
+        if(!keyword){
+            result.innerHTML = "";
+            return;
+        }
+
+        result.innerHTML = "🔎 查询中...";
+
+        fetch(`/volunteer/query_volunteer?keyword=${encodeURIComponent(keyword)}&branch=${encodeURIComponent(branch)}`)
+            .then(r => r.json())
+            .then(data => {
+                if(data.ok){
+                    currentVolunteerText = `${data.volunteer_id}　${data.name}`;
+                    result.innerHTML = `<span style="color:green;font-weight:bold;">✅ ${currentVolunteerText}</span>`;
+                }else{
+                    result.innerHTML = `<span style="color:#c0392b;font-weight:bold;">⚠️ ${data.message}</span>`;
+                }
+            })
+            .catch(() => {
+                result.innerHTML = `<span style="color:#c0392b;font-weight:bold;">⚠️ 查询失败</span>`;
+            });
+    }, 400);
+}
 </script>
+
 </body>
 </html>
 """
+
 
 VOLUNTEER_PREBOOK_HTML = """
 <!doctype html>
@@ -587,113 +771,134 @@ VOLUNTEER_PREBOOK_HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>多日报名</title>
 
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
+
 <style>
-body {
-    font-family:"Microsoft YaHei", Arial;
-    background:#f5f5f5;
-    padding:20px;
-    font-size:24px;
-}
-
-.box {
-    background:white;
-    max-width:750px;
+.prebook-wrap{
+    max-width:900px;
     margin:auto;
-    padding:25px;
-    border-radius:15px;
+    padding:20px;
 }
 
-input, select, button {
-    font-size:24px;
-    padding:12px;
-    margin:8px 0;
-    width:100%;
-    box-sizing:border-box;
+.prebook-card{
+    margin-top:20px;
 }
 
-.calendar {
+.calendar{
     display:grid;
     grid-template-columns:repeat(7, 1fr);
     gap:10px;
     margin:15px 0;
 }
 
-.week-title {
+.week-title{
     text-align:center;
     font-weight:bold;
-    font-size:20px;
+    font-size:22px;
     color:#555;
 }
 
-.day-card {
+.day-card{
     display:block;
     text-align:center;
-    border:2px solid #ccc;
-    border-radius:12px;
-    padding:14px 0;
-    font-size:24px;
+    border:2px solid #d1d5db;
+    border-radius:14px;
+    padding:16px 0;
+    font-size:28px;
     background:white;
     cursor:pointer;
 }
 
-.day-card input {
+.day-card input{
     display:none;
 }
 
-.day-card span {
+.day-card span{
     display:block;
 }
 
-.day-card.lunar {
+.day-card.lunar{
     background:#fff2a8;
     border-color:#e6c84f;
 }
 
-.day-card.festival {
+.day-card.festival{
     background:#ffd1d1;
     border-color:#e58a8a;
 }
 
-.day-card.checked {
-    background:#2196F3;
+.day-card.checked{
+    background:#2563eb;
     color:white;
-    border-color:#2196F3;
+    border-color:#2563eb;
     font-weight:bold;
 }
 
-.empty-day {
-    height:55px;
+.empty-day{
+    height:60px;
 }
 
-.legend {
+.legend{
     display:flex;
     gap:20px;
-    margin:10px 0 20px 0;
-    font-size:20px;
+    margin:15px 0 25px;
+    font-size:22px;
     flex-wrap:wrap;
 }
 
-.legend-box {
+.legend-box{
     display:inline-block;
-    width:25px;
-    height:18px;
-    border-radius:4px;
-    margin-right:6px;
+    width:28px;
+    height:20px;
+    border-radius:6px;
+    margin-right:8px;
     vertical-align:middle;
 }
 
-.legend-lunar {
+.legend-lunar{
     background:#fff2a8;
     border:1px solid #e6c84f;
 }
 
-.legend-festival {
+.legend-festival{
     background:#ffd1d1;
     border:1px solid #e58a8a;
 }
 
-a {
-    font-size:22px;
+.branch-search-row{
+    display:grid;
+    grid-template-columns:110px 1fr;
+    gap:12px;
+    align-items:center;
+}
+
+.branch-toggle-btn{
+    height:66px;
+    font-size:26px;
+    font-weight:bold;
+    color:white;
+    border:none;
+    border-radius:16px;
+    cursor:pointer;
+}
+
+.month-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:18px;
+}
+
+@media (max-width:700px){
+    .month-grid,
+    .branch-search-row{
+        grid-template-columns:1fr;
+    }
+
+    .day-card{
+        font-size:24px;
+        padding:14px 0;
+    }
 }
 </style>
 
@@ -753,10 +958,8 @@ function updateCalendar() {
 }
 
 function reloadPrebookPage() {
-
     const year = document.getElementById("year").value;
     const month = document.getElementById("month").value;
-
     const keyword = document.getElementById("keyword").value;
     const branch = document.getElementById("multi_branch").value;
 
@@ -811,7 +1014,8 @@ function goMonthlySignupList() {
     const year = document.getElementById("year").value;
     const month = document.getElementById("month").value;
 
-    window.location.href = "/volunteer/monthly_signup_list?year=" + year + "&month=" + month;
+    window.location.href =
+        "/volunteer/monthly_signup_list?year=" + year + "&month=" + month;
 }
 
 document.addEventListener("DOMContentLoaded", function () {
@@ -832,128 +1036,203 @@ document.addEventListener("DOMContentLoaded", function () {
     if (startSelect) {
         startSelect.addEventListener("change", updateEndTimes);
     }
-
 });
 </script>
 
 </head>
 
 <body>
-<div class="box">
 
-<h1>📅 多日报名</h1>
+<div class="prebook-wrap">
 
-<form method="post" action="/volunteer/prebook">
+<div class="card prebook-card">
 
-    <label>
-    义工编号 / 电话 / 姓名
-    </label>
+    <h1 class="page-title">📅 多日报名</h1>
 
-    <div style="display:flex; gap:10px; align-items:center;">
+    <p class="page-subtitle">
+        可一次报名整个月份，减少每天重复填写。
+    </p>
 
-        <button
-            type="button"
-            id="multi_branch_btn"
-            onclick="toggleMultiBranch()"
-            style="
-                width:95px;
-                height:58px;
-                font-size:20px;
-                font-weight:bold;
-                background:{{ '#dc3545' if branch == 'STW' else '#28a745' }};
-                color:white;
-                border:none;
-                border-radius:12px;
-                cursor:pointer;
-                flex-shrink:0;
-            ">
-            {{ branch }}
-        </button>
+    <form method="post" action="/volunteer/prebook">
 
-        <input
-            type="hidden"
-            id="multi_branch"
-            name="branch"
-            value="{{ branch }}">
+        <div class="form-group">
+            <label class="form-label">
+                义工编号 / 姓名 / 电话
+            </label>
 
-        <input
-            name="keyword"
-            id="keyword"
-            value="{{ keyword }}"
-            required
-            placeholder="例如：108 / 姓名 / 电话"
-            style="flex:1;">
+            <div class="branch-search-row">
 
-    </div>
+                <button
+                    type="button"
+                    id="multi_branch_btn"
+                    onclick="toggleMultiBranch()"
+                    class="branch-toggle-btn"
+                    style="background:{{ '#dc3545' if branch == 'STW' else '#28a745' }};">
+                    {{ branch }}
+                </button>
 
-<label>年份</label>
-<input id="year" name="year" value="{{ default_year }}" required>
+                <input
+                    type="hidden"
+                    id="multi_branch"
+                    name="branch"
+                    value="{{ branch }}">
 
-<label>月份</label>
-<select id="month" name="month">
-{% for m in range(1, 13) %}
-<option value="{{ m }}" {% if m == default_month %}selected{% endif %}>
-    {{ m }}月
-</option>
-{% endfor %}
-</select>
+                <input
+                    class="form-input"
+                    name="keyword"
+                    id="keyword"
+                    value="{{ keyword }}"
+                    required
+                    placeholder="例如：108 / 张三 / 0123456789">
 
-<h3>选择日期</h3>
+            </div>
+        </div>
 
-<div class="calendar">
-    <div class="week-title">日</div>
-    <div class="week-title">一</div>
-    <div class="week-title">二</div>
-    <div class="week-title">三</div>
-    <div class="week-title">四</div>
-    <div class="week-title">五</div>
-    <div class="week-title">六</div>
+        <div class="month-grid">
+
+            <div class="form-group">
+                <label class="form-label">年份</label>
+
+                <input
+                    class="form-input"
+                    id="year"
+                    name="year"
+                    value="{{ default_year }}"
+                    required>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">月份</label>
+
+                <select
+                    class="form-select"
+                    id="month"
+                    name="month">
+
+                    {% for m in range(1, 13) %}
+                    <option value="{{ m }}" {% if m == default_month %}selected{% endif %}>
+                        {{ m }}月
+                    </option>
+                    {% endfor %}
+
+                </select>
+            </div>
+
+        </div>
+
+        <div class="divider"></div>
+
+        <h2 class="section-title">选择日期</h2>
+
+        <div class="calendar">
+            <div class="week-title">日</div>
+            <div class="week-title">一</div>
+            <div class="week-title">二</div>
+            <div class="week-title">三</div>
+            <div class="week-title">四</div>
+            <div class="week-title">五</div>
+            <div class="week-title">六</div>
+        </div>
+
+        <div id="calendar-days" class="calendar"></div>
+
+        <div class="legend">
+            <span>
+                <span class="legend-box legend-lunar"></span>
+                农历初一 / 十五
+            </span>
+
+            <span>
+                <span class="legend-box legend-festival"></span>
+                佛诞日
+            </span>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">岗位</label>
+
+            <select
+                class="form-select"
+                name="role"
+                onchange="toggleTimeFields()">
+
+                <option value="值班">值班</option>
+                <option value="卫生">卫生</option>
+                <option value="供台">供台</option>
+
+            </select>
+        </div>
+
+        <div class="form-grid">
+
+            <div class="form-group" id="start-time-group">
+                <label class="form-label">
+                    开始时间
+                    <span class="form-help">值班才需要</span>
+                </label>
+
+                <select
+                    class="form-select"
+                    name="start_time"
+                    id="start_time"
+                    onchange="updateEndTimes()">
+
+                    {% for t in times %}
+                    <option value="{{ t }}">{{ t }}</option>
+                    {% endfor %}
+
+                </select>
+            </div>
+
+            <div class="form-group" id="end-time-group">
+                <label class="form-label">
+                    结束时间
+                    <span class="form-help">值班才需要</span>
+                </label>
+
+                <select
+                    class="form-select"
+                    name="end_time"
+                    id="end_time">
+
+                    {% for t in times %}
+                    <option value="{{ t }}">{{ t }}</option>
+                    {% endfor %}
+
+                </select>
+            </div>
+
+        </div>
+
+        <div class="btn-row">
+
+            <button
+                class="btn-tool btn-green btn-full"
+                type="submit">
+                ✅ 提交多日报名
+            </button>
+
+            <button
+                class="btn-tool btn-blue btn-full"
+                type="button"
+                onclick="goMonthlySignupList()">
+                📖 查看本月预报名 / 复制 WhatsApp
+            </button>
+
+            <a
+                class="btn-tool btn-gray btn-full"
+                href="/volunteer">
+                ⬅ 返回义工首页
+            </a>
+
+        </div>
+
+    </form>
+
 </div>
 
-<div id="calendar-days" class="calendar"></div>
-
-<div class="legend">
-    <span><span class="legend-box legend-lunar"></span>农历初一 / 十五</span>
-    <span><span class="legend-box legend-festival"></span>佛诞日</span>
 </div>
 
-<label>岗位</label>
-<select name="role" onchange="toggleTimeFields()">
-    <option value="值班">值班</option>
-    <option value="卫生">卫生</option>
-    <option value="供台">供台</option>
-</select>
-
-<div id="start-time-group">
-    <label>开始时间（值班才需要）</label>
-    <select name="start_time" id="start_time" onchange="updateEndTimes()">
-        {% for t in times %}
-        <option value="{{ t }}">{{ t }}</option>
-        {% endfor %}
-    </select>
-</div>
-
-<div id="end-time-group">
-    <label>结束时间（值班才需要）</label>
-    <select name="end_time" id="end_time">
-        {% for t in times %}
-        <option value="{{ t }}">{{ t }}</option>
-        {% endfor %}
-    </select>
-</div>
-
-<button type="submit">提交多日报名</button>
-
-<button type="button" onclick="goMonthlySignupList()">
-    📖 查看这个月份预报名名单 / 复制 WhatsApp
-</button>
-
-</form>
-
-<br>
-<a href="/volunteer">返回</a>
-
-</div>
 <script>
 function toggleMultiBranch(){
 
@@ -971,6 +1250,7 @@ function toggleMultiBranch(){
     }
 }
 </script>
+
 </body>
 </html>
 """
