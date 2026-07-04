@@ -241,8 +241,14 @@ def member_query_login():
     <!doctype html>
     <html>
     <head>
+    <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#1976d2">
     <title>月费查询系统</title>
+
+    <link rel="manifest" href="/member-manifest.json?v=3">
+    <link rel="icon" href="/static/member_icon.png?v=3">
+    <link rel="apple-touch-icon" href="/static/member_icon.png?v=3">
 
     <style>
     body {
