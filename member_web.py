@@ -3308,8 +3308,9 @@ MEMBER_HTML = """
 <meta charset="utf-8">
 <title>月费查询</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="manifest" href="/member-manifest.json?v=2">
-<link rel="icon" href="/static/member_icon.png?v=2">
+<link rel="manifest" href="/member-manifest.json?v=3">
+<link rel="icon" href="/static/member_icon.png?v=3">
+<link rel="apple-touch-icon" href="/static/member_icon.png?v=3">
 
 <link rel="stylesheet"
       href="{{ url_for('static', filename='css/toolbox.css') }}">

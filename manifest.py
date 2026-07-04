@@ -30,12 +30,12 @@ def member_manifest():
     return {
         "name": "佛友月费查询",
         "short_name": "佛友查询",
-        "start_url": "/member/",
+        "start_url": "/member/query-login",
         "display": "standalone",
         "background_color": "#ffffff",
         "theme_color": "#1976d2",
         "icons": [{
-            "src": "/static/member_icon.png?v=2",
+            "src": "/static/member_icon.png?v=3",
             "sizes": "512x512",
             "type": "image/png"
         }]
