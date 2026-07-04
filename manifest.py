@@ -35,7 +35,7 @@ def member_manifest():
         "background_color": "#ffffff",
         "theme_color": "#1976d2",
         "icons": [{
-            "src": "/static/member_icon.png?v=1",
+            "src": "/static/member_icon.png?v=2",
             "sizes": "512x512",
             "type": "image/png"
         }]
