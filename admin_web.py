@@ -4,7 +4,7 @@ import io
 import pandas as pd
 
 
-from datetime import datetime
+from datetime import date, datetime
 from io import BytesIO
 from db import db_query
 from utils import get_text
@@ -492,124 +492,57 @@ def admin_today_records():
 def download_data():
 
     try:
-        old_att_rows = db_query("""
-            select
-                date as "日期",
-                volunteer_id as "编号",
-                name as "姓名",
-                signup as "报名",
-                signin as "签到",
-                role as "岗位",
-                start_time as "开始时间",
-                end_time as "结束时间",
-                hours as "时数",
-                remark as "备注"
-            from attendance
-            order by date, name, start_time
-        """, fetchall=True)
+        start_date = request.args.get("start_date", "").strip()
+        end_date = request.args.get("end_date", "").strip()
 
-        att_logs = db_query("""
-            select
-                attendance_date as "日期",
-                volunteer_id as "编号",
-                name as "姓名",
-                actual_role as "岗位",
-                actual_place as "地点",
-                to_char(check_in_time, 'HH12:MIam') as "签到时间",
-                to_char(check_out_time, 'HH12:MIam') as "签退时间",
-                case when walk_in then '是' else '' end as "现场签到",
-                remarks as "备注"
-            from volunteer_attendance_logs
-            order by attendance_date, name, check_in_time
-        """, fetchall=True)
+        if start_date and end_date:
+            rows = db_query("""
+                select
+                    date as "日期",
+                    volunteer_id as "编号",
+                    name as "姓名",
+                    signup as "报名",
+                    signin as "签到",
+                    role as "岗位",
+                    start_time as "开始时间",
+                    end_time as "结束时间",
+                    hours as "时数",
+                    remark as "备注"
+                from attendance
+                where date between %s and %s
+                order by date, name, start_time
+            """, (start_date, end_date), fetchall=True)
 
-        vol_rows = db_query("""
-            select
-                id as "编号",
-                name as "姓名",
-                status as "状态",
-                phone as "电话号码",
-                pin as "PIN"
-            from volunteers
-            order by id
-        """, fetchall=True)
+            file_date_text = f"{start_date}_to_{end_date}"
 
-        reading_rows = db_query("""
-            select
-                date as "日期",
-                name as "姓名",
-                identity as "身份",
-                topic as "主题",
-                session as "场次",
-                time as "时间"
-            from reading
-            order by date, time
-        """, fetchall=True)
-
-        old_df = pd.DataFrame(old_att_rows)
-        logs_df = pd.DataFrame(att_logs)
-
-        if not logs_df.empty:
-            new_att_df = pd.DataFrame({
-                "日期": logs_df.get("日期", ""),
-                "编号": logs_df.get("编号", ""),
-                "姓名": logs_df.get("姓名", ""),
-                "报名": logs_df["现场签到"].apply(lambda x: 0 if str(x).strip() == "是" else 1),
-                "签到": 1,
-                "岗位": logs_df.get("岗位", ""),
-                "开始时间": logs_df.get("签到时间", ""),
-                "结束时间": logs_df.get("签退时间", ""),
-                "时数": "",
-                "备注": logs_df.get("备注", ""),
-            })
         else:
-            new_att_df = pd.DataFrame(columns=[
-                "日期", "编号", "姓名", "报名", "签到",
-                "岗位", "开始时间", "结束时间", "时数", "备注"
-            ])
+            rows = db_query("""
+                select
+                    date as "日期",
+                    volunteer_id as "编号",
+                    name as "姓名",
+                    signup as "报名",
+                    signin as "签到",
+                    role as "岗位",
+                    start_time as "开始时间",
+                    end_time as "结束时间",
+                    hours as "时数",
+                    remark as "备注"
+                from attendance
+                order by date, name, start_time
+            """, fetchall=True)
 
-        attendance_df = pd.concat(
-            [old_df, new_att_df],
-            ignore_index=True
-        )
+            file_date_text = "all"
 
-        if not attendance_df.empty:
-            attendance_df = attendance_df.drop_duplicates(
-                subset=["日期", "编号", "姓名", "岗位", "开始时间"],
-                keep="last"
-            )
-
-            attendance_df = attendance_df.sort_values(
-                by=["日期", "姓名", "开始时间"],
-                ascending=[True, True, True]
-            )
+        df = pd.DataFrame(rows)
 
         output = io.BytesIO()
 
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-
-            attendance_df.to_excel(
+            df.to_excel(
                 writer,
                 index=False,
                 sheet_name="attendance"
-            )
-
-            logs_df.to_excel(
-                writer,
-                index=False,
-                sheet_name="att_logs"
-            )
-
-            pd.DataFrame(vol_rows).to_excel(
-                writer,
-                index=False,
-                sheet_name="volunteers"
-            )
-
-            pd.DataFrame(reading_rows).to_excel(
-                writer,
-                index=False,
-                sheet_name="reading"
             )
 
         output.seek(0)
@@ -617,12 +550,12 @@ def download_data():
         return send_file(
             output,
             as_attachment=True,
-            download_name="zhibanbiao_data.xlsx",
+            download_name=f"old_attendance_{file_date_text}.xlsx",
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
     except Exception as e:
-        return f"下载失败：{e}"
+        return f"下载旧签到失败：{e}"
     
 @admin_bp.route("/admin_edit_record/<int:record_id>", methods=["GET", "POST"])
 def admin_edit_record(record_id):
@@ -770,7 +703,132 @@ def admin_delete_record(record_id):
     """, (record_id, now_date_str()))
 
     return redirect(url_for("admin.admin_records", pin=pin))
-    
+
+
+@admin_bp.route("/admin_report", methods=["GET", "POST"])
+def admin_report():
+    pin = (
+        request.form.get("admin_pin")
+        or request.args.get("pin")
+        or ""
+    ).strip()
+
+    t = get_text()
+
+    if pin != ADMIN_PIN:
+        flash(t["admin_pin_wrong"], "bad")
+        return redirect(url_for("index"))
+
+    return render_template_string("""
+<!doctype html>
+<html lang="{{ t['html_lang'] }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ t["admin_title"] }}</title>
+
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='css/toolbox.css') }}">
+
+<style>
+.admin-page {
+    max-width: 760px;
+}
+
+.admin-tool-stack {
+    display: grid;
+    gap: 14px;
+}
+
+.admin-page .section-title {
+    font-size: 26px;
+    margin-bottom: 16px;
+}
+
+.admin-page .btn-tool {
+    min-height: 60px;
+    font-size: 22px;
+}
+
+.admin-desc {
+    font-size: 17px;
+    color: #666;
+    margin-top: 8px;
+    line-height: 1.5;
+}
+</style>
+</head>
+
+<body>
+
+<div class="page admin-page">
+
+    <h1 class="page-title">🔐 {{ t["admin_title"] }}</h1>
+    <p class="page-subtitle">
+        {{ t.get("admin_subtitle", "签到管理、数据中心与管理员工具") }}
+    </p>
+
+    <div class="card">
+        <div class="section-title">📋 {{ t.get("today_attendance_manage", "今日签到管理") }}</div>
+
+        <div class="admin-tool-stack">
+            <a class="btn-tool btn-danger"
+               href="{{ url_for('admin.admin_today_open', pin=pin) }}">
+                {{ t.get("today_open_records", "今日进行中（未签退）") }}
+            </a>
+
+            <a class="btn-tool btn-primary"
+               href="{{ url_for('admin.admin_today_records', pin=pin) }}">
+                {{ t.get("view_today_records", "查看今日记录") }}
+            </a>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="section-title">📊 {{ t.get("data_center", "数据中心") }}</div>
+
+        <div class="admin-tool-stack">
+            <a class="btn-tool btn-success"
+               href="{{ url_for('admin.data_center', pin=pin) }}">
+                {{ t.get("enter_data_center", "进入数据中心") }}
+            </a>
+        </div>
+
+        <div class="admin-desc">
+            {{ t.get("data_center_desc", "下载签到、白话共修及未来各系统资料。") }}
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="section-title">🛠 {{ t["admin_tools"] }}</div>
+
+        <div class="admin-tool-stack">
+            <a class="btn-tool btn-warning"
+               href="{{ url_for('admin.admin_add_record', pin=pin) }}">
+                {{ t["admin_add_record"] }}
+            </a>
+
+            <a class="btn-tool btn-purple"
+               href="{{ url_for('admin.admin_records', pin=pin) }}">
+                {{ t["admin_records"] }}
+            </a>
+        </div>
+    </div>
+
+    <div class="card">
+        <a class="btn-tool btn-secondary"
+           href="/">
+            {{ t["back_home"] }}
+        </a>
+    </div>
+
+</div>
+
+</body>
+</html>
+""", t=t, pin=pin)
+
+
 @admin_bp.route("/admin_records")
 def admin_records():
     pin = request.args.get("pin", "")
@@ -875,64 +933,409 @@ def admin_records():
     """, rows=rows, pin=pin)
 
 
-@admin_bp.route("/admin_report", methods=["GET", "POST"])
-def admin_report():
-    pin = (
-        request.form.get("admin_pin")
-        or request.args.get("pin")
-        or ""
-    ).strip()
-
-    print("输入 pin =", repr(pin))
-    print("系统 ADMIN_PIN =", repr(ADMIN_PIN))
-
+@admin_bp.route("/data_center")
+def data_center():
+    pin = request.args.get("pin", "").strip()
     t = get_text()
+    today = date.today().isoformat()
+    month_start = date.today().replace(day=1).isoformat()
+
+    start_date = request.args.get("start_date", month_start).strip()
+    end_date = request.args.get("end_date", today).strip()
 
     if pin != ADMIN_PIN:
         flash(t["admin_pin_wrong"], "bad")
         return redirect(url_for("index"))
+    
+    attendance_count_row = db_query("""
+        select count(*) as total
+        from attendance
+        where date between %s and %s
+    """, (start_date, end_date), fetchone=True)
 
-    code = get_display_today_code()
+    reading_count_row = db_query("""
+        select count(*) as total
+        from reading
+        where date between %s and %s
+    """, (start_date, end_date), fetchone=True)
+
+    attendance_count = attendance_count_row["total"] if attendance_count_row else 0
+    reading_count = reading_count_row["total"] if reading_count_row else 0
 
     return render_template_string("""
 <!doctype html>
-<html lang="zh">
+<html lang="{{ t['html_lang'] }}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>管理员工具</title>
+<title>📊 {{ t.get("data_center", "数据中心") }}</title>
+
+<link rel="stylesheet" href="{{ url_for('static', filename='css/toolbox.css') }}">
+
+<style>
+.data-page{ max-width:820px; }
+.data-grid{ display:grid; gap:16px; }
+
+.quick-row{
+    display:grid;
+    grid-template-columns:1fr 1fr 1fr;
+    gap:10px;
+}
+
+.form-row{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:14px;
+}
+
+.download-card{
+    display:grid;
+    gap:12px;
+}
+
+.small-desc{
+    color:#666;
+    font-size:16px;
+    line-height:1.5;
+}
+
+.disabled-box{
+    background:#f6f7f9;
+    color:#888;
+    padding:16px;
+    border-radius:16px;
+    text-align:center;
+    font-size:17px;
+}
+
+.mini-btn-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:12px;
+}
+
+.mini-btn-grid .btn-tool{
+    min-height:50px;
+    font-size:18px;
+}
+
+a.btn-tool,
+.download-link{
+    cursor:pointer !important;
+    text-decoration:none !important;
+}
+
+a.btn-tool:hover,
+.download-link:hover{
+    transform:translateY(-1px);
+    filter:brightness(0.98);
+}
+
+button:disabled{
+    cursor:not-allowed !important;
+    opacity:.65;
+}
+
+@media(max-width:600px){
+    .mini-btn-grid,
+    .quick-row,
+    .form-row{
+        grid-template-columns:1fr;
+    }
+}
+</style>
+</head>
+
+<body>
+<div class="page data-page">
+
+    <div class="card">
+        <h1 class="page-title">📊 {{ t.get("data_center", "数据中心") }}</h1>
+        <p class="page-subtitle">
+            {{ t.get("data_center_desc", "先选择日期范围，再选择要下载的系统资料。") }}
+        </p>
+    </div>
+
+    <div class="card">
+        <div class="section-title">📅 {{ t.get("download_date_range", "下载日期范围") }}</div>
+
+        <div class="quick-row">
+            <button type="button" class="btn-tool btn-primary" onclick="setToday()">
+                📌 {{ t.get("download_today", "今天") }}
+            </button>
+
+            <button type="button" class="btn-tool btn-success" onclick="setThisWeek()">
+                🗓 {{ t.get("download_this_week", "本星期") }}
+            </button>
+
+            <button type="button" class="btn-tool btn-warning" onclick="setThisMonth()">
+                📆 {{ t.get("download_this_month", "本月") }}
+            </button>
+        </div>
+
+        <div style="height:16px;"></div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">{{ t.get("start_date", "开始日期") }}</label>
+                <input class="form-input" type="date" id="start_date">
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">{{ t.get("end_date", "结束日期") }}</label>
+                <input class="form-input" type="date" id="end_date">
+            </div>
+        </div>
+
+        <div class="alert alert-info">
+            {{ t.get("date_range_tip", "选择日期后，下面的下载按钮会自动带入这个日期范围。") }}
+        </div>
+                                  
+        <div class="alert alert-success" id="range_text">
+            当前下载范围：-
+        </div>
+    </div>
+                                  
+    <div class="card">
+
+        <div class="section-title">
+            📈 当前资料概览
+        </div>
+
+        <div class="summary-grid">
+
+            <div class="summary-box">
+                <div class="summary-title">
+                    👥 签到记录
+                </div>
+
+                <div class="summary-value">
+                    {{ attendance_count }}
+                </div>
+            </div>
+
+            <div class="summary-box">
+                <div class="summary-title">
+                    📖 共修
+                </div>
+
+                <div class="summary-value">
+                    {{ reading_count }}
+                </div>
+            </div>
+
+            <div class="summary-box">
+                <div class="summary-title">
+                    📅 排班
+                </div>
+
+                <div class="summary-value">
+                    --
+                </div>
+            </div>
+
+            <div class="summary-box">
+                <div class="summary-title">
+                    💰 财政
+                </div>
+
+                <div class="summary-value">
+                    --
+                </div>
+            </div>
+
+        </div>
+
+    </div>
+
+    <div class="card">
+        <div class="section-title">📥 {{ t.get("select_download_item", "选择下载项目") }}</div>
+
+        <div class="data-grid">
+
+            <div class="download-card">
+                <h2 class="section-title">✅ {{ t.get("signin_system", "签到系统") }}</h2>
+                <div class="small-desc">
+                    {{ t.get("signin_data_desc", "下载签到记录。") }}
+                </div>
+
+                <a class="btn-tool btn-warning download-link"
+                   data-base="{{ url_for('admin.download_data') }}">
+                    📊 {{ t.get("download_old_signin_excel", "下载旧签到 Excel") }}
+                </a>
+
+                <a class="btn-tool btn-secondary download-link"
+                   data-base="{{ url_for('admin.download_att_logs') }}">
+                    📋 {{ t.get("download_new_attendance_logs", "下载新签到日志") }}
+                </a>
+            </div>
+
+            <hr>
+
+            <div class="download-card">
+                <h2 class="section-title">{{ t.get("reading_system", "白话佛法共修") }}</h2>
+                <div class="small-desc">
+                    {{ t.get("reading_data_desc", "下载白话佛法共修记录。") }}
+                </div>
+
+                <a class="btn-tool btn-primary download-link"
+                   data-base="/download_reading">
+                    {{ t.get("download_reading_excel", "下载共修记录 Excel") }}
+                </a>
+            </div>
+
+            <hr>
+
+            <div class="download-card">
+                <h2 class="section-title">📅 {{ t.get("schedule_system", "排班系统") }}</h2>
+                <div class="small-desc">
+                    {{ t.get("schedule_data_desc", "下载报名资料、正式排班、排班签到与缺人工统计。") }}
+                </div>
+
+                <div class="mini-btn-grid">
+                    <a class="btn-tool btn-primary download-link"
+                    data-base="{{ url_for('admin.download_schedule_signups') }}">
+                        📝 报名资料
+                    </a>
+
+                    <a class="btn-tool btn-success download-link"
+                    data-base="{{ url_for('admin.download_schedule_assignments') }}">
+                        📋 正式排班
+                    </a>
+                    
+                </div>
+            </div>
+
+            <hr>
+            
+        </div>
+    </div>
+
+    <div class="card">
+        <a class="btn-tool btn-secondary"
+           href="{{ url_for('admin.admin_report') }}?pin={{ pin }}">
+            {{ t.get("back_admin_home", "⬅ 返回管理员首页") }}
+        </a>
+    </div>
+
+</div>
+
+<script>
+function formatDate(d){
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+}
+
+function setToday(){
+    const today = new Date();
+    document.getElementById("start_date").value = formatDate(today);
+    document.getElementById("end_date").value = formatDate(today);
+    updateLinks();
+}
+
+function setThisWeek(){
+    const today = new Date();
+    const day = today.getDay();
+    const diff = day === 0 ? 6 : day - 1;
+
+    const monday = new Date(today);
+    monday.setDate(today.getDate() - diff);
+
+    document.getElementById("start_date").value = formatDate(monday);
+    document.getElementById("end_date").value = formatDate(today);
+    updateLinks();
+}
+
+function setThisMonth(){
+    const today = new Date();
+    const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+
+    document.getElementById("start_date").value = formatDate(firstDay);
+    document.getElementById("end_date").value = formatDate(today);
+    updateLinks();
+}
+
+function updateLinks(){
+    const startDate = document.getElementById("start_date").value;
+    const endDate = document.getElementById("end_date").value;
+
+    const rangeText = document.getElementById("range_text");
+
+    if(startDate && endDate){
+        rangeText.innerText = `当前下载范围：${startDate} 至 ${endDate}`;
+    }else{
+        rangeText.innerText = "当前下载范围：未选择";
+    }
+
+    document.querySelectorAll(".download-link").forEach(function(link){
+        const base = link.dataset.base;
+
+        if(startDate && endDate){
+            link.href = `${base}?start_date=${startDate}&end_date=${endDate}`;
+        }else{
+            link.href = base;
+        }
+    });
+}
+
+document.getElementById("start_date").addEventListener("change", updateLinks);
+document.getElementById("end_date").addEventListener("change", updateLinks);
+
+setToday();
+</script>
+
+</body>
+</html>
+""",
+    t=t,
+    pin=pin,
+    start_date=start_date,
+    end_date=end_date,
+    attendance_count=attendance_count,
+    reading_count=reading_count
+)
+
+ADMIN_HOME_HTML = """
+<!doctype html>
+<html lang="{{ t.get('html_lang', 'zh') }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<link rel="manifest" href="/admin-manifest.json">
+
+<title>{{ t.get("admin_center_title", "观音堂管理员中心") }}</title>
 
 <link rel="stylesheet"
       href="{{ url_for('static', filename='css/toolbox.css') }}">
+
 <style>
 .admin-page{
     max-width:760px;
 }
-
-.today-code-box{
-    font-size:56px;
-    font-weight:bold;
-    color:#dc2626;
-    text-align:center;
-    padding:22px;
-    background:#fff7d6;
-    border-radius:18px;
-    border:1px solid #fde68a;
-}
-
-.admin-tool-stack{
+.admin-grid{
     display:grid;
-    gap:14px;
+    gap:16px;
 }
-
-.admin-page .section-title{
-    font-size:26px;
-    margin-bottom:16px;
+.admin-card-desc{
+    color:#666;
+    font-size:18px;
+    line-height:1.6;
+    margin:8px 0 16px;
 }
-
 .admin-page .btn-tool{
-    min-height:58px;
+    min-height:60px;
     font-size:22px;
+}
+.muted-box{
+    background:#f6f7f9;
+    border-radius:16px;
+    padding:18px;
+    color:#777;
+    font-size:18px;
+    text-align:center;
 }
 </style>
 </head>
@@ -941,184 +1344,83 @@ def admin_report():
 
 <div class="page admin-page">
 
-    <h1 class="page-title">🔐 {{ t["admin_title"] }}</h1>
-    <p class="page-subtitle">签到管理、今日记录与管理员工具</p>
-
     <div class="card">
-        <div class="section-title">{{ t["today_code_big"] }}</div>
-
-        <div class="today-code-box">
-            {{ code }}
-        </div>
-
-        <div class="alert alert-warning">
-            ⚠ 请只写在观音堂现场，不要发群
-        </div>
-    </div>
-
-    <div class="card">
-        <div class="section-title">📋 今日签到管理</div>
-
-        <div class="admin-tool-stack">
-            <a class="btn-tool btn-danger"
-               href="/admin_today_open?pin={{ pin }}">
-                今日进行中（未签退）
-            </a>
-
-            <a class="btn-tool btn-primary"
-               href="/admin_today_records?pin={{ pin }}">
-                查看今日记录
-            </a>
-        </div>
-    </div>
-
-    <div class="card">
-        <div class="section-title">🛠 管理工具</div>
-
-        <div class="admin-tool-stack">
-            <a class="btn-tool btn-success"
-               href="/download_data">
-                下载签到日志 Excel
-            </a>
-
-            <a class="btn-tool btn-warning"
-               href="/admin_add_record?pin={{ pin }}">
-                补录签到
-            </a>
-
-            <a class="btn-tool btn-purple"
-               href="/admin_records?pin={{ pin }}">
-                修改 / 删除今日记录
-            </a>
-        </div>
-    </div>
-
-    <div class="card">
-        <a class="btn-tool btn-secondary"
-           href="/">
-            返回首页
-        </a>
-    </div>
-
-</div>
-
-</body>
-</html>
-""", t=t, code=code, pin=pin)
-
-ADMIN_HOME_HTML = """
-<!doctype html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-
-<link rel="manifest" href="/manifest.json">
-
-<title>观音堂管理员入口</title>
-
-<link rel="stylesheet"
-      href="{{ url_for('static', filename='css/toolbox.css') }}">
-
-</head>
-
-<body>
-
-<div class="page">
-
-    <div class="card">
-
         <h1 class="page-title">
-            🙏 观音堂管理员入口
+            🙏 {{ t.get("admin_center_title", "观音堂管理员中心") }}
         </h1>
 
         <div class="page-subtitle">
             Temple Administration Center
         </div>
-
     </div>
 
-    <div class="card">
+    <div class="admin-grid">
 
-        <h2 class="section-title">
-            📅 今日签到码
-        </h2>
+        <div class="card">
+            <h2 class="section-title">
+                📋 {{ t.get("today_signin_manage", "今日签到管理") }}
+            </h2>
 
-        <div class="alert alert-warning"
-             style="text-align:center;
-                    font-size:60px;
-                    font-weight:bold;
-                    letter-spacing:6px;">
-            {{ today_code }}
-        </div>
+            <div class="admin-card-desc">
+                {{ t.get("today_signin_manage_desc", "查看、修改、补录、删除今日签到记录。") }}
+            </div>
 
-    </div>
-
-    <div class="card">
-
-        <h2 class="section-title">
-            📋 义工报名系统
-        </h2>
-
-        <div class="btn-row">
-            <a class="btn-tool btn-primary"
-               href="/volunteer">
-                进入系统
-            </a>
-        </div>
-
-    </div>
-
-    <div class="card">
-
-        <h2 class="section-title">
-            💰 月费管理员系统
-        </h2>
-
-        <div class="btn-row">
-            <a class="btn-tool btn-success"
-               href="/member">
-                进入系统
-            </a>
-        </div>
-
-    </div>
-
-    <div class="card">
-
-        <h2 class="section-title">
-            ✅ 义工签到系统
-        </h2>
-
-        <div class="btn-row">
             <a class="btn-tool btn-purple"
                href="/">
-                进入系统
+                {{ t.get("enter_signin_system", "进入签到系统") }}
             </a>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">
+                📊 {{ t.get("data_center", "数据中心") }}
+            </h2>
+
+            <div class="admin-card-desc">
+                {{ t.get("data_center_desc", "统一下载签到、共修、排班、藏经阁、财政资料。") }}
+            </div>
+
+            <a class="btn-tool btn-success"
+               href="{{ url_for('admin.data_center') }}?pin={{ pin }}">
+                {{ t.get("enter_data_center", "进入数据中心") }}
+            </a>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">
+                🛠 {{ t.get("admin_tools", "管理工具") }}
+            </h2>
+
+            <div class="admin-card-desc">
+                {{ t.get("admin_tools_desc", "以后放补录签到、修改记录、删除记录等工具。") }}
+            </div>
+
+            <div class="muted-box">
+                {{ t.get("coming_soon", "开发中") }}
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">
+                ⚙ {{ t.get("system_settings", "系统设置") }}
+            </h2>
+
+            <div class="admin-card-desc">
+                {{ t.get("system_settings_desc", "以后放今日签到码、系统设定、语言和备份。") }}
+            </div>
+
+            <div class="muted-box">
+                {{ t.get("coming_soon", "开发中") }}
+            </div>
         </div>
 
     </div>
 
     <div class="card">
-
-        <h2 class="section-title">
-            📥 数据下载
-        </h2>
-
-        <div class="btn-row">
-
-            <a class="btn-tool btn-warning"
-               href="{{ url_for('admin.download_data') }}">
-                下载旧签到 Excel
-            </a>
-
-            <a class="btn-tool btn-secondary"
-               href="{{ url_for('admin.download_att_logs') }}">
-                下载新签到日志
-            </a>
-
-        </div>
-
+        <a class="btn-tool btn-secondary"
+           href="/">
+            {{ t.get("back_home", "⬅ 返回首页") }}
+        </a>
     </div>
 
 </div>
@@ -1131,27 +1433,54 @@ ADMIN_HOME_HTML = """
 def admin_home():
     return render_template_string(
         ADMIN_HOME_HTML,
-        today_code=get_today_code()
+        today_code=""
     )
 
 @admin_bp.route("/download_att_logs")
 def download_att_logs():
 
     try:
-        att_logs = db_query("""
-            select
-                attendance_date as "日期",
-                volunteer_id as "编号",
-                name as "姓名",
-                actual_role as "岗位",
-                actual_place as "地点",
-                to_char(check_in_time, 'HH12:MIam') as "签到时间",
-                to_char(check_out_time, 'HH12:MIam') as "签退时间",
-                case when walk_in then '是' else '' end as "临时报到",
-                remarks as "备注"
-            from volunteer_attendance_logs
-            order by attendance_date, name, check_in_time
-        """, fetchall=True)
+        start_date = request.args.get("start_date", "").strip()
+        end_date = request.args.get("end_date", "").strip()
+
+        use_date_filter = bool(start_date and end_date)
+
+        if use_date_filter:
+            att_logs = db_query("""
+                select
+                    attendance_date as "日期",
+                    volunteer_id as "编号",
+                    name as "姓名",
+                    actual_role as "岗位",
+                    actual_place as "地点",
+                    to_char(check_in_time, 'HH12:MIam') as "签到时间",
+                    to_char(check_out_time, 'HH12:MIam') as "签退时间",
+                    case when walk_in then '是' else '' end as "临时报到",
+                    remarks as "备注"
+                from volunteer_attendance_logs
+                where attendance_date between %s and %s
+                order by attendance_date, name, check_in_time
+            """, (start_date, end_date), fetchall=True)
+
+            file_date_text = f"{start_date}_to_{end_date}"
+
+        else:
+            att_logs = db_query("""
+                select
+                    attendance_date as "日期",
+                    volunteer_id as "编号",
+                    name as "姓名",
+                    actual_role as "岗位",
+                    actual_place as "地点",
+                    to_char(check_in_time, 'HH12:MIam') as "签到时间",
+                    to_char(check_out_time, 'HH12:MIam') as "签退时间",
+                    case when walk_in then '是' else '' end as "临时报到",
+                    remarks as "备注"
+                from volunteer_attendance_logs
+                order by attendance_date, name, check_in_time
+            """, fetchall=True)
+
+            file_date_text = "all"
 
         output = io.BytesIO()
 
@@ -1167,9 +1496,149 @@ def download_att_logs():
         return send_file(
             output,
             as_attachment=True,
-            download_name="att_logs.xlsx",
+            download_name=f"att_logs_{file_date_text}.xlsx",
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
     except Exception as e:
         return f"下载签到日志失败：{e}"
+    
+@admin_bp.route("/download_schedule_signups")
+def download_schedule_signups():
+
+    try:
+        start_date = request.args.get("start_date", "").strip()
+        end_date = request.args.get("end_date", "").strip()
+
+        use_date_filter = bool(start_date and end_date)
+
+        if use_date_filter:
+
+            rows = db_query("""
+                select
+                    signup_date as "日期",
+                    volunteer_id as "编号",
+                    name as "姓名",
+                    role as "岗位",
+                    start_time as "开始时间",
+                    end_time as "结束时间",
+                    status as "状态",
+                    remarks as "备注"
+                from volunteer_schedule_signups
+                where signup_date between %s and %s
+                order by signup_date,name,start_time
+            """,(start_date,end_date),fetchall=True)
+
+            filename = f"schedule_signups_{start_date}_to_{end_date}.xlsx"
+
+        else:
+
+            rows = db_query("""
+                select
+                    signup_date as "日期",
+                    volunteer_id as "编号",
+                    name as "姓名",
+                    role as "岗位",
+                    start_time as "开始时间",
+                    end_time as "结束时间",
+                    status as "状态",
+                    remarks as "备注"
+                from volunteer_schedule_signups
+                order by signup_date,name,start_time
+            """,fetchall=True)
+
+            filename = "schedule_signups_all.xlsx"
+
+        df = pd.DataFrame(rows)
+
+        output = io.BytesIO()
+
+        with pd.ExcelWriter(output,engine="openpyxl") as writer:
+            df.to_excel(
+                writer,
+                index=False,
+                sheet_name="Signups"
+            )
+
+        output.seek(0)
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    except Exception as e:
+        return f"下载报名资料失败：{e}"
+    
+@admin_bp.route("/download_schedule_assignments")
+def download_schedule_assignments():
+
+    try:
+        start_date = request.args.get("start_date", "").strip()
+        end_date = request.args.get("end_date", "").strip()
+
+        use_date_filter = bool(start_date and end_date)
+
+        if use_date_filter:
+
+            rows = db_query("""
+                select
+                    assignment_date as "日期",
+                    volunteer_id as "编号",
+                    name as "姓名",
+                    shift_label as "班别",
+                    assigned_place as "岗位",
+                    start_time as "开始时间",
+                    end_time as "结束时间",
+                    status as "状态",
+                    remarks as "备注"
+                from volunteer_schedule_assignments
+                where assignment_date between %s and %s
+                order by assignment_date,shift_label,name,start_time
+            """,(start_date,end_date),fetchall=True)
+
+            filename = f"schedule_assignments_{start_date}_to_{end_date}.xlsx"
+
+        else:
+
+            rows = db_query("""
+                select
+                    assignment_date as "日期",
+                    volunteer_id as "编号",
+                    name as "姓名",
+                    shift_label as "班别",
+                    assigned_place as "岗位",
+                    start_time as "开始时间",
+                    end_time as "结束时间",
+                    status as "状态",
+                    remarks as "备注"
+                from volunteer_schedule_assignments
+                order by assignment_date,shift_label,name,start_time
+            """,fetchall=True)
+
+            filename = "schedule_assignments_all.xlsx"
+
+        df = pd.DataFrame(rows)
+
+        output = io.BytesIO()
+
+        with pd.ExcelWriter(output,engine="openpyxl") as writer:
+            df.to_excel(
+                writer,
+                index=False,
+                sheet_name="Assignments"
+            )
+
+        output.seek(0)
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    except Exception as e:
+        return f"下载正式排班失败：{e}"

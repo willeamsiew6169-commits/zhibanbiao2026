@@ -37,7 +37,6 @@ from schedule.builders.schedule_builder import (
 )
 
 from schedule.helpers import (
-    get_daily_buddha_quote,
     to_simple,
     normalize_vol_id_for_search,
     time_to_minutes,
@@ -3743,7 +3742,7 @@ def schedule_settings():
 
     settings = get_schedule_settings()
     saved = request.args.get("saved") == "1"
-    daily_quote = get_daily_buddha_quote()
+    daily_quote = get_daily_dharma()
 
     return render_template_string("""
     <!doctype html>

@@ -1610,3 +1610,491 @@ button{
     box-shadow:0 10px 35px rgba(0,0,0,.2);
 
 }
+
+/* =========================================================
+   Toolbox V4.1 Mobile Responsive Final Patch
+   放在 toolbox.css 最底部
+   目的：手机缩小、电脑版基本不动
+========================================================= */
+
+/* 防止手机出现横向爆版 */
+html,
+body{
+    max-width:100%;
+    overflow-x:hidden;
+}
+
+*{
+    box-sizing:border-box;
+}
+
+/* 图片、表格、表单不要超出手机宽度 */
+img,
+video,
+iframe{
+    max-width:100%;
+}
+
+input,
+select,
+textarea,
+button{
+    max-width:100%;
+}
+
+/* 中等屏幕：平板 / 小电脑 */
+@media (max-width:900px){
+
+    .page,
+    .page-wrap,
+    .box{
+        max-width:100%;
+        padding:14px;
+    }
+
+    .card,
+    .search-card,
+    .member-card,
+    .dashboard-card,
+    .signup-block,
+    .action-panel,
+    .date-card,
+    .quote-card,
+    .info-card,
+    .card-soft{
+        padding:22px;
+        border-radius:16px;
+    }
+
+    .page-title{
+        font-size:36px;
+        margin:8px 0 18px;
+    }
+
+    .page-subtitle{
+        font-size:21px;
+        margin-bottom:18px;
+    }
+
+    .section-title{
+        font-size:30px;
+        margin-bottom:16px;
+    }
+
+    .card-title,
+    .dashboard-title,
+    .action-title{
+        font-size:26px;
+    }
+
+    .main-menu,
+    .dashboard-grid,
+    .quick-actions,
+    .action-grid{
+        grid-template-columns:1fr;
+        gap:14px;
+    }
+
+    .summary-grid,
+    .info-summary-grid{
+        grid-template-columns:repeat(2, 1fr);
+        gap:12px;
+    }
+
+    .kpi-grid{
+        grid-template-columns:repeat(2, 1fr);
+        gap:12px;
+    }
+
+    .btn-row{
+        gap:12px;
+        margin-top:18px;
+        padding-bottom:12px;
+    }
+
+    .btn-tool{
+        min-height:58px;
+        font-size:22px;
+        padding:10px 18px;
+        border-radius:14px;
+    }
+
+    .form-label,
+    .form-group label,
+    .form-row-large label,
+    .form-row-large p{
+        font-size:23px;
+    }
+
+    .form-input,
+    .form-select,
+    .form-textarea,
+    .form-row-large input,
+    .form-row-large select,
+    .signup-block textarea,
+    .special-box input,
+    .special-box select,
+    .date-input{
+        font-size:22px;
+        padding:13px 14px;
+        border-radius:12px;
+    }
+
+    .big-text,
+    .dashboard-note,
+    .info-box,
+    .alert{
+        font-size:22px;
+    }
+
+    .tool-table{
+        font-size:20px;
+    }
+}
+
+/* 手机：重点缩小 V4 视觉比例 */
+@media (max-width:600px){
+
+    body{
+        font-size:16px;
+    }
+
+    .page,
+    .page-wrap,
+    .box{
+        width:100%;
+        padding:10px;
+    }
+
+    .top-bar{
+        padding:14px;
+        border-radius:14px;
+        margin-bottom:12px;
+    }
+
+    .top-bar h1{
+        font-size:24px;
+        line-height:1.25;
+    }
+
+    .card,
+    .search-card,
+    .member-card,
+    .dashboard-card,
+    .signup-block,
+    .action-panel,
+    .date-card,
+    .quote-card,
+    .info-card,
+    .card-soft,
+    .candidate-card,
+    .special-box{
+        padding:16px;
+        border-radius:14px;
+        margin-bottom:12px;
+    }
+
+    .page-title{
+        font-size:28px;
+        line-height:1.25;
+        margin:6px 0 14px;
+    }
+
+    .page-subtitle,
+    .section-subtitle{
+        font-size:17px;
+        line-height:1.5;
+        margin-top:-4px;
+        margin-bottom:14px;
+    }
+
+    .section-title{
+        font-size:25px;
+        line-height:1.3;
+        margin:0 0 14px;
+    }
+
+    .card-title,
+    .dashboard-title,
+    .action-title,
+    .signup-block h3,
+    .special-box h3{
+        font-size:23px;
+        line-height:1.3;
+        margin-bottom:12px;
+    }
+
+    .special-box h4{
+        font-size:21px;
+    }
+
+    .dashboard-note,
+    .info-box,
+    .alert,
+    .date-card,
+    .special-box,
+    .big-text,
+    .result-card p{
+        font-size:18px;
+        line-height:1.55;
+    }
+
+    .alert{
+        padding:13px 15px;
+        border-radius:13px;
+    }
+
+    .btn-row,
+    .main-menu,
+    .quick-actions,
+    .action-grid{
+        display:grid;
+        grid-template-columns:1fr;
+        gap:10px;
+        margin-top:14px;
+        padding-bottom:8px;
+    }
+
+    .btn-tool{
+        width:100%;
+        min-height:50px;
+        font-size:19px;
+        line-height:1.25;
+        padding:10px 14px;
+        border-radius:13px;
+        gap:6px;
+    }
+
+    .btn-tool small,
+    .helper-text{
+        font-size:14px;
+        margin-top:3px;
+    }
+
+    .mini-btn{
+        min-height:38px;
+        font-size:15px;
+        padding:7px 12px;
+        width:auto;
+    }
+
+    .form-group,
+    .form-row-large{
+        margin-bottom:16px;
+    }
+
+    .form-label,
+    .form-group label,
+    .form-row-large label,
+    .form-row-large p{
+        font-size:19px;
+        margin-bottom:8px;
+    }
+
+    .form-help,
+    .lookup-text,
+    .small-text{
+        font-size:15px;
+        line-height:1.45;
+    }
+
+    .form-input,
+    .form-select,
+    .form-textarea,
+    .form-row-large input,
+    .form-row-large select,
+    .signup-block textarea,
+    .special-box input,
+    .special-box select,
+    .date-input{
+        font-size:18px;
+        padding:11px 12px;
+        border-radius:11px;
+    }
+
+    .form-inline-row,
+    .branch-search-row,
+    .date-status-row{
+        display:grid;
+        grid-template-columns:1fr;
+        gap:10px;
+    }
+
+    .branch-toggle-btn{
+        width:100%;
+        height:52px;
+        font-size:20px;
+        border-radius:12px;
+    }
+
+    .date-picker-card,
+    .compact-date-picker,
+    .status-card{
+        width:100%;
+        min-width:0;
+        flex:0 0 100%;
+    }
+
+    .status-title{
+        font-size:17px;
+    }
+
+    .status-value{
+        font-size:27px;
+    }
+
+    .summary-grid,
+    .info-summary-grid,
+    .kpi-grid{
+        grid-template-columns:1fr;
+        gap:10px;
+    }
+
+    .summary-box,
+    .info-summary-box,
+    .kpi-card{
+        padding:14px;
+        border-radius:13px;
+    }
+
+    .summary-title,
+    .info-summary-title,
+    .kpi-title{
+        font-size:16px;
+    }
+
+    .summary-value,
+    .info-summary-value,
+    .kpi-value{
+        font-size:30px;
+        margin-top:5px;
+    }
+
+    .member-name,
+    .person-name{
+        font-size:25px;
+    }
+
+    .member-meta,
+    .person-meta{
+        font-size:16px;
+        line-height:1.55;
+    }
+
+    .result-card{
+        margin:18px auto;
+    }
+
+    .result-icon,
+    .empty-icon{
+        font-size:40px;
+    }
+
+    .result-title{
+        font-size:28px;
+    }
+
+    .empty-state{
+        padding:26px 12px;
+    }
+
+    .empty-title{
+        font-size:24px;
+    }
+
+    .empty-text{
+        font-size:18px;
+    }
+
+    .info-row,
+    .info-label{
+        font-size:18px;
+    }
+
+    .info-value{
+        font-size:21px;
+    }
+
+    .role-box label{
+        width:100%;
+        margin:6px 0;
+        font-size:19px;
+        padding:12px 14px;
+        justify-content:center;
+    }
+
+    .role-btn{
+        width:100%;
+        height:52px;
+        font-size:20px;
+    }
+
+    .table-wrap,
+    .table-responsive{
+        width:100%;
+        overflow-x:auto;
+        -webkit-overflow-scrolling:touch;
+    }
+
+    .tool-table{
+        min-width:680px;
+        font-size:16px;
+    }
+
+    .tool-table th,
+    .tool-table td{
+        padding:9px 8px;
+    }
+
+    .record-table{
+        min-width:680px;
+    }
+
+    .record-table th,
+    .record-table td{
+        font-size:14px;
+        padding:7px;
+    }
+
+    .quote-title{
+        font-size:22px;
+    }
+
+    .quote-content{
+        font-size:22px;
+        line-height:1.65;
+    }
+
+    .sticky-bottom{
+        padding:10px;
+    }
+}
+
+/* 很小手机：再压一点点 */
+@media (max-width:380px){
+
+    .page-title{
+        font-size:25px;
+    }
+
+    .section-title{
+        font-size:23px;
+    }
+
+    .btn-tool{
+        font-size:18px;
+        min-height:48px;
+    }
+
+    .form-input,
+    .form-select,
+    .form-textarea,
+    .form-row-large input,
+    .form-row-large select,
+    .signup-block textarea,
+    .special-box input,
+    .special-box select,
+    .date-input{
+        font-size:17px;
+    }
+}

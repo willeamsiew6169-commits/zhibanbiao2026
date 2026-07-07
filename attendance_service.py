@@ -18,6 +18,9 @@ SIGNIN_EARLY_MINUTES = 30             # 可提前几分钟签到
 ENABLE_AUTO_SIGNOUT = False           # 自动签退
 AUTO_SIGNOUT_TIME = "19:00"           # 系统几点执行自动签退
 AUTO_SIGNOUT_DISPLAY = "18:30"        # 报表显示的签退时间
+REQUIRE_ASSIGNMENT_FOR_SIGNIN = False   # 测试时 False，正式上线改 True
+# ===== 签到系统设定 =====
+TODAY_CODE_ENABLED = False
 
 
 def format_date_value(v):

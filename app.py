@@ -12,12 +12,8 @@ from __future__ import annotations
 import os
 import io
 import sys
-
-
-
 import psycopg2
 import pandas as pd
-
 
 from pathlib import Path
 from typing import Optional
@@ -27,8 +23,10 @@ from db import db_query, get_conn
 from member_web import member_bp
 from pypinyin import lazy_pinyin
 from manifest import manifest_bp
+from library_web import library_bp
 from reading_web import reading_bp
 from finance_web import finance_bp
+from lunar_rules import get_special_day_info
 from psycopg2.extras import RealDictCursor
 from schedule.schedule_web import schedule_bp
 from datetime import datetime, date, timedelta
@@ -53,6 +51,12 @@ from attendance_service import (
     get_assignment_id_candidates,
     get_today_assignments,
     ENABLE_SIGNIN_TIME_LIMIT,
+    SIGNIN_EARLY_MINUTES,
+    REQUIRE_ASSIGNMENT_FOR_SIGNIN,
+    ENABLE_AUTO_SIGNOUT,
+    AUTO_SIGNOUT_TIME,
+    AUTO_SIGNOUT_DISPLAY,
+    TODAY_CODE_ENABLED,
 )
 
 from utils import (
@@ -80,11 +84,8 @@ BASE_DIR = Path(__file__).resolve().parent
 VOLUNTEERS_FILE = BASE_DIR / "volunteers.xlsx"
 ATTENDANCE_FILE = BASE_DIR / "attendance.xlsx"
 BACKUP_DIR = BASE_DIR / "backups"
-
 VOLUNTEERS_SHEET = "volunteers"
 ATTENDANCE_SHEET = "records"
-
-# 管理员 PIN：你可以改成自己的
 
 
 # 你的月报/年报脚本名称
@@ -104,110 +105,10 @@ app.register_blueprint(schedule_bp)
 app.register_blueprint(manifest_bp)
 app.register_blueprint(reading_bp)
 app.register_blueprint(finance_bp)
+app.register_blueprint(library_bp)
 app.register_blueprint(member_bp)
 app.register_blueprint(admin_bp)
 
-ADMIN_HOME_HTML = """
-<!doctype html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-
-<link rel="manifest" href="/manifest.json">
-
-<title>共修会管理员入口</title>
-
-<style>
-
-body{
-    margin:0;
-    padding:0;
-    background:#f5efe3;
-    font-family:"Microsoft YaHei";
-    text-align:center;
-}
-
-.container{
-    max-width:500px;
-    margin:auto;
-    padding:30px 20px;
-}
-
-h1{
-    color:#8b5a2b;
-}
-
-.card{
-    background:white;
-    border-radius:20px;
-    padding:25px;
-    margin-bottom:25px;
-    box-shadow:0 4px 12px rgba(0,0,0,0.08);
-}
-
-.btn{
-    display:block;
-    background:#b67b3d;
-    color:white;
-    text-decoration:none;
-    padding:16px;
-    border-radius:14px;
-    font-size:18px;
-    font-weight:bold;
-}
-
-</style>
-</head>
-
-<body>
-
-<div class="container">
-
-<h1>🙏 观音堂管理员入口</h1>
-
-<div class="card">
-<h2>📋 值班表生成系统</h2>
-<a class="btn" href="/schedule">
-进入系统
-</a>
-</div>
-
-<div class="card">
-<h2>💰 月费管理员系统</h2>
-<a class="btn" href="/member">
-进入系统
-</a>
-</div>
-
-<div class="card">
-<h2>✅ 义工签到系统</h2>
-<a class="btn" href="/">
-进入系统
-</a>
-</div>
-
-<div class="card">
-    <h2>📅 今日签到码</h2>
-
-    <div style="
-        font-size:48px;
-        font-weight:bold;
-        text-align:center;
-        padding:20px;
-        background:#fff3cd;
-        border-radius:16px;
-        color:#856404;
-    ">
-        {{ today_code }}
-    </div>
-</div>
-
-</div>
-
-</body>
-</html>
-"""
 
 def get_today_stats():
     rows = db_query("""
@@ -554,6 +455,110 @@ PAGE = """
         grid-template-columns:1fr;
       }
     }
+
+    .hero-card{
+      background: linear-gradient(135deg, #6d5dfc, #8f6ff7, #ffffff);
+      color:white;
+      border:none;
+      overflow:hidden;
+      position:relative;
+  }
+
+  .hero-card::after{
+      content:"🪷";
+      position:absolute;
+      right:28px;
+      top:22px;
+      font-size:92px;
+      opacity:.12;
+  }
+
+  .hero-icon{
+      font-size:46px;
+      margin-bottom:8px;
+  }
+
+  .hero-title{
+      font-size:34px;
+      font-weight:900;
+      margin:6px 0;
+      color:white;
+  }
+
+  .hero-subtitle{
+      font-size:17px;
+      line-height:1.6;
+      opacity:.95;
+  }
+
+  .hero-links{
+      margin-top:16px;
+      font-size:15px;
+  }
+
+  .hero-links a{
+      color:white;
+      font-weight:700;
+      text-decoration:none;
+  }
+
+  .hero-date{
+      margin-top:18px;
+      background:rgba(255,255,255,.20);
+      border-radius:16px;
+      padding:12px;
+      font-size:17px;
+      font-weight:700;
+  }
+
+  .stat-box-1{
+      background:#eefdf4;
+  }
+
+  .stat-box-2{
+      background:#fff8e8;
+  }
+
+  .stat-box-3{
+      background:#eef4ff;
+  }
+
+  .summary-box{
+      border:none;
+  }
+
+  .stats-header{
+      display:flex;
+      justify-content:space-between;
+      align-items:flex-start;
+      gap:24px;
+      margin-bottom:20px;
+  }
+
+  .today-info{
+      text-align:right;
+      font-size:15px;
+      color:#666;
+      line-height:1.7;
+  }
+
+  .festival-text{
+      color:#8c3eff;
+      font-weight:700;
+  }
+
+  @media(max-width:700px){
+
+      .stats-header{
+          flex-direction:column;
+          gap:10px;
+      }
+
+      .today-info{
+          text-align:left;
+      }
+
+  }
   </style>
 </head>
 
@@ -561,41 +566,75 @@ PAGE = """
 
 <div class="page sign-page">
 
-  <div class="card center">
-    <div style="font-size:34px;">🌺</div>
+  <div class="card center hero-card">
+      <div class="hero-icon">🌸</div>
 
-    <h1 class="page-title">{{ t.system_title }}</h1>
+      <div class="hero-title">
+          {{ t.system_title }}
+      </div>
 
-    <div class="page-subtitle">
-      {{ t.header_subtitle_1 }}
-      {{ t.header_subtitle_2 }}
-    </div>
+      <div class="hero-subtitle">
+          {{ t.header_subtitle_1 }}
+          {{ t.header_subtitle_2 }}
+      </div>
 
-    <div class="page-subtitle" style="margin-top:12px;">
-      {{ t.language }}：
-      <a href="{{ url_for('set_lang', lang='zh') }}">{{ t.chinese }}</a>
-      |
-      <a href="{{ url_for('set_lang', lang='en') }}">{{ t.english }}</a>
-      |
-      <a href="{{ url_for('change_pin_page') }}">{{ t.change_pin }}</a>
-    </div>
+      <div class="hero-date">
+          🙏 {{ t.get("welcome_home", "欢迎回来，感恩您的发心护持") }}
+      </div>
+
+      <div class="hero-links">
+          {{ t.language }}：
+          <a href="{{ url_for('set_lang', lang='zh') }}">{{ t.chinese }}</a>
+          |
+          <a href="{{ url_for('set_lang', lang='en') }}">{{ t.english }}</a>
+          |
+          <a href="{{ url_for('change_pin_page') }}">{{ t.change_pin }}</a>
+      </div>
   </div>
 
   <div class="card">
-    <h2 class="section-title">📊 {{ t.today_stats }}</h2>
+    <div class="stats-header">
+
+      <h2 class="section-title">
+          📊 {{ t.today_stats }}
+      </h2>
+
+      <div class="today-info">
+
+          <div>
+              📅 {{ today_text }}
+          </div>
+
+          <div>
+              🌙 {{ lunar_text }}
+          </div>
+
+          {% if buddhist_day %}
+          <div class="festival-text">
+              🪷 {{ buddhist_day }}
+          </div>
+          {% endif %}
+
+          <div>
+              🕘 {{ malaysia_time }}
+          </div>
+
+      </div>
+
+  </div>
 
     <div class="summary-grid">
-      <div class="summary-box">
+      <div class="summary-box stat-box-1">
         <div class="summary-title">👥 {{ t.checked_in }}</div>
         <div class="summary-value">{{ today_count }}</div>
       </div>
 
-      <div class="summary-box">
+      <div class="summary-box stat-box-2">
         <div class="summary-title">🕒 {{ t.on_duty }}</div>
         <div class="summary-value">{{ not_out }}</div>
       </div>
 
-      <div class="summary-box">
+      <div class="summary-box stat-box-3">
         <div class="summary-title">✅ {{ t.checked_out }}</div>
         <div class="summary-value">{{ done_out }}</div>
       </div>
@@ -667,7 +706,7 @@ PAGE = """
         </div>
 
       </div>
-
+      {% if today_code %}
       {% if today_code_enabled %}
       <div class="form-group">
         <label class="form-label">{{ t.today_code }}</label>
@@ -683,7 +722,7 @@ PAGE = """
         >
       </div>
       {% endif %}
-
+      {% endif %}
       <div class="btn-row single-btn-row">
         <button type="button"
                 class="btn-tool btn-primary"
@@ -1441,6 +1480,29 @@ PIN_PAGE = """
 def index():
     stats = get_today_stats()
 
+    from zoneinfo import ZoneInfo
+    from datetime import datetime
+
+    now = datetime.now(ZoneInfo("Asia/Kuala_Lumpur"))
+
+    weekday_map = {
+        0: "星期一",
+        1: "星期二",
+        2: "星期三",
+        3: "星期四",
+        4: "星期五",
+        5: "星期六",
+        6: "星期日",
+    }
+
+    today_text = now.strftime("%Y年%m月%d日") + " " + weekday_map[now.weekday()]
+    malaysia_time = now.strftime("%I:%M %p")
+
+    special_day_info = get_special_day_info(now.date())
+
+    lunar_text = special_day_info.get("lunar_text", "")
+    buddhist_day = special_day_info.get("festival_name", "")
+
     return render_template_string(
         PAGE,
         t=get_text(),
@@ -1452,6 +1514,11 @@ def index():
         today_count=stats["total"],
         not_out=stats["open"],
         done_out=stats["finished"],
+
+        today_text=today_text,
+        lunar_text=lunar_text,
+        buddhist_day=buddhist_day,
+        malaysia_time=malaysia_time,
     )
 
 @app.route("/signin", methods=["POST"])
@@ -1479,18 +1546,21 @@ def do_sign_in():
         
         if not today_assignments:
 
-            if ENABLE_SIGNIN_TIME_LIMIT:
-                flash("❌ 现在不是可签到时间，或今天没有正式安排。", "bad")
-            else:
-                flash("❌ 今天没有正式安排这个岗位，不能签到。", "bad")
+          if REQUIRE_ASSIGNMENT_FOR_SIGNIN:
 
-            return redirect(url_for("index"))
+              if ENABLE_SIGNIN_TIME_LIMIT:
+                  flash("❌ 现在不是可签到时间，或今天没有正式安排。", "bad")
+              else:
+                  flash("❌ 今天没有正式安排这个岗位，不能签到。", "bad")
+
+              return redirect(url_for("index"))
     
     if TODAY_CODE_ENABLED:
-        input_code = request.form.get("today_code", "").strip()
-        if not verify_today_code(input_code):
-            flash("今日签到码错误，请看现场公布的号码", "bad")
-            return redirect(url_for("index"))
+      input_code = request.form.get("today_code", "").strip()
+
+      if not verify_today_code(input_code):
+          flash("今日签到码错误，请看现场公布的号码", "bad")
+          return redirect(url_for("index"))
 
     ok, msg = sign_in(
         volunteer_id,
@@ -1631,44 +1701,70 @@ def delete_edit():
 
 @app.route("/download_reading")
 def download_reading():
-    
-    rows = db_query("""
-        select *
-        from reading
-        order by date, time
-    """, fetchall=True)
 
-    if not rows:
-        return "没有数据"
+    try:
+        start_date = request.args.get("start_date", "").strip()
+        end_date = request.args.get("end_date", "").strip()
 
-    df = pd.DataFrame(rows)
+        use_date_filter = bool(start_date and end_date)
 
-    # 改中文列名
-    df = df.rename(columns={
-        "date": "日期",
-        "name": "姓名",
-        "identity": "身份",
-        "topic": "主题",
-        "session": "场次",
-        "time": "时间"
-    })
+        if use_date_filter:
+            rows = db_query("""
+                select *
+                from reading
+                where date between %s and %s
+                order by date, time
+            """, (start_date, end_date), fetchall=True)
 
-    # 只保留需要的列
-    df = df[["日期", "姓名", "身份", "主题", "场次", "时间"]]
+            file_date_text = f"{start_date}_to_{end_date}"
 
-    output = io.BytesIO()
+        else:
+            rows = db_query("""
+                select *
+                from reading
+                order by date, time
+            """, fetchall=True)
 
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="白话佛法记录")
+            file_date_text = "all"
 
-    output.seek(0)
+        if not rows:
+            return "没有数据"
 
-    return send_file(
-        output,
-        as_attachment=True,
-        download_name="reading_report.xlsx",
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+        df = pd.DataFrame(rows)
+
+        df = df.rename(columns={
+            "date": "日期",
+            "name": "姓名",
+            "identity": "身份",
+            "topic": "主题",
+            "session": "场次",
+            "time": "时间"
+        })
+
+        df = df[
+            ["日期", "姓名", "身份", "主题", "场次", "时间"]
+        ]
+
+        output = io.BytesIO()
+
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(
+                writer,
+                index=False,
+                sheet_name="白话佛法记录"
+            )
+
+        output.seek(0)
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=f"reading_report_{file_date_text}.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    except Exception as e:
+        return f"下载失败：{e}"
 
 
 def normalize_member_query_id(value: str) -> str:

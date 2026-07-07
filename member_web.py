@@ -6,9 +6,9 @@ import psycopg2
 import pandas as pd
 
 from io import BytesIO
-from db import db_query
 from opencc import OpenCC
 from flask import send_file
+from db import db_query, get_conn
 from psycopg2.extras import RealDictCursor
 from openpyxl.utils import get_column_letter
 from datetime import datetime, date, timedelta
@@ -75,9 +75,6 @@ def check_missing_months(paid_months):
             expected.append(month)
 
     return expected
-
-def get_conn():
-    return psycopg2.connect(DATABASE_URL)
 
 def normalize_volunteer_id(keyword):
     keyword = str(keyword).strip().upper()
@@ -2582,21 +2579,9 @@ def finance_upload():
                             pass
 
                     ws.column_dimensions[letter].width = min(max_len + 4, 30)
-
-                # ======================
-                # 冻结标题
-                # ======================
-
+                
                 ws.freeze_panes = "A7"
-
-                # ======================
-                # 自动筛选
-                # ======================
-
-                # ======================
-                # 表格边框
-                # ======================
-
+                
                 blue_fill = PatternFill(
                     "solid",
                     fgColor="D8EEF8"
@@ -2648,7 +2633,7 @@ def finance_upload():
 
         except Exception as e:
             error = f"下载失败：{e}"
-
+   
     # 上传 Excel
     if request.method == "POST":
 
@@ -2675,104 +2660,154 @@ def finance_upload():
 
                 inserted = 0
                 skipped = 0
+                name_warnings = {}
 
-                for _, row in df.iterrows():
-                    try:
-                        receipt_raw = row["收据编号 \nOfficial Receipt No"]
+                with get_conn() as conn:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
-                        if pd.isna(receipt_raw):
-                            receipt_no = None
-                        else:
-                            receipt_no = str(receipt_raw).strip().replace(" ", "")
-                            if receipt_no == "":
-                                receipt_no = None
+                        for _, row in df.iterrows():
+                            try:
+                                receipt_raw = row["收据编号 \nOfficial Receipt No"]
 
-                        member_no = int(row["编号 No/"])
-                        member_id = f"CHE-{member_no}"
+                                if pd.isna(receipt_raw):
+                                    receipt_no = None
+                                else:
+                                    receipt_no = str(receipt_raw).strip().replace(" ", "")
+                                    if receipt_no == "":
+                                        receipt_no = None
 
-                        member_info = db_query("""
-                            select name
-                            from members
-                            where member_id = %s
-                        """, (member_id,), fetchone=True)
+                                member_no = int(row["编号 No/"])
+                                member_id = f"CHE-{member_no}"
 
-                        if not member_info:
-                            print("会员不存在：", member_id)
-                            skipped += 1
-                            continue
-                                                
-                        system_name = member_info["name"]
+                                # 以 members 主档为准
+                                cur.execute("""
+                                    select name
+                                    from members
+                                    where member_id = %s
+                                """, (member_id,))
+                                member_info = cur.fetchone()
 
-                        excel_name = str(
-                            row["捐款人\n姓名\nName"]
-                        ).strip()
+                                if not member_info:
+                                    print("会员不存在：", member_id)
+                                    skipped += 1
+                                    continue
 
-                        name_warnings = {}
+                                system_name = member_info["name"]
 
-                        if excel_name != system_name:
-                            name_warnings[member_id] = (
-                                f"{member_id}：Excel={excel_name}，Members={system_name}"
-                            )
-                                             
-                        name = system_name
+                                excel_name = str(
+                                    row["捐款人\n姓名\nName"]
+                                ).strip()
 
-                        payment_date = pd.to_datetime(
-                            row["日期\nDate"]
-                        ).date()
+                                if excel_name != system_name:
+                                    name_warnings[member_id] = (
+                                        f"{member_id}：Excel={excel_name}，Members={system_name}"
+                                    )
 
-                        start_month = parse_month(
-                            row["START MONTH"]
-                        )
+                                name = system_name
 
-                        end_month = parse_month(
-                            row["END MONTH"]
-                        )
+                                payment_date = pd.to_datetime(
+                                    row["日期\nDate"]
+                                ).date()
 
-                        month_count = int(row["No/ of Mth"])
-                        amount = float(row["Total Amt"])
+                                start_month = parse_month(
+                                    row["START MONTH"]
+                                )
 
-                        result = db_query("""
-                            insert into member_payments
-                            (
-                                receipt_no,
-                                member_id,
-                                name,
-                                payment_date,
-                                start_month,
-                                end_month,
-                                month_count,
-                                amount
-                            )
-                            values
-                            (
-                                %s, %s, %s, %s,
-                                %s, %s, %s, %s
-                            )
-                            on conflict (receipt_no) do nothing
-                            returning id
-                        """, (
-                            receipt_no,
-                            member_id,
-                            name,
-                            payment_date,
-                            start_month,
-                            end_month,
-                            month_count,
-                            amount
-                        ))
+                                end_month = parse_month(
+                                    row["END MONTH"]
+                                )
 
-                        if result:
-                            inserted += 1
-                        else:
-                            skipped += 1
+                                month_count = int(row["No/ of Mth"])
+                                amount = float(row["Total Amt"])
 
-                    except Exception as e:
-                        print("导入失败:", row.to_dict(), e)
-                        skipped += 1
+                                # 没有收据编号的银行过账，避免重复导入
+                                if not receipt_no:
+                                    cur.execute("""
+                                        select id
+                                        from member_payments
+                                        where member_id = %s
+                                        and start_month = %s
+                                        and end_month = %s
+                                        and amount = %s
+                                        limit 1
+                                    """, (
+                                        member_id,
+                                        start_month,
+                                        end_month,
+                                        amount
+                                    ))
+                                    existing = cur.fetchone()
+
+                                    if existing:
+                                        skipped += 1
+                                        print(
+                                            f"重复跳过：{member_id} | "
+                                            f"{start_month} ~ {end_month} | "
+                                            f"RM {amount:.2f}"
+                                        )
+                                        continue
+
+                                # 有收据编号的，先检查收据是否已存在
+                                if receipt_no:
+                                    cur.execute("""
+                                        select id
+                                        from member_payments
+                                        where receipt_no = %s
+                                        limit 1
+                                    """, (receipt_no,))
+                                    existing_receipt = cur.fetchone()
+
+                                    if existing_receipt:
+                                        skipped += 1
+                                        print(f"重复收据跳过：{receipt_no}")
+                                        continue
+
+                                cur.execute("""
+                                    insert into member_payments
+                                    (
+                                        receipt_no,
+                                        member_id,
+                                        name,
+                                        payment_date,
+                                        start_month,
+                                        end_month,
+                                        month_count,
+                                        amount
+                                    )
+                                    values
+                                    (
+                                        %s, %s, %s, %s,
+                                        %s, %s, %s, %s
+                                    )
+                                    returning id
+                                """, (
+                                    receipt_no,
+                                    member_id,
+                                    name,
+                                    payment_date,
+                                    start_month,
+                                    end_month,
+                                    month_count,
+                                    amount
+                                ))
+
+                                result = cur.fetchone()
+
+                                if result:
+                                    inserted += 1
+                                else:
+                                    skipped += 1
+
+                            except Exception as e:
+                                print("导入失败:", row.to_dict(), e)
+                                skipped += 1
+
+                        conn.commit()
 
                 msg = f"上传完成：读取 {len(df)} 行，新增 {inserted} 行，跳过 {skipped} 行。"
 
                 if name_warnings:
+                    msg += f" 发现 {len(name_warnings)} 位会员姓名不一致，已使用系统主档姓名。"
 
                     print("=" * 60)
                     print(f"发现 {len(name_warnings)} 位会员姓名不一致：")

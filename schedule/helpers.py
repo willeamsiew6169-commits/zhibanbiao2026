@@ -5,12 +5,17 @@ import calendar
 import pandas as pd
 
 from opencc import OpenCC
+from zoneinfo import ZoneInfo
 from db import get_db, get_conn
 from psycopg2.extras import RealDictCursor
 from schedule.builders.time_utils import malaysia_now
-from datetime import datetime, timedelta, date, timezone
+from datetime import datetime, timedelta, date, timezone, time
 
-
+BASE_DIR = os.path.dirname(
+    os.path.dirname(
+        os.path.dirname(__file__)
+    )
+)
 cc = OpenCC("t2s")
 
 def to_simple(text):
@@ -139,39 +144,6 @@ def find_volunteer_by_keyword(keyword):
 
     return name_matches
 
-def get_daily_buddha_quote():
-    """
-    从 daily_quotes.xlsx 读取每日佛言佛语。
-    马来西亚时间每天 18:00 后自动切换到下一句。
-    """
-
-    try:
-        file_path = os.path.join(
-            os.path.dirname(__file__),
-            "daily_quotes.xlsx"
-        )
-
-        df = pd.read_excel(file_path)
-
-        df = df[df["active"] == True]
-
-        if df.empty:
-            return "发心护持道场，就是培福培慧。"
-
-        now = malaysia_now()
-
-        if now.hour >= 18:
-            quote_date = now.date() + timedelta(days=1)
-        else:
-            quote_date = now.date()
-
-        idx = quote_date.toordinal() % len(df)
-
-        return str(df.iloc[idx]["content"]).strip()
-
-    except Exception as e:
-        print("读取每日佛言失败:", e)
-        return "发心护持道场，就是培福培慧。"
 
 def build_monthly_signup_text(year, month):
     year = int(year)

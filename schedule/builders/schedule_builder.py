@@ -2,17 +2,16 @@
 
 import os
 import re
-import pandas as pd
-import os
-import traceback
 import psycopg2
+import traceback
+import pandas as pd
 
 from datetime import datetime
 from db import get_db, db_query, get_conn
 from psycopg2.extras import RealDictCursor
 from sqlalchemy import create_engine, text
-from schedule.services.publish_service import is_schedule_published, mark_schedule_need_republish
 from lunar_rules import get_special_day_info, get_next_day_remove_info
+from schedule.services.publish_service import is_schedule_published, mark_schedule_need_republish
 from schedule.builders.time_utils import (
     parse_min,
     min_to_ampm,
@@ -23,6 +22,15 @@ from schedule.builders.time_utils import (
 
 from schedule.builders.flatten_builder import (
     flatten_arranged_for_db
+)
+
+from schedule.services.smart_assignment_engine import (
+    load_place_history_cache,
+    get_rotation_preferred_place,
+    update_place_history_cache,
+    calculate_best_place,
+    PLACE_ROTATION_ENABLED,
+    PLACE_ROTATION_LOOKBACK,
 )
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -512,11 +520,35 @@ def auto_assign_new_duty(result):
         "黄观音堂", "黄活动中心",
     ]
 
+    cleaning_place_by_name = {}
+
+    place_history_cache = load_place_history_cache()
+
+    def choose_place_for_item(shift, item, preferred_place=None):
+
+        if isinstance(item, dict):
+            item["_place_history_cache"] = place_history_cache
+
+        return calculate_best_place(
+            shift=shift,
+            item=item,
+            preferred_place=preferred_place,
+            cleaning_place_by_name=cleaning_place_by_name,
+            choose_less_place_func=choose_less_place,
+        )
+
     def get_start(item):
         return item.get("start_time") or item.get("开始时间")
 
     def get_end(item):
         return item.get("end_time") or item.get("结束时间")
+    
+    def get_volunteer_id(item):
+        return str(
+            item.get("volunteer_id")
+            or item.get("编号")
+            or ""
+        ).strip()
 
    
     def shift_of(start_min):
@@ -586,7 +618,10 @@ def auto_assign_new_duty(result):
             mid = choose_split_time(s, e)
 
             first_shift = shift_of(s)
-            first_place = choose_less_place(first_shift)
+            first_place = choose_place_for_item(
+                first_shift,
+                item
+            )
 
             second_shift = shift_of(mid)
             second_place = opposite_place(first_place)
@@ -595,16 +630,41 @@ def auto_assign_new_duty(result):
                 make_item(item, min_to_ampm(s), min_to_ampm(mid))
             )
 
+            vid = get_volunteer_id(item)
+
+            update_place_history_cache(
+                vid,
+                first_place,
+                place_history_cache
+            )
+
             result[make_key(second_shift, second_place)].append(
                 make_item(item, min_to_ampm(mid), min_to_ampm(e))
             )
 
+            update_place_history_cache(
+                vid,
+                second_place,
+                place_history_cache
+            )
+            
         else:
             shift = shift_of(s)
-            place = choose_less_place(shift)
+            place = choose_place_for_item(
+                shift,
+                item
+            )
 
             result[make_key(shift, place)].append(
                 make_item(item, min_to_ampm(s), min_to_ampm(e))
+            )
+
+            vid = get_volunteer_id(item)
+
+            update_place_history_cache(
+                vid,
+                place,
+                place_history_cache
             )
 
     return result
@@ -1793,6 +1853,20 @@ def auto_assign_duty(result):
 
         return "活动中心"
     
+    def choose_place_by_rotation(volunteer_id):
+        counts = get_recent_place_counts(volunteer_id)
+
+        gyt_count = counts["观音堂"]
+        act_count = counts["活动中心"]
+
+        if gyt_count > act_count:
+            return "活动中心"
+
+        if act_count > gyt_count:
+            return "观音堂"
+
+        return None
+    
     def get_cleaning_place_by_name():
         mapping = {}
 
@@ -1808,27 +1882,21 @@ def auto_assign_duty(result):
         return "活动中心" if place == "观音堂" else "观音堂"
         
     cleaning_place_by_name = get_cleaning_place_by_name()
+    place_history_cache = load_place_history_cache()
 
     def choose_place_for_item(shift, item, preferred_place=None):
-        volunteer_id = get_volunteer_id(item)
-        name = get_name(item)
 
-        if volunteer_id == "CHE-238":
-            if shift in ["绿", "橙"]:
-                return "活动中心"
-            if shift == "黄":
-                return "观音堂"
+        if isinstance(item, dict):
+            item["_place_history_cache"] = place_history_cache
 
-        if preferred_place:
-            return preferred_place
-
-        if cleaning_place_by_name.get(name) == "佛堂卫生":
-            return "活动中心"
-
-        return choose_less_place(shift)
-    
-    cleaning_place_by_name = get_cleaning_place_by_name()
-
+        return calculate_best_place(
+            shift=shift,
+            item=item,
+            preferred_place=preferred_place,
+            cleaning_place_by_name=cleaning_place_by_name,
+            choose_less_place_func=choose_less_place,
+        )
+       
     duty_keys = [
         "绿观音堂", "绿活动中心",
         "橙观音堂", "橙活动中心",
@@ -1887,14 +1955,69 @@ def auto_assign_duty(result):
             result[make_key(first_shift, first_place)].append(first_item)
             result[make_key(second_shift, second_place)].append(second_item)
 
+            vid = get_volunteer_id(raw)
+
+            update_place_history_cache(vid, first_place, place_history_cache)
+            update_place_history_cache(vid, second_place, place_history_cache)
+
         else:
             shift = shift_of(s)
             place = choose_place_for_item(shift, raw)
 
             item = make_item(raw, min_to_ampm(s), min_to_ampm(e))
             result[make_key(shift, place)].append(item)
+            vid = get_volunteer_id(raw)
+
+            update_place_history_cache(vid, place, place_history_cache)
 
     return result
+
+    
+def get_recent_place_counts(volunteer_id):
+    """
+    读取这位义工最近 N 次值班地点。
+    回传：
+    {
+        "观音堂": 3,
+        "活动中心": 5
+    }
+    """
+
+    counts = {
+        "观音堂": 0,
+        "活动中心": 0,
+    }
+
+    if not PLACE_ROTATION_ENABLED:
+        return counts
+
+    if not volunteer_id:
+        return counts
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select assigned_place
+                from volunteer_schedule_assignments
+                where volunteer_id = %s
+                  and role = '值班'
+                  and assigned_place in ('观音堂', '活动中心')
+                order by assignment_date desc, id desc
+                limit %s
+            """, (
+                volunteer_id,
+                PLACE_ROTATION_LOOKBACK
+            ))
+
+            rows = cur.fetchall()
+
+    for r in rows:
+        place = r.get("assigned_place")
+
+        if place in counts:
+            counts[place] += 1
+
+    return counts
 
 def format_people_inline(names, sep="  "):
     if not names:

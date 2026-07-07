@@ -73,3 +73,19 @@ def volunteer_manifest():
             "type": "image/png"
         }]
     }
+
+@manifest_bp.route("/library-manifest.json")
+def library_manifest():
+    return {
+        "name": "藏经阁系统",
+        "short_name": "藏经阁",
+        "start_url": "/library/",
+        "display": "standalone",
+        "background_color": "#ffffff",
+        "theme_color": "#8B4513",
+        "icons": [{
+            "src": "/static/library_icon.png?v=1",
+            "sizes": "512x512",
+            "type": "image/png"
+        }]
+    }

@@ -12,7 +12,6 @@ from utils import apply_branch_prefix
 from schedule.helpers import (
     find_volunteer_by_keyword,
     build_monthly_signup_text,
-    get_daily_buddha_quote,
 )
 
 from lunar_rules import get_special_day_info
@@ -127,7 +126,7 @@ def volunteer_signup():
     branch = request.form.get("branch", "CHE").strip().upper()
 
     keyword = apply_branch_prefix(keyword, branch)
-    daily_quote = get_daily_buddha_quote()
+    daily_quote = get_daily_dharma()
 
     if keyword.isdigit() and branch == "STW":
         keyword = f"STW-{keyword}"
