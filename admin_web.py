@@ -1433,6 +1433,7 @@ ADMIN_HOME_HTML = """
 def admin_home():
     return render_template_string(
         ADMIN_HOME_HTML,
+        t=get_text(),
         today_code=""
     )
 
