@@ -10,7 +10,7 @@ from reportlab.pdfgen import canvas
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase import pdfmetrics
 
-EXCEL_FILE = "library_inventory.xlsx"
+EXCEL_FILE = "library_items.xlsx"
 
 OUTPUT_DIR = "output/library_qr_output"
 QR_DIR = os.path.join(OUTPUT_DIR, "qr")
@@ -28,21 +28,17 @@ def read_items():
 
     items = []
 
-    for r in range(1, ws.max_row + 1):
-        raw_code = ws.cell(r, 1).value
+    for r in range(2, ws.max_row + 1):
+        raw_item_code = ws.cell(r, 1).value
         raw_name = ws.cell(r, 2).value
         raw_balance = ws.cell(r, 3).value
         raw_category = ws.cell(r, 4).value
 
-        if not raw_code or not raw_name:
+        if not raw_item_code or not raw_name:
             continue
 
-        try:
-            number = int(raw_code)
-        except:
-            continue
-
-        item_code = f"BOOK{number:04d}"
+        item_code = str(raw_item_code).strip().upper()
+        name = str(raw_name).strip()
 
         category = "未分类"
         if raw_category:
@@ -50,26 +46,26 @@ def read_items():
 
         items.append({
             "item_code": item_code,
-            "name": str(raw_name).strip(),
+            "name": name,
             "balance": raw_balance,
             "category": category,
         })
 
     if not items:
-        raise Exception("没有读取到法宝。请确认 A栏=编号，B栏=名称，C栏=数量，D栏=分类。")
+        raise Exception("没有读取到法宝。请确认 Excel 是：A=item_code，B=name，C=balance，D=category。")
 
     return items
 
 
 def make_qr_image(item_code):
-    BASE_URL = "https://gyt-checkin.onrender.com"
-    qr_text = f"{BASE_URL}/library/scan/{item_code}"
+
+    qr_text = item_code
 
     qr = qrcode.QRCode(
         version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=10,
-        border=2,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=12,
+        border=4,
     )
 
     qr.add_data(qr_text)
@@ -158,41 +154,41 @@ def draw_category_header(c, category, count, page_no):
 def draw_card(c, item, x, y):
     card_w = 86 * mm
     card_h = 58 * mm
-    qr_size = 32 * mm
+    qr_size = 38 * mm
 
     c.roundRect(x, y - card_h, card_w, card_h, 3 * mm)
 
     # 名称
-    c.setFont("MY", 10)
+    c.setFont("MY", 9)
     c.drawString(
         x + 4 * mm,
-        y - 8 * mm,
-        short_text(item["name"], 24)
+        y - 7 * mm,
+        short_text(item["name"], 22)
     )
 
-    # QR
+    # 编号
+    c.setFont("MY", 7)
+    c.drawString(
+        x + 4 * mm,
+        y - 14 * mm,
+        f"编号：{item['item_code']}"
+    )
+
+    # QR 放中间偏下
     qr_path = make_qr_image(item["item_code"])
 
     c.drawImage(
         qr_path,
         x + 4 * mm,
-        y - 45 * mm,
+        y - 54 * mm,
         qr_size,
         qr_size
     )
 
-    # 右侧说明
+    # 右边说明
     c.setFont("MY", 8)
-    c.drawString(x + 39 * mm, y - 25 * mm, "扫码进入")
-    c.drawString(x + 39 * mm, y - 32 * mm, "法宝操作")
-
-    # 编号放最下面
-    c.setFont("MY", 7)
-    c.drawString(
-        x + 4 * mm,
-        y - 52 * mm,
-        f"编号：{item['item_code']}"
-    )
+    c.drawString(x + 46 * mm, y - 30 * mm, "扫码进入")
+    c.drawString(x + 46 * mm, y - 37 * mm, "法宝操作")
 
 
 def make_pdf(items):
