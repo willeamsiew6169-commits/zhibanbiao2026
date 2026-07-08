@@ -12,7 +12,7 @@ from reportlab.pdfbase import pdfmetrics
 
 EXCEL_FILE = "library_inventory.xlsx"
 
-OUTPUT_DIR = "library_qr_output"
+OUTPUT_DIR = "output/library_qr_output"
 QR_DIR = os.path.join(OUTPUT_DIR, "qr")
 PDF_FILE = os.path.join(OUTPUT_DIR, "Library_QR_Catalogue.pdf")
 
@@ -160,56 +160,38 @@ def draw_card(c, item, x, y):
     card_h = 58 * mm
     qr_size = 32 * mm
 
-    c.roundRect(
-        x,
-        y - card_h,
-        card_w,
-        card_h,
-        3 * mm
-    )
+    c.roundRect(x, y - card_h, card_w, card_h, 3 * mm)
 
+    # 名称
     c.setFont("MY", 10)
     c.drawString(
         x + 4 * mm,
         y - 8 * mm,
-        short_text(item["name"], 25)
+        short_text(item["name"], 24)
     )
 
-    c.setFont("MY", 8)
-    c.drawString(
-        x + 4 * mm,
-        y - 15 * mm,
-        item["item_code"]
-    )
-
+    # QR
     qr_path = make_qr_image(item["item_code"])
 
     c.drawImage(
         qr_path,
         x + 4 * mm,
-        y - 48 * mm,
+        y - 45 * mm,
         qr_size,
         qr_size
     )
 
+    # 右侧说明
     c.setFont("MY", 8)
-    c.drawString(
-        x + 38 * mm,
-        y - 30 * mm,
-        "扫码登记"
-    )
+    c.drawString(x + 39 * mm, y - 25 * mm, "扫码进入")
+    c.drawString(x + 39 * mm, y - 32 * mm, "法宝操作")
 
-    c.drawString(
-        x + 38 * mm,
-        y - 37 * mm,
-        "领取法宝"
-    )
-
+    # 编号放最下面
     c.setFont("MY", 7)
     c.drawString(
-        x + 38 * mm,
-        y - 47 * mm,
-        item["item_code"]
+        x + 4 * mm,
+        y - 52 * mm,
+        f"编号：{item['item_code']}"
     )
 
 

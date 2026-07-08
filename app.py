@@ -616,7 +616,7 @@ PAGE = """
           {% endif %}
 
           <div>
-              🕘 {{ malaysia_time }}
+          🕘 <span id="clock"></span>
           </div>
 
       </div>
@@ -988,6 +988,29 @@ async function lookupVolunteer() {
     box.innerHTML = `${TXT.not_found_id}：${finalId}`;
   }
 }
+
+function updateClock(){
+
+    const now = new Date();
+
+    const text = new Intl.DateTimeFormat(
+        "en-MY",
+        {
+            timeZone:"Asia/Kuala_Lumpur",
+            hour:"2-digit",
+            minute:"2-digit",
+            second:"2-digit",
+            hour12:true
+        }
+    ).format(new Date());
+
+    document.getElementById("clock").innerText=text;
+
+}
+
+updateClock();
+
+setInterval(updateClock,1000);
 
 function toggleBranch() {
   const btn = document.getElementById("branch_btn");

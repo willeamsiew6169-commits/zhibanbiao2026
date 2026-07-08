@@ -3804,139 +3804,199 @@ def library_scan_camera():
 <!doctype html>
 <html lang="zh">
 <head>
-
 <meta charset="utf-8">
-<meta name="viewport"
-      content="width=device-width,initial-scale=1">
-
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>扫描法宝</title>
-
-<link rel="stylesheet"
-href="/static/css/toolbox.css">
+<link rel="stylesheet" href="/static/css/toolbox.css">
 
 <style>
-
-video{
-
-width:100%;
-border-radius:16px;
-background:black;
-
+video {
+    width:100%;
+    border-radius:16px;
+    background:black;
 }
 
-.scan-box{
-
-margin-top:20px;
-
+.scan-box {
+    margin-top:20px;
 }
 
-.tip{
-
-text-align:center;
-color:#666;
-margin-top:12px;
-
+.tip {
+    text-align:center;
+    color:#666;
+    margin-top:12px;
 }
 
+.manual-input {
+    font-size:28px;
+    text-align:center;
+    letter-spacing:1px;
+}
 </style>
-
 </head>
 
 <body>
-
 <div class="page">
 
-<div class="card">
+    <div class="card">
+        <h1 class="page-title">📷 扫描法宝</h1>
+        <p class="page-subtitle">
+            手机可用相机扫描；电脑可直接使用扫码枪。
+        </p>
 
-<h1 class="page-title">
-📷 扫描法宝
-</h1>
+        <div class="btn-row">
+            <a class="btn-tool btn-secondary" href="/library">
+                返回首页
+            </a>
+        </div>
+    </div>
 
-<p class="page-subtitle">
-请把 QR Code 放在画面中央
-</p>
+    <div class="card scan-box">
+        <h2 class="section-title">扫码枪 / 手动输入</h2>
 
-<div class="btn-row">
+        <p class="page-subtitle">
+            请扫描 QR Code，或输入 BOOK 编号。
+        </p>
 
-<a class="btn-tool btn-secondary"
-href="/library">
+        <input
+            id="scanInput"
+            class="form-input manual-input"
+            placeholder="BOOK0001"
+            autofocus
+            autocomplete="off"
+        >
 
-返回首页
+        <div class="btn-row" style="margin-top:14px;">
+            <button class="btn-tool btn-primary" onclick="goScanInput()">
+                查询
+            </button>
+        </div>
 
-</a>
+        <div class="tip" id="inputTip">
+            等待扫码枪输入...
+        </div>
+    </div>
 
-</div>
+    <div class="card scan-box">
+        <h2 class="section-title">手机相机扫描</h2>
 
-</div>
+        <video id="video" playsinline autoplay muted></video>
 
-<div class="card scan-box">
-
-<video
-id="video"
-playsinline
-autoplay
-muted
-></video>
-
-<div class="tip">
-
-等待扫描...
-
-</div>
-
-</div>
+        <div class="tip" id="cameraTip">
+            正在尝试开启相机...
+        </div>
+    </div>
 
 </div>
 
 <script>
+const video = document.getElementById("video");
+const input = document.getElementById("scanInput");
+const cameraTip = document.getElementById("cameraTip");
 
-const video=document.getElementById("video");
+input.focus();
 
-async function startCamera(){
+function extractItemCode(value) {
+    value = (value || "").trim();
 
-if(!("BarcodeDetector" in window)){
+    if (!value) {
+        return "";
+    }
 
-alert("你的浏览器暂时不支持扫码，请使用 Chrome。");
-return;
+    // 如果扫码出来是完整网址
+    if (value.includes("/library/scan/")) {
+        let parts = value.split("/library/scan/");
+        return parts[1].split(/[?#]/)[0].trim().toUpperCase();
+    }
 
+    // 如果是 GYTLIB:BOOK0001
+    if (value.toUpperCase().startsWith("GYTLIB:")) {
+        return value.substring(7).trim().toUpperCase();
+    }
+
+    // 如果是 BOOK0001
+    return value.toUpperCase();
 }
 
-const detector=new BarcodeDetector({
-formats:["qr_code"]
+function goToItem(value) {
+    let itemCode = extractItemCode(value);
+
+    if (!itemCode) {
+        return;
+    }
+
+    window.location.href = "/library/scan/" + encodeURIComponent(itemCode);
+}
+
+function goScanInput() {
+    goToItem(input.value);
+}
+
+// 扫码枪通常会自动送 Enter
+input.addEventListener("keydown", function(e) {
+    if (e.key === "Enter") {
+        e.preventDefault();
+        goScanInput();
+    }
 });
 
-const stream=await navigator.mediaDevices.getUserMedia({
+// 有些扫码枪不会送 Enter，输入完成后稍等自动跳转
+let scanTimer = null;
 
-video:{
-facingMode:"environment"
-}
+input.addEventListener("input", function() {
+    clearTimeout(scanTimer);
 
+    scanTimer = setTimeout(function() {
+        let value = input.value.trim();
+
+        if (
+            value.toUpperCase().startsWith("BOOK") ||
+            value.toUpperCase().startsWith("GYTLIB:") ||
+            value.includes("/library/scan/")
+        ) {
+            goToItem(value);
+        }
+    }, 500);
 });
 
-video.srcObject=stream;
+async function startCamera() {
+    if (!("BarcodeDetector" in window)) {
+        cameraTip.innerText = "此浏览器不支持相机扫码，可使用扫码枪或手动输入。";
+        return;
+    }
 
-video.play();
+    try {
+        const detector = new BarcodeDetector({
+            formats: ["qr_code"]
+        });
 
-setInterval(async()=>{
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: "environment"
+            }
+        });
 
-const codes=await detector.detect(video);
+        video.srcObject = stream;
+        video.play();
 
-if(codes.length>0){
+        cameraTip.innerText = "请把 QR Code 放在画面中央。";
 
-stream.getTracks().forEach(track=>track.stop());
+        setInterval(async () => {
+            const codes = await detector.detect(video);
 
-let value=codes[0].rawValue;
+            if (codes.length > 0) {
+                stream.getTracks().forEach(track => track.stop());
 
-window.location=value;
+                let value = codes[0].rawValue;
+                goToItem(value);
+            }
+        }, 300);
 
-}
-
-},300);
-
+    } catch (err) {
+        cameraTip.innerText = "无法开启相机，可使用扫码枪或手动输入。";
+    }
 }
 
 startCamera();
-
 </script>
 
 </body>
