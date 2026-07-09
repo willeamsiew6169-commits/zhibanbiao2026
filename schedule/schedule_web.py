@@ -4738,6 +4738,10 @@ function showSpecial(id) {
     font-size:34px;
 }
 
+html {
+    scroll-behavior: smooth;
+}
+
 @media (max-width:700px){
     .login-title{
         font-size:40px;
@@ -4765,10 +4769,14 @@ function showSpecial(id) {
 <div class="card">
     <h2 class="section-title">📅 今日工作</h2>
 
-    <div class="main-menu">
+    <div class="btn-row">
 
-        <a class="btn-tool btn-blue"
-           href="/schedule?mode=day&override_date={{ override_date }}">
+        <a class="btn-tool btn-primary"
+           href="{{ url_for(
+                'schedule.schedule_admin',
+                mode='day',
+                override_date=override_date
+           ) }}#today-schedule">
             📅 当天安排
         </a>
 
@@ -4810,7 +4818,7 @@ function showSpecial(id) {
 
 {% if mode == "day" %}
 
-<div class="card today-panel">
+<div class="card today-panel" id="today-schedule">
     <h2 class="section-title">📅 今日概况</h2>
     <div class="dashboard-note">负责人打开后，先确认日期、发布状态、报名人数和提醒。</div>
 
@@ -5487,6 +5495,21 @@ function toggleAdminBranch(){
         btn.style.background = "#28a745";
     }
 }
+
+window.addEventListener("load", function () {
+    if (window.location.hash === "#today-schedule") {
+        setTimeout(function () {
+            var target = document.getElementById("today-schedule");
+            if (target) {
+                target.scrollIntoView({
+                    behavior: "smooth",
+                    block: "start"
+                });
+            }
+        }, 300);
+    }
+});
+
 </script>
 <script>
 function goToScheduleDate(dateValue) {

@@ -13,6 +13,7 @@ from openpyxl import load_workbook
 from psycopg2.extras import RealDictCursor
 from werkzeug.utils import secure_filename
 
+
 library_bp = Blueprint(
     "library",
     __name__,
@@ -430,7 +431,7 @@ def library_upload():
 
                         conn.commit()
 
-                message = f"上传完成：共导入 {len(rows)} 项法宝"
+                message = f"上传完成：共导入 {len(rows)} 项法物"
 
             except Exception as e:
                 error = f"上传失败：{e}"
@@ -520,39 +521,57 @@ def library_home():
         </h1>
 
         <p class="page-subtitle">
-            查询法宝、登记领取及管理藏经阁库存
+            查询法物、登记领取及管理藏经阁库存
         </p>
 
+        <!-- 主功能 -->
         <div class="btn-row">
 
             <a class="btn-tool btn-purple"
             href="/library/scan"
-            style="font-size:22px;">
-                📷 扫描法宝
+            style="font-size:26px;
+                    min-height:90px;
+                    flex:1;">
+                📷 扫描法物
             </a>
 
         </div>
 
+        <!-- 次功能 -->
         <div class="btn-row">
 
             <a class="btn-tool btn-primary"
-            href="/library/search">
-                🔍 法宝查询
+            href="/library/search"
+            style="flex:1;">
+                🔍 法物查询
             </a>
 
             <a class="btn-tool btn-success"
-            href="/library/out">
+            href="/library/out"
+            style="flex:1;">
                 📝 手动登记领取
+            </a>
+
+            <a class="btn-tool"
+            href="/library/batch-in"
+            style="
+                flex:1;
+                background:#0ea5a8;
+                color:white;">
+                📦 批量入库
             </a>
 
         </div>
 
         <hr style="margin:35px 0;">
 
-        <div style="text-align:center;">
+        <div class="btn-row">
 
             <a class="btn-tool btn-warning"
-               href="/library/admin">
+            href="/library/admin"
+            style="font-size:24px;
+                    min-height:85px;
+                    flex:1;">
                 ⚙️ 负责人专区
             </a>
 
@@ -623,7 +642,7 @@ def library_search():
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>法宝查询</title>
+        <title>法物查询</title>
         <link rel="stylesheet" href="/static/css/toolbox.css">
     </head>
 
@@ -631,7 +650,7 @@ def library_search():
     <div class="page">
 
         <div class="card">
-            <h1 class="page-title">🔍 法宝查询</h1>
+            <h1 class="page-title">🔍 法物查询</h1>
             <p class="page-subtitle">输入书名、关键字、分类或编号</p>
 
             <form method="get" action="/library/search">
@@ -661,7 +680,7 @@ def library_search():
         {% if keyword and not items %}
         <div class="card">
             <div class="empty-state">
-                找不到相关法宝
+                找不到相关物
             </div>
         </div>
         {% endif %}
@@ -669,7 +688,7 @@ def library_search():
         {% if items %}
         <div class="card">
             <h2 class="section-title">查询结果</h2>
-            <p class="page-subtitle">共找到 {{ items|length }} 项法宝</p>
+            <p class="page-subtitle">共找到 {{ items|length }} 项法物</p>
         </div>
 
         {% for item in items %}
@@ -780,7 +799,7 @@ def library_item_detail(item_code):
                 records = cur.fetchall()
 
     if not item:
-        return "找不到这个法宝", 404
+        return "找不到这个法物", 404
 
     return render_template_string("""
     <!doctype html>
@@ -834,7 +853,7 @@ def library_item_detail(item_code):
 
             {% if item.min_balance and item.balance <= item.min_balance %}
                 <div class="alert alert-danger">
-                    ⚠ 这个法宝库存偏低，请留意补货。
+                    ⚠ 这个法物库存偏低，请留意补货。
                 </div>
             {% endif %}
 
@@ -974,7 +993,7 @@ def library_out():
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <link rel="stylesheet" href="/static/css/toolbox.css">
-    <title>义工领取法宝</title>
+    <title>义工领取法物</title>
     </head>
 
     <body>
@@ -983,7 +1002,7 @@ def library_out():
 
     <div class="card">
 
-    <h1 class="page-title">📝 登记领取法宝</h1>
+    <h1 class="page-title">📝 登记领取法物</h1>
 
     <p class="page-subtitle">
     会使用系统的义工可直接登记；不会使用的义工可照旧写在纸上，由负责人之后补录。
@@ -1245,7 +1264,7 @@ def library_admin_home():
     <div class="summary-grid">
 
         <div class="summary-box">
-            <div class="summary-title">法宝种类</div>
+            <div class="summary-title">法物种类</div>
             <div class="summary-value">{{ summary.total_items }}</div>
         </div>
 
@@ -1273,7 +1292,7 @@ def library_admin_home():
 
     {% if low_stock.low_stock_count > 0 %}
     <div class="alert alert-warning" style="margin-top:16px;">
-        ⚠ 有 {{ low_stock.low_stock_count }} 项法宝库存不足。
+        ⚠ 有 {{ low_stock.low_stock_count }} 项法物库存不足。
         <br><br>
         <a class="btn-tool btn-warning" href="{{ url_for('library.library_low_stock') }}">
             查看库存不足
@@ -1348,7 +1367,7 @@ def library_admin_home():
 </a>
 
 <a class="btn-tool btn-primary" href="/library/items">
-⚙️ 法宝管理
+⚙️ 法物管理
 </a>
 
 </div>
@@ -1435,7 +1454,7 @@ def library_items():
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>法宝管理</title>
+<title>法物管理</title>
 <link rel="stylesheet" href="/static/css/toolbox.css">
 </head>
 
@@ -1443,16 +1462,16 @@ def library_items():
 <div class="page">
 <div class="card">
 
-<h1 class="page-title">⚙️ 法宝管理</h1>
+<h1 class="page-title">⚙️ 法物管理</h1>
 
 <p class="page-subtitle">
-修改法宝位置、最低库存及说明
+修改法物位置、最低库存及说明
 </p>
 
 <form method="get">
 
 <div class="form-group">
-<label class="form-label">搜索法宝</label>
+<label class="form-label">搜索法物</label>
 <input
 name="q"
 class="form-input"
@@ -1496,7 +1515,7 @@ href="/library/items/edit/{{ item.item_code }}">
 
 {% if keyword and not items %}
 <div class="empty-state">
-找不到相关法宝
+找不到相关法物
 </div>
 {% endif %}
 
@@ -1600,7 +1619,7 @@ def library_records():
 <h1 class="page-title">📋 进出记录</h1>
 
 <p class="page-subtitle">
-查看最近的法宝入库、出库及调整记录
+查看最近的法物入库、出库及调整记录
 </p>
 
 <form method="get">
@@ -1639,7 +1658,7 @@ value="{{ request.args.get('q','') }}">
 <tr>
     <th>时间</th>
     <th>类型</th>
-    <th>法宝</th>
+    <th>法物</th>
     <th>数量</th>
     <th>领取人</th>
     <th>处理人</th>
@@ -1799,7 +1818,7 @@ def library_low_stock():
         <div class="card">
             <h1 class="page-title">📊 库存不足</h1>
             <p class="page-subtitle">
-                以下法宝库存已低于或等于最低库存，需要留意补货。
+                以下法物库存已低于或等于最低库存，需要留意补货。
             </p>
 
             <div class="btn-row">
@@ -1810,11 +1829,11 @@ def library_low_stock():
         </div>
 
         <div class="card">
-            <h2 class="section-title">库存不足法宝</h2>
+            <h2 class="section-title">库存不足法物</h2>
 
             {% if not items %}
                 <div class="empty-state">
-                    ✅ 目前没有库存不足的法宝。
+                    ✅ 目前没有库存不足的法物。
                 </div>
             {% else %}
 
@@ -1944,7 +1963,7 @@ content="width=device-width,initial-scale=1">
 <link rel="stylesheet"
 href="/static/css/toolbox.css">
 
-<title>法宝入库</title>
+<title>法物入库</title>
 
 </head>
 
@@ -1955,11 +1974,11 @@ href="/static/css/toolbox.css">
 <div class="card">
 
 <h1 class="page-title">
-📥 法宝入库
+📥 法物入库
 </h1>
 
 <p class="page-subtitle">
-搜索需要增加库存的法宝
+搜索需要增加库存的法物
 </p>
 
 <form method="get">
@@ -1967,7 +1986,7 @@ href="/static/css/toolbox.css">
 <div class="form-group">
 
 <label class="form-label">
-搜索法宝
+搜索法物
 </label>
 
 <input
@@ -2056,7 +2075,7 @@ href="/library/in/{{ item.item_code }}">
 <div class="empty-state"
 style="margin-top:20px;">
 
-找不到相关法宝
+找不到相关法物
 
 </div>
 
@@ -2103,7 +2122,7 @@ def library_in_item(item_code):
             item = cur.fetchone()
 
             if not item:
-                return "找不到法宝", 404
+                return "找不到法物", 404
 
             if request.method == "POST":
 
@@ -2182,7 +2201,7 @@ content="width=device-width,initial-scale=1">
 rel="stylesheet"
 href="/static/css/toolbox.css">
 
-<title>法宝入库</title>
+<title>法物入库</title>
 
 </head>
 
@@ -2194,7 +2213,7 @@ href="/static/css/toolbox.css">
 
 <h1 class="page-title">
 
-📥 法宝入库
+📥 法物入库
 
 </h1>
 
@@ -2382,7 +2401,7 @@ def library_item_edit(item_code):
                     ))
 
                     conn.commit()
-                    success = "法宝资料已保存"
+                    success = "法物资料已保存"
 
             cur.execute("""
                 select
@@ -2403,7 +2422,7 @@ def library_item_edit(item_code):
             item = cur.fetchone()
 
     if not item:
-        return "找不到这个法宝", 404
+        return "找不到这个法物", 404
 
     return render_template_string("""
 <!doctype html>
@@ -2411,7 +2430,7 @@ def library_item_edit(item_code):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>编辑法宝</title>
+<title>编辑法物</title>
 <link rel="stylesheet" href="/static/css/toolbox.css">
 </head>
 
@@ -2419,7 +2438,7 @@ def library_item_edit(item_code):
 <div class="page">
 <div class="card">
 
-<h1 class="page-title">✏️ 编辑法宝</h1>
+<h1 class="page-title">✏️ 编辑法物</h1>
 
 <p class="page-subtitle">
 {{ item.item_code }}
@@ -2477,7 +2496,7 @@ def library_item_edit(item_code):
 </button>
 
 <a class="btn-tool btn-secondary" href="/library/items">
-返回法宝管理
+返回法物管理
 </a>
 
 <a class="btn-tool btn-primary" href="/library/item/{{ item.item_code }}">
@@ -2573,7 +2592,7 @@ def library_out_search():
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/static/css/toolbox.css">
-<title>领取法宝</title>
+<title>领取法物</title>
 </head>
 
 <body>
@@ -2583,7 +2602,7 @@ def library_out_search():
 <div class="card">
 
 <h1 class="page-title">
-📤 领取法宝
+📤 领取法物
 </h1>
 
 <p class="page-subtitle">
@@ -2674,7 +2693,7 @@ method="post"
 action="/library/out/confirm"
 style="margin-top:20px;"
 onsubmit="return confirm(
-'确认领取以下法宝？\\n\\n确认后库存会立即扣减。'
+'确认领取以下法物？\\n\\n确认后库存会立即扣减。'
 );">
 
 </div>
@@ -2684,7 +2703,7 @@ onsubmit="return confirm(
 <form method="get">
 
 <div class="form-group">
-<label class="form-label">搜索法宝</label>
+<label class="form-label">搜索法物</label>
 
 <input
 name="q"
@@ -3027,7 +3046,7 @@ def library_out_confirm():
                     item = cur.fetchone()
 
                     if not item:
-                        error = f"找不到法宝：{c['name']}"
+                        error = f"找不到法物：{c['name']}"
                         raise Exception(error)
 
                     if item["balance"] < c["qty"]:
@@ -3258,7 +3277,7 @@ def library_stocktake():
 
                     text = str(value).strip()
 
-                    if text in ["编号", "item_code", "法宝编号"]:
+                    if text in ["编号", "item_code", "法物编号"]:
                         headers["item_code"] = c
                         header_row = r
 
@@ -3478,14 +3497,14 @@ def library_quick_out(item_code):
                 <head>
                     <meta charset="utf-8">
                     <meta name="viewport" content="width=device-width, initial-scale=1">
-                    <title>找不到法宝</title>
+                    <title>找不到法物</title>
                     <link rel="stylesheet" href="/static/css/toolbox.css">
                 </head>
                 <body>
                 <div class="page">
                     <div class="card">
-                        <h1 class="page-title">找不到法宝</h1>
-                        <p class="page-subtitle">这个 QR Code 对应的法宝不存在。</p>
+                        <h1 class="page-title">找不到法物</h1>
+                        <p class="page-subtitle">这个 QR Code 对应的法物不存在。</p>
 
                         <div class="btn-row">
                             <a class="btn-tool btn-secondary" href="/library/out">
@@ -3597,7 +3616,7 @@ def library_quick_out(item_code):
 
             <div class="btn-row">
                 <a class="btn-tool btn-primary" href="/library/out">
-                    继续领取其它法宝
+                    继续领取其它法物
                 </a>
             </div>
         </div>
@@ -3703,15 +3722,15 @@ def library_scan(item_code):
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <link rel="stylesheet" href="/static/css/toolbox.css">
-            <title>找不到法宝</title>
+            <title>找不到法物</title>
         </head>
 
         <body>
         <div class="page">
             <div class="card">
-                <h1 class="page-title">📚 找不到法宝</h1>
+                <h1 class="page-title">📚 找不到法物</h1>
                 <p class="page-subtitle">
-                    此 QR Code 对应的法宝不存在，或已经停用。
+                    此 QR Code 对应的法物不存在，或已经停用。
                 </p>
 
                 <div class="btn-row">
@@ -3782,12 +3801,12 @@ def library_scan(item_code):
 
                 <a class="btn-tool btn-primary"
                    href="{{ url_for('library.library_item_detail', item_code=item.item_code) }}">
-                    📄 法宝资料
+                    📄 法物资料
                 </a>
 
                 <a class="btn-tool btn-secondary"
                    href="{{ url_for('library.library_search') }}">
-                    🔍 搜索法宝
+                    🔍 搜索法物
                 </a>
             </div>
         </div>
@@ -3806,7 +3825,7 @@ def library_scan_camera():
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>扫描法宝</title>
+<title>扫描法物</title>
 <link rel="stylesheet" href="/static/css/toolbox.css">
 
 <style>
@@ -3838,7 +3857,7 @@ video {
 <div class="page">
 
     <div class="card">
-        <h1 class="page-title">📷 扫描法宝</h1>
+        <h1 class="page-title">📷 扫描法物</h1>
         <p class="page-subtitle">
             手机可用相机扫描；电脑可直接使用扫码枪。
         </p>
@@ -4063,3 +4082,495 @@ def library_cancel_record(id):
             conn.commit()
 
     return redirect(url_for("library.library_records"))
+
+
+@library_bp.route("/batch-in", methods=["GET", "POST"])
+def library_batch_in():
+    if request.method == "POST":
+        handled_by = request.form.get("handled_by", "").strip()
+        remark = request.form.get("remark", "").strip()
+
+        codes = request.form.getlist("item_code[]")
+        quantities = request.form.getlist("quantity[]")
+
+        if not handled_by:
+            flash("请填写负责人", "bad")
+            return redirect(url_for("library.library_batch_in"))
+
+        batch_time = now_malaysia()
+
+        items = []
+
+        for code, qty in zip(codes, quantities):
+            code = code.strip().upper()
+            try:
+                qty = int(qty)
+            except:
+                qty = 0
+
+            if code and qty > 0:
+                items.append((code, qty))
+
+        if not items:
+            flash("还没有扫描任何法物", "bad")
+            return redirect(url_for("library.library_batch_in"))
+
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+                for item_code, qty in items:
+                    cur.execute("""
+                        select item_code, name, balance
+                        from library_items
+                        where item_code = %s
+                          and is_active = true
+                    """, (item_code,))
+
+                    item = cur.fetchone()
+
+                    if not item:
+                        conn.rollback()
+                        flash(f"找不到法物编号：{item_code}", "bad")
+                        return redirect(url_for("library.library_batch_in"))
+
+                    cur.execute("""
+                        update library_items
+                        set balance = balance + %s
+                        where item_code = %s
+                    """, (qty, item_code))
+
+                    cur.execute("""
+                        insert into library_transactions
+                        (
+                            item_code,
+                            item_name,
+                            transaction_type,
+                            quantity,
+                            handled_by,
+                            remark,
+                            created_at
+                        )
+                        values (%s, %s, 'in', %s, %s, %s, %s)
+                    """, (
+                        item["item_code"],
+                        item["name"],
+                        qty,
+                        handled_by,
+                        remark,
+                        batch_time
+                    ))
+
+                conn.commit()
+
+        flash(f"批量入库完成：{len(items)} 种法物", "good")
+        return redirect(url_for("library.library_records"))
+
+    return render_template_string("""
+<!doctype html>
+<html lang="zh">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>批量入库</title>
+    <link rel="stylesheet" href="/static/css/toolbox.css">
+</head>
+<body>
+
+<div class="page">
+
+    <div class="card">
+        <h1 class="page-title">📦 批量入库</h1>
+        <div class="page-subtitle">
+            扫码枪或手机相机连续扫描。同一本自动累计，也可以直接修改数量。
+        </div>
+
+        <form method="post" onsubmit="return beforeSubmit();">
+
+            <div class="form-group">
+                <label>负责人</label>
+                <input class="form-input" name="handled_by" placeholder="例如：张三 / CHE-108" required>
+            </div>
+
+            <div class="form-group">
+                <label>备注</label>
+                <input class="form-input" name="remark" placeholder="例如：新书到货 / 批量入库">
+            </div>
+
+            <div class="btn-row">
+                <button type="button"
+                        class="btn-tool btn-purple"
+                        onclick="startCameraScan()">
+                    📷 手机连续扫码
+                </button>
+
+                <button type="button"
+                        class="btn-tool btn-secondary"
+                        onclick="stopCameraScan()">
+                    ⏹ 停止相机
+                </button>
+            </div>
+
+            <video
+                id="cameraPreview"
+                style="width:100%;border-radius:18px;margin-top:15px;display:none;"
+                autoplay
+                muted
+                playsinline>
+            </video>
+
+            <div id="scanStatus"
+                 class="empty-state"
+                 style="margin-top:12px;">
+                扫码枪可直接扫描；手机请按“手机连续扫码”
+            </div>
+
+            <div class="form-group" style="margin-top:20px;">
+                <label>扫码枪输入</label>
+                <input
+                    id="scanInput"
+                    class="form-input"
+                    placeholder="扫码枪扫描 BOOK0001，或手动输入编号后按 Enter"
+                    autocomplete="off"
+                    autofocus
+                >
+            </div>
+
+            <div class="summary-grid">
+                <div class="summary-box">
+                    <div>种类</div>
+                    <strong id="typeCount">0</strong>
+                </div>
+                <div class="summary-box">
+                    <div>总数量</div>
+                    <strong id="totalCount">0</strong>
+                </div>
+            </div>
+
+            <div class="table-responsive" style="margin-top:18px;">
+                <table class="record-table">
+                    <thead>
+                        <tr>
+                            <th>编号</th>
+                            <th>名称</th>
+                            <th>现有库存</th>
+                            <th>入库数量</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="batchBody">
+                        <tr>
+                            <td colspan="5" class="empty-state">
+                                还没有扫描任何法物
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div id="hiddenInputs"></div>
+
+            <div style="height:18px;"></div>
+
+            <button class="btn-tool btn-success" type="submit">
+                ✅ 确认全部入库
+            </button>
+
+            <a class="btn-tool btn-secondary" href="/library">
+                ⬅ 返回首页
+            </a>
+
+        </form>
+    </div>
+
+</div>
+
+<script>
+let batch = {};
+let itemNames = {};
+let itemBalances = {};
+
+let cameraStream = null;
+let cameraTimer = null;
+let lastCameraCode = "";
+let lastCameraTime = 0;
+
+const scanInput = document.getElementById("scanInput");
+const batchBody = document.getElementById("batchBody");
+const hiddenInputs = document.getElementById("hiddenInputs");
+const cameraPreview = document.getElementById("cameraPreview");
+const scanStatus = document.getElementById("scanStatus");
+
+function normalizeCode(raw) {
+    let code = (raw || "").trim().toUpperCase();
+
+    if (code.includes("/LIBRARY/SCAN/")) {
+        code = code.split("/LIBRARY/SCAN/").pop();
+    }
+
+    code = code.replace(/[^A-Z0-9]/g, "");
+
+    let match = code.match(/^BOOK(\\d+)$/);
+    if (match) {
+        code = "BOOK" + match[1].padStart(4, "0");
+    }
+
+    return code;
+}
+
+async function addCode(code) {
+    code = normalizeCode(code);
+
+    if (!code) return;
+
+    try {
+        let res = await fetch(`/library/api/item/${code}`);
+
+        if (!res.ok) {
+            showStatus("❌ 找不到法物编号：" + code);
+            return;
+        }
+
+        let data = await res.json();
+        let item = data.item;
+
+        itemNames[code] = item.name;
+        itemBalances[code] = item.balance;
+
+        if (!batch[code]) {
+            batch[code] = 1;
+        } else {
+            batch[code] += 1;
+        }
+
+        renderBatch();
+        showStatus("✅ " + item.name + "，目前数量：" + batch[code]);
+
+    } catch (err) {
+        showStatus("❌ 查询法物失败：" + code);
+    }
+}
+
+function showStatus(text) {
+    scanStatus.innerText = text;
+}
+
+function removeCode(code) {
+    delete batch[code];
+    delete itemNames[code];
+    delete itemBalances[code];
+    renderBatch();
+    scanInput.focus();
+}
+
+function changeQty(code, value) {
+    let qty = parseInt(value || "0");
+
+    if (qty <= 0) {
+        delete batch[code];
+    } else {
+        batch[code] = qty;
+    }
+
+    renderBatch();
+    scanInput.focus();
+}
+
+function renderBatch() {
+    batchBody.innerHTML = "";
+    hiddenInputs.innerHTML = "";
+
+    let codes = Object.keys(batch).sort();
+    let total = 0;
+
+    if (codes.length === 0) {
+        batchBody.innerHTML = `
+            <tr>
+                <td colspan="5" class="empty-state">
+                    还没有扫描任何法物
+                </td>
+            </tr>
+        `;
+    }
+
+    codes.forEach(code => {
+        let qty = batch[code];
+        total += qty;
+
+        let tr = document.createElement("tr");
+
+        tr.innerHTML = `
+            <td><strong>${code}</strong></td>
+            <td>${itemNames[code] || ""}</td>
+            <td>${itemBalances[code] ?? ""}</td>
+            <td>
+                <input
+                    class="form-input"
+                    type="number"
+                    min="1"
+                    value="${qty}"
+                    onchange="changeQty('${code}', this.value)"
+                    style="max-width:130px;"
+                >
+            </td>
+            <td>
+                <button
+                    type="button"
+                    class="btn-tool btn-danger"
+                    onclick="removeCode('${code}')"
+                    style="padding:8px 14px;"
+                >
+                    删除
+                </button>
+            </td>
+        `;
+
+        batchBody.appendChild(tr);
+
+        hiddenInputs.innerHTML += `
+            <input type="hidden" name="item_code[]" value="${code}">
+            <input type="hidden" name="quantity[]" value="${qty}">
+        `;
+    });
+
+    document.getElementById("typeCount").innerText = codes.length;
+    document.getElementById("totalCount").innerText = total;
+}
+
+scanInput.addEventListener("keydown", function(e) {
+    if (e.key === "Enter") {
+        e.preventDefault();
+
+        let code = normalizeCode(scanInput.value);
+        scanInput.value = "";
+
+        addCode(code);
+    }
+});
+
+async function startCameraScan() {
+    if (!("BarcodeDetector" in window)) {
+        showStatus("⚠️ 这个手机浏览器不支持连续扫码，请用 Chrome 或直接用扫码枪。");
+        return;
+    }
+
+    try {
+        cameraStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: "environment"
+            }
+        });
+
+        cameraPreview.srcObject = cameraStream;
+        cameraPreview.style.display = "block";
+
+        const detector = new BarcodeDetector({
+            formats: ["qr_code", "code_128"]
+        });
+
+        showStatus("📷 相机已开启，请对准 QR / Barcode");
+
+        cameraTimer = setInterval(async function() {
+            if (cameraPreview.readyState < 2) return;
+
+            try {
+                let barcodes = await detector.detect(cameraPreview);
+
+                if (barcodes.length > 0) {
+                    let raw = barcodes[0].rawValue;
+                    let code = normalizeCode(raw);
+
+                    let now = Date.now();
+
+                    // 避免手机同一本在一秒内重复扫很多次
+                    if (code === lastCameraCode && now - lastCameraTime < 1200) {
+                        return;
+                    }
+
+                    lastCameraCode = code;
+                    lastCameraTime = now;
+
+                    await addCode(code);
+                }
+
+            } catch (err) {
+                console.log(err);
+            }
+
+        }, 500);
+
+    } catch (err) {
+        showStatus("❌ 无法开启相机，请检查手机浏览器权限。");
+    }
+}
+
+function stopCameraScan() {
+    if (cameraTimer) {
+        clearInterval(cameraTimer);
+        cameraTimer = null;
+    }
+
+    if (cameraStream) {
+        cameraStream.getTracks().forEach(track => track.stop());
+        cameraStream = null;
+    }
+
+    cameraPreview.style.display = "none";
+    cameraPreview.srcObject = null;
+
+    showStatus("⏹ 相机已停止。扫码枪仍然可以继续扫描。");
+    scanInput.focus();
+}
+
+document.addEventListener("click", function() {
+    scanInput.focus();
+});
+
+function beforeSubmit() {
+    if (Object.keys(batch).length === 0) {
+        alert("还没有扫描任何法物");
+        scanInput.focus();
+        return false;
+    }
+
+    return confirm("确定要批量入库吗？");
+}
+
+window.onload = function() {
+    scanInput.focus();
+};
+</script>
+
+</body>
+</html>
+""")
+
+@library_bp.route("/api/item/<item_code>")
+def library_api_item(item_code):
+    item_code = item_code.strip().upper()
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select item_code, name, balance, category
+                from library_items
+                where item_code = %s
+                  and is_active = true
+            """, (item_code,))
+
+            item = cur.fetchone()
+
+    if not item:
+        return {
+            "ok": False,
+            "message": "找不到法物"
+        }, 404
+
+    return {
+        "ok": True,
+        "item": {
+            "item_code": item["item_code"],
+            "name": item["name"],
+            "balance": item["balance"],
+            "category": item["category"],
+        }
+    }

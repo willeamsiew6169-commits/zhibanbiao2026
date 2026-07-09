@@ -1,9 +1,8 @@
 # quote_service.py
 
 import os
-
-
 import pandas as pd
+
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 

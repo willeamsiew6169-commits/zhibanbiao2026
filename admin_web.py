@@ -1313,29 +1313,31 @@ ADMIN_HOME_HTML = """
 
 <style>
 .admin-page{
-    max-width:760px;
+    max-width:820px;
 }
+
 .admin-grid{
     display:grid;
-    gap:16px;
+    grid-template-columns:1fr 1fr;
+    gap:18px;
 }
+
 .admin-card-desc{
     color:#666;
     font-size:18px;
     line-height:1.6;
     margin:8px 0 16px;
 }
+
 .admin-page .btn-tool{
-    min-height:60px;
+    min-height:58px;
     font-size:22px;
 }
-.muted-box{
-    background:#f6f7f9;
-    border-radius:16px;
-    padding:18px;
-    color:#777;
-    font-size:18px;
-    text-align:center;
+
+@media (max-width:700px){
+    .admin-grid{
+        grid-template-columns:1fr;
+    }
 }
 </style>
 </head>
@@ -1344,7 +1346,7 @@ ADMIN_HOME_HTML = """
 
 <div class="page admin-page">
 
-    <div class="card">
+    <div class="card" style="text-align:center;">
         <h1 class="page-title">
             🙏 {{ t.get("admin_center_title", "观音堂管理员中心") }}
         </h1>
@@ -1357,61 +1359,91 @@ ADMIN_HOME_HTML = """
     <div class="admin-grid">
 
         <div class="card">
-            <h2 class="section-title">
-                📋 {{ t.get("today_signin_manage", "今日签到管理") }}
-            </h2>
-
+            <h2 class="section-title">📋 签到系统</h2>
             <div class="admin-card-desc">
-                {{ t.get("today_signin_manage_desc", "查看、修改、补录、删除今日签到记录。") }}
+                今日签到、签退、补录、修改及删除签到记录。
             </div>
-
             <a class="btn-tool btn-purple"
-               href="/">
-                {{ t.get("enter_signin_system", "进入签到系统") }}
+               href="{{ url_for('admin.admin_report', pin=pin) }}">
+                进入签到系统
             </a>
         </div>
 
         <div class="card">
-            <h2 class="section-title">
-                📊 {{ t.get("data_center", "数据中心") }}
-            </h2>
-
+            <h2 class="section-title">📅 排班系统</h2>
             <div class="admin-card-desc">
-                {{ t.get("data_center_desc", "统一下载签到、共修、排班、藏经阁、财政资料。") }}
+                义工报名、排班、发布值班表及查看安排。
             </div>
+            <a class="btn-tool btn-primary"
+               href="/schedule/admin?pin={{ pin }}">
+                进入排班系统
+            </a>
+        </div>
 
+        <div class="card">
+            <h2 class="section-title">💰 财政系统</h2>
+            <div class="admin-card-desc">
+                月费收款、财政记录、银行过账及 Dashboard。
+            </div>
             <a class="btn-tool btn-success"
-               href="{{ url_for('admin.data_center') }}?pin={{ pin }}">
-                {{ t.get("enter_data_center", "进入数据中心") }}
+               href="/finance/">
+                进入财政系统
             </a>
         </div>
 
         <div class="card">
-            <h2 class="section-title">
-                🛠 {{ t.get("admin_tools", "管理工具") }}
-            </h2>
-
+            <h2 class="section-title">📿 月费管理</h2>
             <div class="admin-card-desc">
-                {{ t.get("admin_tools_desc", "以后放补录签到、修改记录、删除记录等工具。") }}
+                月费资料管理、查询佛友已供养月份。
             </div>
-
-            <div class="muted-box">
-                {{ t.get("coming_soon", "开发中") }}
-            </div>
+            <a class="btn-tool btn-warning"
+               href="/member/admin">
+                进入月费管理
+            </a>
         </div>
 
         <div class="card">
-            <h2 class="section-title">
-                ⚙ {{ t.get("system_settings", "系统设置") }}
-            </h2>
-
+            <h2 class="section-title">📚 藏经阁系统</h2>
             <div class="admin-card-desc">
-                {{ t.get("system_settings_desc", "以后放今日签到码、系统设定、语言和备份。") }}
+                法宝查询、入库、出库、库存及藏经阁管理。
             </div>
+            <a class="btn-tool btn-success"
+               href="/library/">
+                进入藏经阁系统
+            </a>
+        </div>
 
-            <div class="muted-box">
-                {{ t.get("coming_soon", "开发中") }}
+        <div class="card">
+            <h2 class="section-title">📖 白话佛法共修</h2>
+            <div class="admin-card-desc">
+                记录每日共修、查看今日共修记录及统计。
             </div>
+            <a class="btn-tool btn-primary"
+               href="/reading">
+                进入共修记录
+            </a>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">📊 数据中心</h2>
+            <div class="admin-card-desc">
+                统一下载签到、共修、排班、藏经阁、财政资料。
+            </div>
+            <a class="btn-tool btn-purple"
+               href="{{ url_for('admin.data_center', pin=pin) }}">
+                进入数据中心
+            </a>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">⚙ 系统设置</h2>
+            <div class="admin-card-desc">
+                今日签到码、系统设定、语言及备份。
+            </div>
+            <a class="btn-tool btn-secondary"
+               href="#">
+                开发中
+            </a>
         </div>
 
     </div>
@@ -1419,7 +1451,7 @@ ADMIN_HOME_HTML = """
     <div class="card">
         <a class="btn-tool btn-secondary"
            href="/">
-            {{ t.get("back_home", "⬅ 返回首页") }}
+            返回首页
         </a>
     </div>
 

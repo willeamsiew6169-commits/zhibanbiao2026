@@ -280,21 +280,30 @@ def member_query_login():
         margin: 20px 0;
     }
 
-    .branch-btn {
-        flex: 1;
-        padding: 18px;
-        font-size: 26px;
-        font-weight: bold;
-        border: none;
-        border-radius: 14px;
-        cursor: pointer;
-        background: #ddd;
-        color: #333;
+    .branch-btn{
+        flex:1;
+        padding:14px;
+        font-size:22px;
+        font-weight:bold;
+        border:2px solid #ddd;
+        border-radius:12px;
+        background:white;
+        color:#666;
+        cursor:pointer;
     }
 
-    .branch-btn.active {
-        background: #7a0000;
-        color: white;
+    /* CHE */
+    #btnCHE.active{
+        background:#16a34a;
+        border-color:#16a34a;
+        color:white;
+    }
+
+    /* STW */
+    #btnSTW.active{
+        background:#dc2626;
+        border-color:#dc2626;
+        color:white;
     }
 
     input {

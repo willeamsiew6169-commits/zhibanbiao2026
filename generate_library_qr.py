@@ -52,7 +52,7 @@ def read_items():
         })
 
     if not items:
-        raise Exception("没有读取到法宝。请确认 Excel 是：A=item_code，B=name，C=balance，D=category。")
+        raise Exception("没有读取到法物。请确认 Excel 是：A=item_code，B=name，C=balance，D=category。")
 
     return items
 
@@ -88,7 +88,7 @@ def short_text(text, max_len):
     return text[:max_len] + "..."
 
 
-def draw_top_title(c, page_no, title="藏经阁法宝 QR Code 目录"):
+def draw_top_title(c, page_no, title="藏经阁法物 QR Code 目录"):
     width, height = A4
 
     c.setFont("MY", 17)
@@ -103,18 +103,18 @@ def draw_top_title(c, page_no, title="藏经阁法宝 QR Code 目录"):
 def draw_index_page(c, grouped_items, page_no):
     width, height = A4
 
-    draw_top_title(c, page_no, "藏经阁法宝 QR Code 目录")
+    draw_top_title(c, page_no, "藏经阁法物 QR Code 目录")
 
     c.setFont("MY", 11)
     c.drawString(
         16 * mm,
         height - 32 * mm,
-        "扫一扫后可进入法宝操作页面。"
+        "扫一扫后可进入法物操作页面。"
     )
     c.drawString(
         16 * mm,
         height - 39 * mm,
-        "可选择：登记领取、登记入库、查看法宝资料。"
+        "可选择：登记领取、登记入库、查看法物资料。"
     )
 
     c.setFont("MY", 15)
@@ -134,7 +134,7 @@ def draw_index_page(c, grouped_items, page_no):
         if y < 25 * mm:
             c.showPage()
             page_no += 1
-            draw_top_title(c, page_no, "藏经阁法宝 QR Code 目录")
+            draw_top_title(c, page_no, "藏经阁法物 QR Code 目录")
             y = height - 35 * mm
 
     return page_no
@@ -188,7 +188,7 @@ def draw_card(c, item, x, y):
     # 右边说明
     c.setFont("MY", 8)
     c.drawString(x + 46 * mm, y - 30 * mm, "扫码进入")
-    c.drawString(x + 46 * mm, y - 37 * mm, "法宝操作")
+    c.drawString(x + 46 * mm, y - 37 * mm, "法物操作")
 
 
 def make_pdf(items):
@@ -252,7 +252,7 @@ def make_pdf(items):
 def main():
     items = read_items()
 
-    print(f"读取到 {len(items)} 项法宝")
+    print(f"读取到 {len(items)} 项法物")
 
     make_pdf(items)
 

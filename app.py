@@ -19,15 +19,16 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 from admin_web import admin_bp
-from db import db_query, get_conn
 from member_web import member_bp
 from pypinyin import lazy_pinyin
 from manifest import manifest_bp
+from db import db_query, get_conn
 from library_web import library_bp
 from reading_web import reading_bp
 from finance_web import finance_bp
-from lunar_rules import get_special_day_info
 from psycopg2.extras import RealDictCursor
+from lunar_rules import get_special_day_info
+from dharma_class_web import dharma_class_bp
 from schedule.schedule_web import schedule_bp
 from datetime import datetime, date, timedelta
 from flask import (
@@ -101,6 +102,7 @@ ATTENDANCE_HEADERS = [
 app = Flask(__name__)
 app.secret_key = "change-this-simple-secret"
 app.permanent_session_lifetime = timedelta(hours=2)
+app.register_blueprint(dharma_class_bp)
 app.register_blueprint(schedule_bp)
 app.register_blueprint(manifest_bp)
 app.register_blueprint(reading_bp)

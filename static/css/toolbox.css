@@ -84,11 +84,26 @@ body {
     padding-bottom:20px;
 }
 
-.btn-tool {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+/* 每个按钮平均分宽 */
+.btn-row > .btn-tool,
+.btn-row > button.btn-tool,
+.btn-row > form {
+    flex:1;
+    min-width:220px;
+}
 
+/* form 内按钮也撑满 */
+.btn-row > form > .btn-tool,
+.btn-row > form > button {
+    width:100%;
+}
+
+.btn-tool {
+    display:flex;
+    align-items:center;
+    justify-content:center;
+
+    width:100%;
     min-height:64px;
     padding:0 30px;
     font-size:26px;
@@ -99,6 +114,8 @@ body {
 
     border:none;
     cursor:pointer;
+
+    box-sizing:border-box;
 }
 
 .btn-tool:hover {
