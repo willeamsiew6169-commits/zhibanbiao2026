@@ -101,9 +101,9 @@ VOLUNTEER_SIGNUP_HTML = """
 }
 
 .signup-form-grid{
-    display:grid;
-    grid-template-columns:1fr 1fr;
-    gap:20px;
+    display:flex;
+    flex-direction:column;
+    gap:22px;
 }
 
 .time-grid{
@@ -275,6 +275,24 @@ VOLUNTEER_SIGNUP_HTML = """
             </a>
             {% endif %}
 
+            {% if food_offering_open %}
+
+            <a
+                class="btn-tool btn-teal"
+                href="/volunteer/food-offering">
+
+                <span class="action-main-text">
+                    🥗 素食结缘报名
+                </span>
+
+                <span class="action-sub-text">
+                    填写食物名称及份量
+                </span>
+
+            </a>
+
+            {% endif %}
+
         </div>
 
         <div class="alert alert-warning">
@@ -346,7 +364,10 @@ VOLUNTEER_SIGNUP_HTML = """
 
             <div class="signup-form-grid">
 
+                <!-- 日期 -->
+
                 <div class="form-group">
+
                     <label class="form-label">
                         日期
                         <span class="form-help">Date</span>
@@ -358,80 +379,335 @@ VOLUNTEER_SIGNUP_HTML = """
                         name="signup_date"
                         value="{{ default_date }}"
                         required>
+
                 </div>
 
+
+                <!-- 报名项目 -->
+
                 <div class="form-group">
+
                     <label class="form-label">
-                        岗位
-                        <span class="form-help">Duty Type</span>
+                        报名项目
+                        <span class="form-help">Signup Type</span>
                     </label>
 
-                    <select
-                        class="form-select"
+                    <input
+                        type="hidden"
                         name="role"
                         id="role_select"
-                        required
-                        onchange="toggleTimeSection()">
+                        value="值班">
 
-                        <option value="值班">值班 Duty</option>
-                        <option value="卫生">卫生 Cleaning</option>
-                        <option value="供台">供台 Offering Table</option>
-                        <option value="膳食">膳食组 Meal Team</option>
+                    <div class="choice-grid">
 
-                    </select>
+                        <button
+                            type="button"
+                            class="choice-btn active"
+                            data-role="值班"
+                            onclick="selectRole(this)">
+
+                            <span class="choice-icon">🤝</span>
+                            <span class="choice-label">值班</span>
+                            <span class="choice-help">Duty</span>
+
+                        </button>
+
+                        <button
+                            type="button"
+                            class="choice-btn"
+                            data-role="卫生"
+                            onclick="selectRole(this)">
+
+                            <span class="choice-icon">🧹</span>
+                            <span class="choice-label">卫生</span>
+                            <span class="choice-help">Cleaning</span>
+
+                        </button>
+
+                        {% if supply_signup_available %}
+
+                        <button
+                            type="button"
+                            class="choice-btn"
+                            data-role="供台"
+                            onclick="selectRole(this)">
+
+                            <span class="choice-icon">🛕</span>
+                            <span class="choice-label">供台</span>
+                            <span class="choice-help">Offering Table</span>
+
+                        </button>
+
+                        {% endif %}
+
+                        {% if meal_signup_open %}
+
+                        <button
+                            type="button"
+                            class="choice-btn"
+                            data-role="膳食"
+                            onclick="selectRole(this)">
+
+                            <span class="choice-icon">🍱</span>
+                            <span class="choice-label">膳食组</span>
+                            <span class="choice-help">Meal Team</span>
+
+                        </button>
+
+                        {% endif %}
+
+                        {# 以后开启即可 #}
+
+                        
+                    </div>
+
                 </div>
 
-            </div>
 
-            <div id="time_section" class="time-grid">
+                <!-- 动态展开区域 -->
 
-                <div class="form-group">
+                <div
+                    id="role-detail-area">
+
+                    <!--
+                    以后这里自动展开：
+
+                    🛕 供台
+                        ○ 设供台
+                        ○ 收供台
+
+                    🍱 膳食组
+                        ○ 派餐义工
+                        ○ 组长
+
+                    🥗 素食结缘
+                        分类报名
+                    -->
+
+                </div>
+
+                <div
+                    id="supply_task_section"
+                    class="form-group"
+                    style="display:none;">
+
                     <label class="form-label">
-                        开始时间
-                        <span class="form-help">Start Time</span>
+                        供台工作
+                        <span class="form-help">Offering Task</span>
                     </label>
 
-                    <select
-                        class="form-select"
-                        name="start_time"
-                        id="start_time"
-                        onchange="updateTimeOptions()">
+                    <input
+                        type="hidden"
+                        name="supply_task"
+                        id="supply_task"
+                        value="">
 
-                        {% for t in times %}
-                        <option value="{{ t }}">{{ t }}</option>
-                        {% endfor %}
+                    <div class="choice-grid">
 
-                    </select>
+                        {% if supply_setup_open %}
+
+                        <button
+                            type="button"
+                            class="choice-btn supply-task-btn"
+                            data-supply-task="setup"
+                            onclick="selectSupplyTask(this)">
+
+                            <span class="choice-icon">🛕</span>
+                            <span class="choice-label">设供台</span>
+
+                            <span class="choice-help">
+                                {{ supply_summary.setup.count }}
+                                /
+                                {{ supply_summary.setup.limit }}
+                            </span>
+
+                        </button>
+
+                        {% endif %}
+
+
+                        {% if supply_remove_open %}
+
+                        <button
+                            type="button"
+                            class="choice-btn supply-task-btn"
+                            data-supply-task="remove"
+                            onclick="selectSupplyTask(this)">
+
+                            <span class="choice-icon">📦</span>
+                            <span class="choice-label">收供台</span>
+
+                            <span class="choice-help">
+                                {{ supply_summary.remove.count }}
+                                /
+                                {{ supply_summary.remove.limit }}
+                            </span>
+
+                        </button>
+
+                        {% endif %}
+
+                    </div>
+
+                    <div class="form-help" style="margin-top:12px;">
+                        设供台：大日子早上布置供台<br>
+                        收供台：供奉结束后收供品及整理供台
+                    </div>
+
                 </div>
 
-                <div class="form-group">
-                    <label class="form-label">
-                        结束时间
-                        <span class="form-help">End Time</span>
-                    </label>
+                <div id="food_offering_task_section" class="form-group" style="display:none;">
 
-                    <select
-                        class="form-select"
-                        name="end_time"
-                        id="end_time"
-                        onchange="updateTimeOptions()">
+                    <div class="section-title">
+                        请选择结缘项目
+                    </div>
 
-                        {% for t in times %}
-                        <option value="{{ t }}">{{ t }}</option>
-                        {% endfor %}
+                    <input
+                        type="hidden"
+                        name="food_offering_task"
+                        id="food_offering_task_input">
 
-                    </select>
+                    <div class="choice-grid">
+
+                        <button
+                            type="button"
+                            class="choice-btn food-offering-task-btn"
+                            data-food-offering-task="main_food"
+                            onclick="selectFoodOfferingTask(this)">
+
+                            <span class="choice-icon">🍚</span>
+                            <span class="choice-label">主食</span>
+                            <span class="choice-help">Main Food</span>
+                        </button>
+
+                        <button
+                            type="button"
+                            class="choice-btn food-offering-task-btn"
+                            data-food-offering-task="vegetable"
+                            onclick="selectFoodOfferingTask(this)">
+
+                            <span class="choice-icon">🥬</span>
+                            <span class="choice-label">菜肴</span>
+                            <span class="choice-help">Dishes</span>
+                        </button>
+
+                        <button
+                            type="button"
+                            class="choice-btn food-offering-task-btn"
+                            data-food-offering-task="dessert"
+                            onclick="selectFoodOfferingTask(this)">
+
+                            <span class="choice-icon">🍰</span>
+                            <span class="choice-label">甜品</span>
+                            <span class="choice-help">Dessert</span>
+                        </button>
+
+                        <button
+                            type="button"
+                            class="choice-btn food-offering-task-btn"
+                            data-food-offering-task="fruit"
+                            onclick="selectFoodOfferingTask(this)">
+
+                            <span class="choice-icon">🍉</span>
+                            <span class="choice-label">水果</span>
+                            <span class="choice-help">Fruit</span>
+                        </button>
+
+                        <button
+                            type="button"
+                            class="choice-btn food-offering-task-btn"
+                            data-food-offering-task="drink"
+                            onclick="selectFoodOfferingTask(this)">
+
+                            <span class="choice-icon">🥤</span>
+                            <span class="choice-label">饮料</span>
+                            <span class="choice-help">Drinks</span>
+                        </button>
+
+                    </div>
+
+                    <div
+                        id="food_offering_item_section"
+                        class="form-group"
+                        style="display:none; margin-top:18px;">
+
+                        <label class="form-label">
+                            结缘食物名称
+                            <span class="form-help">Food Name</span>
+                        </label>
+
+                        <input
+                            type="text"
+                            class="form-input"
+                            name="food_offering_item"
+                            id="food_offering_item"
+                            maxlength="100"
+                            placeholder="例如：炒饭、西瓜、豆浆、红豆汤">
+
+                        <div class="form-help">
+                            请写明准备结缘的食物或饮料。
+                        </div>
+
+                    </div>
+
                 </div>
 
-            </div>
 
-            <div class="btn-row">
-                <button
-                    type="button"
-                    class="btn-tool btn-green btn-full"
-                    onclick="openSignupConfirm(event)">
-                    🙏 提交报名
-                </button>
+                <!-- 时间 -->
+
+                <!-- 只有值班才显示的时间区域 -->
+                <div id="duty_section" class="time-grid">
+
+                    <div class="form-group">
+                        <label class="form-label">
+                            开始时间
+                            <span class="form-help">Start Time</span>
+                        </label>
+
+                        <select
+                            class="form-select"
+                            name="start_time"
+                            id="start_time"
+                            onchange="updateTimeOptions()">
+
+                            {% for t in times %}
+                            <option value="{{ t }}">{{ t }}</option>
+                            {% endfor %}
+
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">
+                            结束时间
+                            <span class="form-help">End Time</span>
+                        </label>
+
+                        <select
+                            class="form-select"
+                            name="end_time"
+                            id="end_time"
+                            onchange="updateTimeOptions()">
+
+                            {% for t in times %}
+                            <option value="{{ t }}">{{ t }}</option>
+                            {% endfor %}
+
+                        </select>
+                    </div>
+
+                </div>
+
+                <!-- 所有报名项目都需要这个按钮，所以放在 duty_section 外面 -->
+                <div class="notice-card">
+                    <button
+                        type="button"
+                        class="btn-tool btn-green btn-full"
+                        onclick="openSignupConfirm(event)">
+                        🙏 提交报名
+                    </button>
+                </div>
+
             </div>
 
         </form>
@@ -465,297 +741,893 @@ VOLUNTEER_SIGNUP_HTML = """
 </div>
 
 <script>
-const ALL_TIMES = {{ times|tojson }};
+const ALL_TIMES = {{ times | tojson }};
 
-function parseTimeToMinutes(t) {
-    t = String(t).trim().toLowerCase();
+let signupFormSubmitting = false;
+let currentVolunteerText = "";
+let lookupTimer = null;
 
-    let match = t.match(/^(\d{1,2}):(\d{2})(am|pm)$/);
-    if (!match) return null;
 
-    let hour = parseInt(match[1]);
-    let minute = parseInt(match[2]);
-    let ap = match[3];
+/* =========================================================
+   时间工具
+   ========================================================= */
 
-    if (ap === "pm" && hour !== 12) hour += 12;
-    if (ap === "am" && hour === 12) hour = 0;
+function parseTimeToMinutes(value) {
+    const text = String(value || "")
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, "");
+
+    const match = text.match(/^(\d{1,2}):(\d{2})(am|pm)$/);
+
+    if (!match) {
+        return null;
+    }
+
+    let hour = parseInt(match[1], 10);
+    const minute = parseInt(match[2], 10);
+    const period = match[3];
+
+    if (period === "pm" && hour !== 12) {
+        hour += 12;
+    }
+
+    if (period === "am" && hour === 12) {
+        hour = 0;
+    }
 
     return hour * 60 + minute;
 }
 
+
 function getCurrentRoundedTimeMinutes() {
     const now = new Date();
-    let m = now.getHours() * 60 + now.getMinutes();
+    const minutes = now.getHours() * 60 + now.getMinutes();
 
-    // 向下取最近半小时：12:05 -> 12:00，12:35 -> 12:30
-    return Math.floor(m / 30) * 30;
+    // 向下取最近半小时
+    return Math.floor(minutes / 30) * 30;
 }
+
+
+function getMalaysiaTodayString() {
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Kuala_Lumpur",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+    });
+
+    return formatter.format(new Date());
+}
+
 
 function isSignupDateToday() {
-    const dateInput = document.querySelector("input[name='signup_date']");
-    if (!dateInput) return false;
+    const dateInput =
+        document.querySelector("input[name='signup_date']");
 
-    const selected = dateInput.value;
+    if (!dateInput) {
+        return false;
+    }
 
-    const today = new Date();
-    const yyyy = today.getFullYear();
-    const mm = String(today.getMonth() + 1).padStart(2, "0");
-    const dd = String(today.getDate()).padStart(2, "0");
-
-    return selected === `${yyyy}-${mm}-${dd}`;
+    return dateInput.value === getMalaysiaTodayString();
 }
 
-function toggleTimeSection() {
-    const role = document.getElementById("role_select").value;
-    const timeSection = document.getElementById("time_section");
 
-    if (role === "卫生" || role === "供台" || role === "膳食") {
-        timeSection.style.display = "none";
-    } else {
-        timeSection.style.display = "grid";
+/* =========================================================
+   岗位选择
+   ========================================================= */
+
+function selectRole(button) {
+
+    const role = button.dataset.role;
+
+    // 保存岗位到隐藏字段
+    const roleInput = document.getElementById("role_select");
+
+    if (roleInput) {
+        roleInput.value = role;
+    }
+
+    // 只处理最上层的报名项目按钮
+    document
+        .querySelectorAll('.choice-btn[data-role]')
+        .forEach(function (btn) {
+            btn.classList.remove("active");
+            btn.classList.remove("selected");
+        });
+
+    button.classList.add("active");
+
+    const dutySection =
+        document.getElementById("duty_section");
+
+    const supplySection =
+        document.getElementById("supply_task_section");
+
+    const foodOfferingSection =
+    document.getElementById("food_offering_task_section");
+
+    // 先全部隐藏
+    if (dutySection) {
+        dutySection.style.display = "none";
+    }
+
+    if (supplySection) {
+        supplySection.style.display = "none";
+    }
+
+    if (foodOfferingSection) {
+        foodOfferingSection.style.display = "none";
+    }
+
+    // 再根据岗位显示对应区域
+    if (role === "值班") {
+
+        if (dutySection) {
+            dutySection.style.display = "grid";
+        }
+
+    } else if (role === "供台") {
+
+        if (supplySection) {
+            supplySection.style.display = "block";
+        }
+
+    } else if (role === "素食结缘") {
+
+        if (foodOfferingSection) {
+            foodOfferingSection.style.display = "block";
+        }
+    }
+
+    // 离开供台时，清除供台细项
+    if (role !== "供台") {
+
+        const supplyInput =
+            document.getElementById("supply_task");
+
+        if (supplyInput) {
+            supplyInput.value = "";
+        }
+
+        document
+            .querySelectorAll(".supply-task-btn")
+            .forEach(function (btn) {
+                btn.classList.remove("active");
+                btn.classList.remove("selected");
+            });
+    }
+
+    // 离开素食结缘时，清除素食细项
+    if (role !== "素食结缘") {
+
+        const foodInput =
+            document.getElementById(
+                "food_offering_task_input"
+            );
+
+        if (foodInput) {
+            foodInput.value = "";
+        }
+
+        const foodItemInput =
+            document.getElementById(
+                "food_offering_item"
+            );
+
+        if (foodItemInput) {
+            foodItemInput.value = "";
+        }
+
+        const foodItemSection =
+            document.getElementById(
+                "food_offering_item_section"
+            );
+
+        if (foodItemSection) {
+            foodItemSection.style.display = "none";
+        }
+
+        document
+            .querySelectorAll(".food-offering-task-btn")
+            .forEach(function (btn) {
+                btn.classList.remove("active");
+                btn.classList.remove("selected");
+            });
+    }
+}
+
+function selectFoodOfferingTask(button) {
+
+    document
+        .querySelectorAll(".food-offering-task-btn")
+        .forEach(function (btn) {
+            btn.classList.remove("active");
+            btn.classList.remove("selected");
+        });
+
+    button.classList.add("active");
+    button.classList.add("selected");
+
+    const input =
+        document.getElementById(
+            "food_offering_task_input"
+        );
+
+    if (input) {
+        input.value =
+            button.dataset.foodOfferingTask;
+    }
+
+    const itemSection =
+        document.getElementById(
+            "food_offering_item_section"
+        );
+
+    if (itemSection) {
+        itemSection.style.display = "block";
+    }
+
+    const itemInput =
+        document.getElementById(
+            "food_offering_item"
+        );
+
+    if (itemInput) {
+        itemInput.focus();
+    }
+}
+
+
+function updateRoleUI(selectedRole) {
+    const dutySection =
+        document.getElementById("duty_section");
+
+    const supplyTaskSection =
+        document.getElementById("supply_task_section");
+
+    const supplyTaskInput =
+        document.getElementById("supply_task");
+
+    // 只有值班显示时间
+    if (dutySection) {
+        dutySection.style.display =
+            selectedRole === "值班"
+                ? "grid"
+                : "none";
+    }
+
+    // 只有供台显示设供台 / 收供台
+    if (supplyTaskSection) {
+        supplyTaskSection.style.display =
+            selectedRole === "供台"
+                ? "block"
+                : "none";
+    }
+
+    // 离开供台时清除旧选择
+    if (selectedRole !== "供台") {
+        if (supplyTaskInput) {
+            supplyTaskInput.value = "";
+        }
+
+        document
+            .querySelectorAll(".supply-task-btn")
+            .forEach(function (button) {
+                button.classList.remove("active");
+            });
+    }
+
+    if (selectedRole === "值班") {
         updateTimeOptions();
     }
 }
 
-window.addEventListener("DOMContentLoaded", toggleTimeSection);
-
-function updateTimeOptions() {
-    const role = document.getElementById("role_select").value;
-
-    if (role !== "值班") return;
-
-    const today = isSignupDateToday();
-    const nowMin = getCurrentRoundedTimeMinutes();
-    const dateInput = document.querySelector("input[name='signup_date']");
-
-    let dutyStartMin = 600; // 默认平时 10:00am
-
-    if (dateInput && dateInput.value) {
-        fetch("/volunteer/day_info?date=" + dateInput.value)
-            .then(r => r.json())
-            .then(data => {
-                if (data.duty_start) {
-                    dutyStartMin = parseTimeToMinutes(data.duty_start);
-                }
-                applyTimeFilter(today, nowMin, dutyStartMin);
-            });
-    } else {
-        applyTimeFilter(today, nowMin, dutyStartMin);
-    }
-}
-
-function applyTimeFilter(today, nowMin, dutyStartMin) {
-    const start = document.getElementById("start_time");
-    const end = document.getElementById("end_time");
-
-    if (!start || !end) return;
-
-    for (let i = 0; i < start.options.length; i++) {
-        const tMin = parseTimeToMinutes(start.options[i].value);
-
-        let hide = false;
-
-        if (tMin < dutyStartMin) hide = true;
-        if (today && tMin < nowMin) hide = true;
-
-        start.options[i].hidden = hide;
-        start.options[i].disabled = hide;
-    }
-
-    // 只有当前选择已经失效时才重选
-    if (start.options[start.selectedIndex]?.disabled) {
-        for (let i = 0; i < start.options.length; i++) {
-            if (!start.options[i].disabled) {
-                start.selectedIndex = i;
-                break;
-            }
-        }
-    }
-
-    const startMin = parseTimeToMinutes(start.value);
-
-    for (let i = 0; i < end.options.length; i++) {
-        const eMin = parseTimeToMinutes(end.options[i].value);
-
-        let hide = false;
-
-        if (eMin <= startMin) hide = true;
-
-        end.options[i].hidden = hide;
-        end.options[i].disabled = hide;
-    }
-
-    if (end.options[end.selectedIndex]?.disabled) {
-        for (let i = 0; i < end.options.length; i++) {
-            if (!end.options[i].disabled) {
-                end.selectedIndex = i;
-                break;
-            }
-        }
-    }
-}
-
-document.addEventListener("DOMContentLoaded", function () {
-    toggleTimeSection();
-
-    const roleSelect = document.getElementById("role_select");
-    const dateInput = document.querySelector("input[name='signup_date']");
-    const startSelect = document.getElementById("start_time");
-    const endSelect = document.getElementById("end_time");
-
-    if (roleSelect) {
-        roleSelect.addEventListener("change", toggleTimeSection);
-    }
-
-    if (dateInput) {
-        dateInput.addEventListener("change", function () {
-            const startSelect = document.getElementById("start_time");
-            const endSelect = document.getElementById("end_time");
-
-            if (startSelect) startSelect.value = "10:00am";
-            if (endSelect) endSelect.value = "6:00pm";
-
-            updateTimeOptions();
+function selectSupplyTask(buttonElement) {
+    document
+        .querySelectorAll(".supply-task-btn")
+        .forEach(function (button) {
+            button.classList.remove("active");
         });
+
+    buttonElement.classList.add("active");
+
+    const task =
+        buttonElement.dataset.supplyTask || "";
+
+    const supplyTaskInput =
+        document.getElementById("supply_task");
+
+    if (supplyTaskInput) {
+        supplyTaskInput.value = task;
     }
+}
 
-    if (startSelect) {
-        startSelect.addEventListener("change", updateTimeOptions);
-    }
+function openFoodOfferingSignup(event) {
 
-    if (endSelect) {
-        endSelect.addEventListener("change", updateTimeOptions);
-    }
-
-    if (startSelect) startSelect.value = "10:00am";
-    if (endSelect) endSelect.value = "6:00pm";
-
-    updateTimeOptions();
-});
-
-let signupFormSubmitting = false;
-let currentVolunteerText = "";
-
-async function openSignupConfirm(event){
-    if(event){
+    if (event) {
         event.preventDefault();
     }
 
-    if(signupFormSubmitting){
+    // 如果报名表目前是隐藏状态，先打开
+    if (typeof showDailySignup === "function") {
+        showDailySignup();
+    }
+
+    const foodButton = document.querySelector(
+        '.choice-btn[data-role="素食结缘"]'
+    );
+
+    if (foodButton) {
+        selectRole(foodButton);
+    }
+
+    const signupBox = document.getElementById(
+        "daily_signup_box"
+    );
+
+    if (signupBox) {
+        signupBox.scrollIntoView({
+            behavior: "smooth",
+            block: "start"
+        });
+    }
+}
+
+
+/* =========================================================
+   值班时间
+   ========================================================= */
+
+function setDefaultDutyTimes() {
+    const startSelect = document.getElementById("start_time");
+    const endSelect = document.getElementById("end_time");
+
+    if (startSelect) {
+        startSelect.value = "10:00am";
+    }
+
+    if (endSelect) {
+        endSelect.value = "6:00pm";
+    }
+}
+
+
+function resetAllTimeOptions() {
+    const startSelect = document.getElementById("start_time");
+    const endSelect = document.getElementById("end_time");
+
+    if (startSelect) {
+        Array.from(startSelect.options).forEach(function (option) {
+            option.hidden = false;
+            option.disabled = false;
+        });
+    }
+
+    if (endSelect) {
+        Array.from(endSelect.options).forEach(function (option) {
+            option.hidden = false;
+            option.disabled = false;
+        });
+    }
+}
+
+
+function selectFirstAvailableOption(selectElement) {
+    if (!selectElement) {
+        return;
+    }
+
+    const currentOption =
+        selectElement.options[selectElement.selectedIndex];
+
+    if (currentOption && !currentOption.disabled) {
+        return;
+    }
+
+    for (let i = 0; i < selectElement.options.length; i++) {
+        if (!selectElement.options[i].disabled) {
+            selectElement.selectedIndex = i;
+            return;
+        }
+    }
+}
+
+
+async function updateTimeOptions() {
+    const roleInput = document.getElementById("role_select");
+    const selectedRole = roleInput ? roleInput.value : "值班";
+
+    if (selectedRole !== "值班") {
+        return;
+    }
+
+    const dateInput =
+        document.querySelector("input[name='signup_date']");
+
+    const selectedDate = dateInput ? dateInput.value : "";
+
+    let dutyStartMinutes = 10 * 60; // 默认 10:00am
+
+    if (selectedDate) {
+        try {
+            const response = await fetch(
+                "/volunteer/day_info?date=" +
+                encodeURIComponent(selectedDate)
+            );
+
+            const data = await response.json();
+
+            if (data.duty_start) {
+                const parsed =
+                    parseTimeToMinutes(data.duty_start);
+
+                if (parsed !== null) {
+                    dutyStartMinutes = parsed;
+                }
+            }
+        } catch (error) {
+            console.warn(
+                "读取当天值班时间失败，使用默认 10:00am。",
+                error
+            );
+        }
+    }
+
+    applyTimeFilter(dutyStartMinutes);
+}
+
+
+function applyTimeFilter(dutyStartMinutes) {
+    const startSelect = document.getElementById("start_time");
+    const endSelect = document.getElementById("end_time");
+
+    if (!startSelect || !endSelect) {
+        return;
+    }
+
+    resetAllTimeOptions();
+
+    const today = isSignupDateToday();
+    const currentMinutes = getCurrentRoundedTimeMinutes();
+
+    Array.from(startSelect.options).forEach(function (option) {
+        const optionMinutes =
+            parseTimeToMinutes(option.value);
+
+        let shouldHide = false;
+
+        if (
+            optionMinutes !== null &&
+            optionMinutes < dutyStartMinutes
+        ) {
+            shouldHide = true;
+        }
+
+        if (
+            today &&
+            optionMinutes !== null &&
+            optionMinutes < currentMinutes
+        ) {
+            shouldHide = true;
+        }
+
+        option.hidden = shouldHide;
+        option.disabled = shouldHide;
+    });
+
+    selectFirstAvailableOption(startSelect);
+    updateEndTimeOptions();
+}
+
+
+function updateEndTimeOptions() {
+    const startSelect = document.getElementById("start_time");
+    const endSelect = document.getElementById("end_time");
+
+    if (!startSelect || !endSelect) {
+        return;
+    }
+
+    const startMinutes =
+        parseTimeToMinutes(startSelect.value);
+
+    Array.from(endSelect.options).forEach(function (option) {
+        const endMinutes =
+            parseTimeToMinutes(option.value);
+
+        const shouldHide =
+            startMinutes !== null &&
+            endMinutes !== null &&
+            endMinutes <= startMinutes;
+
+        option.hidden = shouldHide;
+        option.disabled = shouldHide;
+    });
+
+    selectFirstAvailableOption(endSelect);
+}
+
+
+/* =========================================================
+   报名确认
+   ========================================================= */
+
+async function openSignupConfirm(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    if (signupFormSubmitting) {
         return false;
     }
 
-    const keyword = document.getElementById("keyword").value.trim();
-    const branch = document.getElementById("branch").value;
-    const role = document.getElementById("role_select").value;
-    const date = document.querySelector("input[name='signup_date']").value;
+    const keywordInput = document.getElementById("keyword");
+    const branchInput = document.getElementById("branch");
+    const roleInput = document.getElementById("role_select");
+    const dateInput =
+        document.querySelector("input[name='signup_date']");
 
-    let volunteerText = keyword;
+    const keyword = keywordInput
+        ? keywordInput.value.trim()
+        : "";
+
+    const branch = branchInput
+        ? branchInput.value
+        : "CHE";
+
+    const role = roleInput
+        ? roleInput.value
+        : "值班";
+
+    const signupDate = dateInput
+        ? dateInput.value
+        : "";
+
+    if (!keyword) {
+        alert("请输入义工编号、姓名或电话。");
+        keywordInput?.focus();
+        return false;
+    }
+
+    if (!signupDate) {
+        alert("请选择报名日期。");
+        dateInput?.focus();
+        return false;
+    }
+
+    let volunteerText =
+        currentVolunteerText || keyword;
 
     try {
-        const r = await fetch(`/volunteer/query_volunteer?keyword=${encodeURIComponent(keyword)}&branch=${encodeURIComponent(branch)}`);
-        const data = await r.json();
+        const response = await fetch(
+            "/volunteer/query_volunteer" +
+            "?keyword=" + encodeURIComponent(keyword) +
+            "&branch=" + encodeURIComponent(branch)
+        );
 
-        if(data.ok){
-            volunteerText = `${data.volunteer_id}　${data.name}`;
+        const data = await response.json();
+
+        if (data.ok) {
+            volunteerText =
+                `${data.volunteer_id}　${data.name}`;
+
             currentVolunteerText = volunteerText;
         }
-    } catch(e) {}
+    } catch (error) {
+        console.warn("查询义工资料失败：", error);
+    }
 
-    let html = `
-        <p><b>义工：</b><br>${volunteerText}</p>
-        <p><b>日期：</b><br>${date}</p>
-        <p><b>岗位：</b><br>${role}</p>
+    let confirmHtml = `
+        <p>
+            <b>义工：</b><br>
+            ${volunteerText}
+        </p>
+
+        <p>
+            <b>日期：</b><br>
+            ${signupDate}
+        </p>
+
+        <p>
+            <b>岗位：</b><br>
+            ${role}
+        </p>
     `;
 
-    if(role === "值班"){
-        const start = document.getElementById("start_time").value;
-        const end = document.getElementById("end_time").value;
+    if (role === "供台") {
+        const supplyTaskInput =
+            document.getElementById("supply_task");
 
-        html += `
-            <p><b>时间：</b><br>${start} ～ ${end}</p>
+        const supplyTask =
+            supplyTaskInput ? supplyTaskInput.value : "";
+
+        if (!supplyTask) {
+            alert("请选择设供台或收供台。");
+            return false;
+        }
+
+        const supplyTaskLabel =
+            supplyTask === "setup"
+                ? "设供台"
+                : "收供台";
+
+        confirmHtml += `
+            <p>
+                <b>供台工作：</b><br>
+                ${supplyTaskLabel}
+            </p>
         `;
     }
 
-    document.getElementById("confirm_content").innerHTML = html;
-    document.getElementById("confirm_modal").style.display = "flex";
+    if (role === "值班") {
+        const startSelect =
+            document.getElementById("start_time");
+
+        const endSelect =
+            document.getElementById("end_time");
+
+        const startTime =
+            startSelect ? startSelect.value : "";
+
+        const endTime =
+            endSelect ? endSelect.value : "";
+
+        if (
+            !startTime ||
+            !endTime ||
+            parseTimeToMinutes(endTime) <=
+            parseTimeToMinutes(startTime)
+        ) {
+            alert("请选择正确的开始时间和结束时间。");
+            return false;
+        }
+
+        confirmHtml += `
+            <p>
+                <b>时间：</b><br>
+                ${startTime} ～ ${endTime}
+            </p>
+        `;
+    }
+
+    const confirmContent =
+        document.getElementById("confirm_content");
+
+    const confirmModal =
+        document.getElementById("confirm_modal");
+
+    if (confirmContent) {
+        confirmContent.innerHTML = confirmHtml;
+    }
+
+    if (confirmModal) {
+        confirmModal.style.display = "flex";
+    }
 
     return false;
 }
 
-function closeSignupConfirm(){
-    document.getElementById("confirm_modal").style.display = "none";
-}
 
-function submitSignupForm(){
-    signupFormSubmitting = true;
-    document.getElementById("daily_signup_form").submit();
-}
-</script>
+function closeSignupConfirm() {
+    const confirmModal =
+        document.getElementById("confirm_modal");
 
-<script>
-function toggleBranch(){
-    const btn=document.getElementById("branch_btn");
-    const branch=document.getElementById("branch");
-
-    if(branch.value==="CHE"){
-        branch.value="STW";
-        btn.innerText="STW";
-        btn.style.background="#dc3545";
-    }else{
-        branch.value="CHE";
-        btn.innerText="CHE";
-        btn.style.background="#28a745";
+    if (confirmModal) {
+        confirmModal.style.display = "none";
     }
 }
 
-function showDailySignup(){
-    const box = document.getElementById("daily_signup_box");
 
-    box.style.display = "block";
+function submitSignupForm() {
+    if (signupFormSubmitting) {
+        return;
+    }
 
-    setTimeout(function(){
-        box.scrollIntoView({
-            behavior:"smooth",
-            block:"start"
-        });
-    },100);
+    const form =
+        document.getElementById("daily_signup_form");
+
+    if (!form) {
+        alert("找不到报名表单，请刷新页面后再试。");
+        return;
+    }
+
+    signupFormSubmitting = true;
+    form.submit();
 }
 
-let lookupTimer = null;
 
-function lookupVolunteer(){
+/* =========================================================
+   义工查询
+   ========================================================= */
+
+function lookupVolunteer() {
     clearTimeout(lookupTimer);
 
-    lookupTimer = setTimeout(function(){
-        const keyword = document.getElementById("keyword").value.trim();
-        const branch = document.getElementById("branch").value;
-        const result = document.getElementById("volunteer_lookup_result");
+    lookupTimer = setTimeout(async function () {
+        const keywordInput =
+            document.getElementById("keyword");
 
-        currentVolunteerText = "";
+        const branchInput =
+            document.getElementById("branch");
 
-        if(!keyword){
-            result.innerHTML = "";
+        const resultBox =
+            document.getElementById(
+                "volunteer_lookup_result"
+            );
+
+        if (!keywordInput || !resultBox) {
             return;
         }
 
-        result.innerHTML = "🔎 查询中...";
+        const keyword = keywordInput.value.trim();
+        const branch = branchInput
+            ? branchInput.value
+            : "CHE";
 
-        fetch(`/volunteer/query_volunteer?keyword=${encodeURIComponent(keyword)}&branch=${encodeURIComponent(branch)}`)
-            .then(r => r.json())
-            .then(data => {
-                if(data.ok){
-                    currentVolunteerText = `${data.volunteer_id}　${data.name}`;
-                    result.innerHTML = `<span style="color:green;font-weight:bold;">✅ ${currentVolunteerText}</span>`;
-                }else{
-                    result.innerHTML = `<span style="color:#c0392b;font-weight:bold;">⚠️ ${data.message}</span>`;
-                }
-            })
-            .catch(() => {
-                result.innerHTML = `<span style="color:#c0392b;font-weight:bold;">⚠️ 查询失败</span>`;
-            });
+        currentVolunteerText = "";
+
+        if (!keyword) {
+            resultBox.innerHTML = "";
+            return;
+        }
+
+        resultBox.innerHTML = "🔎 查询中...";
+
+        try {
+            const response = await fetch(
+                "/volunteer/query_volunteer" +
+                "?keyword=" + encodeURIComponent(keyword) +
+                "&branch=" + encodeURIComponent(branch)
+            );
+
+            const data = await response.json();
+
+            if (data.ok) {
+                currentVolunteerText =
+                    `${data.volunteer_id}　${data.name}`;
+
+                resultBox.innerHTML = `
+                    <span style="
+                        color:green;
+                        font-weight:bold;
+                    ">
+                        ✅ ${currentVolunteerText}
+                    </span>
+                `;
+            } else {
+                resultBox.innerHTML = `
+                    <span style="
+                        color:#c0392b;
+                        font-weight:bold;
+                    ">
+                        ⚠️ ${data.message}
+                    </span>
+                `;
+            }
+        } catch (error) {
+            resultBox.innerHTML = `
+                <span style="
+                    color:#c0392b;
+                    font-weight:bold;
+                ">
+                    ⚠️ 查询失败
+                </span>
+            `;
+        }
     }, 400);
 }
+
+
+/* =========================================================
+   分会按钮
+   ========================================================= */
+
+function toggleBranch() {
+    const button =
+        document.getElementById("branch_btn");
+
+    const branchInput =
+        document.getElementById("branch");
+
+    if (!button || !branchInput) {
+        return;
+    }
+
+    if (branchInput.value === "CHE") {
+        branchInput.value = "STW";
+        button.innerText = "STW";
+        button.style.background = "#dc3545";
+    } else {
+        branchInput.value = "CHE";
+        button.innerText = "CHE";
+        button.style.background = "#28a745";
+    }
+
+    currentVolunteerText = "";
+    lookupVolunteer();
+}
+
+
+/* =========================================================
+   展开每日报名
+   ========================================================= */
+
+function showDailySignup() {
+    const signupBox =
+        document.getElementById("daily_signup_box");
+
+    if (!signupBox) {
+        return;
+    }
+
+    signupBox.style.display = "block";
+
+    setTimeout(function () {
+        signupBox.scrollIntoView({
+            behavior: "smooth",
+            block: "start"
+        });
+    }, 100);
+}
+
+
+/* =========================================================
+   页面初始化
+   ========================================================= */
+
+document.addEventListener("DOMContentLoaded", function () {
+    const roleInput =
+        document.getElementById("role_select");
+
+    const dateInput =
+        document.querySelector(
+            "input[name='signup_date']"
+        );
+
+    const startSelect =
+        document.getElementById("start_time");
+
+    const keywordInput =
+        document.getElementById("keyword");
+
+    const selectedRole =
+        roleInput?.value || "值班";
+
+    setDefaultDutyTimes();
+    updateRoleUI(selectedRole);
+
+    if (dateInput) {
+        dateInput.addEventListener(
+            "change",
+            function () {
+                setDefaultDutyTimes();
+
+                if (
+                    document.getElementById(
+                        "role_select"
+                    )?.value === "值班"
+                ) {
+                    updateTimeOptions();
+                }
+            }
+        );
+    }
+
+    if (startSelect) {
+        startSelect.addEventListener(
+            "change",
+            updateEndTimeOptions
+        );
+    }
+
+    if (keywordInput) {
+        keywordInput.addEventListener(
+            "input",
+            lookupVolunteer
+        );
+    }
+});
 </script>
 
 </body>
@@ -1254,3 +2126,4 @@ function toggleMultiBranch(){
 </body>
 </html>
 """
+

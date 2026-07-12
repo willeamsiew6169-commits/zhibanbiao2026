@@ -117,3 +117,4 @@ def build_whatsapp_from_assigned(date_str):
         special_day_info,
         remove_info
     )
+

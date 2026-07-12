@@ -2650,6 +2650,7 @@ def finance_upload():
 
         if not file or file.filename == "":
             error = "请选择 Excel 文件"
+
         else:
             try:
                 df = pd.read_excel(file)
@@ -2669,51 +2670,98 @@ def finance_upload():
 
                 inserted = 0
                 skipped = 0
+                missing_members = 0
+                duplicate_receipts = 0
+                duplicate_months = 0
+                failed_rows = 0
+
+                # 必须放在循环外面，否则每一行都会重新清空
                 name_warnings = {}
 
+                # 整份 Excel 只开一次数据库连接
                 with get_conn() as conn:
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
-                        for _, row in df.iterrows():
+                        for row_index, row in df.iterrows():
+
                             try:
-                                receipt_raw = row["收据编号 \nOfficial Receipt No"]
+                                # =========================
+                                # 1. 收据编号
+                                # =========================
+                                receipt_raw = row[
+                                    "收据编号 \nOfficial Receipt No"
+                                ]
 
                                 if pd.isna(receipt_raw):
                                     receipt_no = None
                                 else:
-                                    receipt_no = str(receipt_raw).strip().replace(" ", "")
-                                    if receipt_no == "":
+                                    receipt_no = (
+                                        str(receipt_raw)
+                                        .strip()
+                                        .replace(" ", "")
+                                    )
+
+                                    if not receipt_no:
                                         receipt_no = None
 
+                                # =========================
+                                # 2. 会员编号
+                                # =========================
                                 member_no = int(row["编号 No/"])
                                 member_id = f"CHE-{member_no}"
 
-                                # 以 members 主档为准
+                                # =========================
+                                # 3. 会员主档
+                                # =========================
                                 cur.execute("""
-                                    select name
+                                    select
+                                        member_id,
+                                        name
                                     from members
                                     where member_id = %s
+                                    limit 1
                                 """, (member_id,))
+
                                 member_info = cur.fetchone()
 
                                 if not member_info:
-                                    print("会员不存在：", member_id)
+                                    missing_members += 1
                                     skipped += 1
+
+                                    print(
+                                        f"会员不存在，已跳过："
+                                        f"{member_id}"
+                                    )
                                     continue
 
-                                system_name = member_info["name"]
-
-                                excel_name = str(
-                                    row["捐款人\n姓名\nName"]
+                                system_name = (
+                                    member_info["name"] or ""
                                 ).strip()
+
+                                excel_name_raw = row[
+                                    "捐款人\n姓名\nName"
+                                ]
+
+                                if pd.isna(excel_name_raw):
+                                    excel_name = ""
+                                else:
+                                    excel_name = str(
+                                        excel_name_raw
+                                    ).strip()
 
                                 if excel_name != system_name:
                                     name_warnings[member_id] = (
-                                        f"{member_id}：Excel={excel_name}，Members={system_name}"
+                                        f"{member_id}："
+                                        f"Excel={excel_name or '-'}，"
+                                        f"Members={system_name or '-'}"
                                     )
 
+                                # 付款记录永远使用 members 主档姓名
                                 name = system_name
 
+                                # =========================
+                                # 4. 日期及金额
+                                # =========================
                                 payment_date = pd.to_datetime(
                                     row["日期\nDate"]
                                 ).date()
@@ -2726,51 +2774,112 @@ def finance_upload():
                                     row["END MONTH"]
                                 )
 
-                                month_count = int(row["No/ of Mth"])
-                                amount = float(row["Total Amt"])
+                                month_count = int(
+                                    row["No/ of Mth"]
+                                )
 
-                                # 没有收据编号的银行过账，避免重复导入
-                                if not receipt_no:
-                                    cur.execute("""
-                                        select id
-                                        from member_payments
-                                        where member_id = %s
-                                        and start_month = %s
-                                        and end_month = %s
-                                        and amount = %s
-                                        limit 1
-                                    """, (
-                                        member_id,
-                                        start_month,
-                                        end_month,
-                                        amount
-                                    ))
-                                    existing = cur.fetchone()
+                                amount = float(
+                                    row["Total Amt"]
+                                )
 
-                                    if existing:
-                                        skipped += 1
-                                        print(
-                                            f"重复跳过：{member_id} | "
-                                            f"{start_month} ~ {end_month} | "
-                                            f"RM {amount:.2f}"
-                                        )
-                                        continue
+                                if start_month > end_month:
+                                    raise ValueError(
+                                        "开始月份不可迟于结束月份"
+                                    )
 
-                                # 有收据编号的，先检查收据是否已存在
+                                # =========================
+                                # 5. 有收据编号：
+                                #    先检查收据是否重复
+                                # =========================
                                 if receipt_no:
+
                                     cur.execute("""
-                                        select id
+                                        select
+                                            id,
+                                            member_id
                                         from member_payments
                                         where receipt_no = %s
                                         limit 1
                                     """, (receipt_no,))
+
                                     existing_receipt = cur.fetchone()
 
                                     if existing_receipt:
+                                        duplicate_receipts += 1
                                         skipped += 1
-                                        print(f"重复收据跳过：{receipt_no}")
+
+                                        print(
+                                            f"重复收据，已跳过："
+                                            f"{receipt_no}"
+                                        )
                                         continue
 
+                                # =========================
+                                # 6. 检查月份是否重叠
+                                #
+                                # 只要同一会员已有任何月份
+                                # 落在新记录范围内，就不再导入
+                                #
+                                # 例如已有：
+                                # 2026-05 至 2026-06
+                                #
+                                # 新资料若是：
+                                # 2026-05 至 2026-06
+                                # 2026-04 至 2026-05
+                                # 2026-06 至 2026-07
+                                #
+                                # 全部都会被识别为重复月份
+                                # =========================
+                                cur.execute("""
+                                    select
+                                        id,
+                                        receipt_no,
+                                        start_month,
+                                        end_month,
+                                        amount
+                                    from member_payments
+                                    where member_id = %s
+                                    and start_month <= %s
+                                    and end_month >= %s
+                                    order by start_month, id
+                                    limit 1
+                                """, (
+                                    member_id,
+                                    end_month,
+                                    start_month
+                                ))
+
+                                overlapping_payment = cur.fetchone()
+
+                                if overlapping_payment:
+                                    duplicate_months += 1
+                                    skipped += 1
+
+                                    old_start = (
+                                        overlapping_payment[
+                                            "start_month"
+                                        ]
+                                    )
+
+                                    old_end = (
+                                        overlapping_payment[
+                                            "end_month"
+                                        ]
+                                    )
+
+                                    print(
+                                        f"月份重复，已跳过："
+                                        f"{member_id} | "
+                                        f"新资料 {start_month} ~ "
+                                        f"{end_month} | "
+                                        f"原记录 {old_start} ~ "
+                                        f"{old_end}"
+                                    )
+                                    continue
+
+                                # =========================
+                                # 7. 新增付款记录
+                                # =========================
                                 cur.execute("""
                                     insert into member_payments
                                     (
@@ -2800,36 +2909,84 @@ def finance_upload():
                                     amount
                                 ))
 
-                                result = cur.fetchone()
+                                inserted_row = cur.fetchone()
 
-                                if result:
+                                if inserted_row:
                                     inserted += 1
                                 else:
                                     skipped += 1
 
-                            except Exception as e:
-                                print("导入失败:", row.to_dict(), e)
+                            except Exception as row_error:
+                                failed_rows += 1
                                 skipped += 1
 
+                                print(
+                                    f"第 {row_index + 2} 行导入失败：",
+                                    row.to_dict(),
+                                    row_error
+                                )
+
+                        # 整份 Excel 完成后只提交一次
                         conn.commit()
 
-                msg = f"上传完成：读取 {len(df)} 行，新增 {inserted} 行，跳过 {skipped} 行。"
+                # =========================
+                # 上传结果
+                # =========================
+                msg = (
+                    f"上传完成：读取 {len(df)} 行，"
+                    f"新增 {inserted} 行，"
+                    f"跳过 {skipped} 行。"
+                )
+
+                details = []
+
+                if duplicate_receipts:
+                    details.append(
+                        f"重复收据 {duplicate_receipts} 行"
+                    )
+
+                if duplicate_months:
+                    details.append(
+                        f"重复月份 {duplicate_months} 行"
+                    )
+
+                if missing_members:
+                    details.append(
+                        f"会员不存在 {missing_members} 行"
+                    )
+
+                if failed_rows:
+                    details.append(
+                        f"格式或资料错误 {failed_rows} 行"
+                    )
 
                 if name_warnings:
-                    msg += f" 发现 {len(name_warnings)} 位会员姓名不一致，已使用系统主档姓名。"
+                    details.append(
+                        f"姓名不一致 {len(name_warnings)} 位，"
+                        f"已使用系统主档姓名"
+                    )
 
+                if details:
+                    msg += " " + "；".join(details) + "。"
+
+                if name_warnings:
                     print("=" * 60)
-                    print(f"发现 {len(name_warnings)} 位会员姓名不一致：")
+                    print(
+                        f"发现 {len(name_warnings)} "
+                        f"位会员姓名不一致："
+                    )
 
-                    for w in sorted(name_warnings.values()):
-                        print(w)
+                    for warning in sorted(
+                        name_warnings.values()
+                    ):
+                        print(warning)
 
                     print("=" * 60)
 
             except Exception as e:
                 print("上传失败:", e)
                 error = f"上传失败：{e}"
-
+   
     # 搜索记录
     try:
         if q:
@@ -3366,102 +3523,277 @@ MEMBER_HTML = """
       href="{{ url_for('static', filename='css/toolbox.css') }}">
 
 <style>
-.member-search-row{
-    display:flex;
-    gap:10px;
-    align-items:center;
+/* =========================
+   月费查询页面专用样式
+   ========================= */
+
+.member-page{
+    max-width:760px;
+    margin:0 auto;
 }
+
+/* 顶部管理员入口 */
+.member-topbar{
+    display:flex;
+    justify-content:flex-end;
+    margin-bottom:8px;
+}
+
+.member-topbar .btn-tool{
+    width:auto;
+    min-height:48px;
+    padding:10px 18px;
+    font-size:17px;
+}
+
+/* 查询输入区域 */
+.member-search-row{
+    display:grid;
+    grid-template-columns:100px minmax(0, 1fr);
+    gap:10px;
+    align-items:stretch;
+}
+
 .branch-btn{
-    width:100px;
+    width:100%;
     min-height:64px;
-    font-size:24px;
+    padding:0 10px;
+    font-size:23px;
     font-weight:800;
     border:0;
     border-radius:16px;
-    color:white;
+    color:#fff;
     background:#16a34a;
-    flex-shrink:0;
     cursor:pointer;
 }
+
+.member-search-row .form-input{
+    width:100%;
+    min-width:0;
+    min-height:64px;
+    box-sizing:border-box;
+}
+
+/* 会员资料 */
 .member-title-line{
     font-size:30px;
+    line-height:1.3;
     font-weight:800;
+    color:#111827;
 }
+
 .member-sub{
     color:#666;
-    font-size:16px;
-    margin-top:6px;
+    font-size:17px;
+    line-height:1.8;
+    margin-top:8px;
+    overflow-wrap:anywhere;
 }
-.record-table{
-    width:100%;
-    border-collapse:collapse;
-    background:white;
-    margin-top:14px;
-}
-.record-table th,
-.record-table td{
-    border:1px solid #e5e7eb;
-    padding:10px;
-    text-align:center;
-    font-size:15px;
-}
-.record-table th{
-    background:#f3f4f6;
-}
+
+/* 多位会员选择 */
 .candidate-card{
-    background:white;
+    background:#fff;
     border:1px solid #e5e7eb;
     border-radius:16px;
     padding:16px;
     margin-top:12px;
 }
 
+/* 汇总资料 */
 .member-summary-grid{
-    grid-template-columns:repeat(3, 1fr);
+    display:grid;
+    grid-template-columns:repeat(3, minmax(0, 1fr));
+    gap:12px;
     margin-top:18px;
 }
 
 .member-summary-box{
+    min-width:0;
     text-align:left;
     box-shadow:none;
     border:1px solid #e5e7eb;
-    padding:16px 18px;
+    padding:16px;
 }
 
 .member-summary-value{
-    font-size:26px;
+    margin-top:6px;
+    font-size:25px;
+    line-height:1.35;
     color:#111827;
+    overflow-wrap:anywhere;
 }
 
 .member-last-payment{
     margin-top:14px;
+    padding:16px;
 }
 
+/* 缴费记录表 */
+.member-table-wrap{
+    width:100%;
+    overflow-x:auto;
+    -webkit-overflow-scrolling:touch;
+    border:1px solid #e5e7eb;
+    border-radius:14px;
+    margin-top:14px;
+}
+
+.record-table{
+    width:100%;
+    min-width:680px;
+    border-collapse:collapse;
+    background:#fff;
+    margin:0;
+}
+
+.record-table th,
+.record-table td{
+    border-right:1px solid #e5e7eb;
+    border-bottom:1px solid #e5e7eb;
+    padding:11px 9px;
+    text-align:center;
+    font-size:15px;
+    line-height:1.4;
+    white-space:nowrap;
+}
+
+.record-table th:last-child,
+.record-table td:last-child{
+    border-right:0;
+}
+
+.record-table tr:last-child td{
+    border-bottom:0;
+}
+
+.record-table th{
+    background:#f3f4f6;
+    font-weight:700;
+    color:#374151;
+}
+
+/* 手机版 */
 @media(max-width:700px){
+
+    body{
+        overflow-x:hidden;
+    }
+
+    .member-page{
+        width:100%;
+        max-width:none;
+    }
+
+    .member-topbar{
+        justify-content:flex-end;
+        margin-bottom:4px;
+    }
+
+    .member-topbar .btn-tool{
+        min-height:42px;
+        padding:8px 13px;
+        font-size:15px;
+        border-radius:12px;
+    }
+
+    .member-search-row{
+        grid-template-columns:78px minmax(0, 1fr);
+        gap:8px;
+    }
+
+    .branch-btn{
+        min-height:56px;
+        font-size:19px;
+        border-radius:13px;
+    }
+
+    .member-search-row .form-input{
+        min-height:56px;
+        height:56px;
+        padding:10px 12px;
+        font-size:16px;
+        border-radius:13px;
+    }
+
+    .member-title-line{
+        font-size:24px;
+    }
+
+    .member-sub{
+        font-size:16px;
+        line-height:1.7;
+    }
+
+    /*
+      手机汇总排成：
+      第一行两格
+      第二行“月费已缴至”占满
+    */
     .member-summary-grid{
-        grid-template-columns:1fr;
+        grid-template-columns:repeat(2, minmax(0, 1fr));
+        gap:10px;
+        margin-top:14px;
+    }
+
+    .member-summary-box{
+        padding:13px;
+        border-radius:13px;
+    }
+
+    .member-summary-box:nth-child(3){
+        grid-column:1 / -1;
+    }
+
+    .member-summary-box .summary-title{
+        font-size:14px;
+        line-height:1.4;
     }
 
     .member-summary-value{
-        font-size:24px;
+        font-size:20px;
+        line-height:1.4;
+    }
+
+    .member-last-payment{
+        padding:13px;
+    }
+
+    .candidate-card{
+        padding:14px;
+        border-radius:14px;
+    }
+
+    .record-table{
+        min-width:650px;
+    }
+
+    .record-table th,
+    .record-table td{
+        font-size:13px;
+        padding:9px 8px;
     }
 }
 
-@media(max-width:700px){
+/* 很小的手机 */
+@media(max-width:390px){
+
     .member-search-row{
-        align-items:stretch;
+        grid-template-columns:70px minmax(0, 1fr);
+        gap:7px;
     }
+
     .branch-btn{
-        width:82px;
-        font-size:21px;
+        font-size:17px;
     }
-    .record-table th,
-    .record-table td{
-        font-size:12px;
-        padding:6px;
+
+    .member-search-row .form-input{
+        font-size:15px;
+        padding-left:10px;
+        padding-right:10px;
     }
-    .member-title-line{
-        font-size:24px;
+
+    .member-summary-value{
+        font-size:18px;
     }
 }
 </style>
@@ -3469,10 +3801,12 @@ MEMBER_HTML = """
 
 <body>
 
-<div class="page">
+<div class="page member-page">
 
-    <div class="btn-row" style="justify-content:space-between;">
-        <a class="btn-tool btn-light" href="/member/admin">⚙ 管理员入口</a>
+    <div class="member-topbar">
+        <a class="btn-tool btn-light" href="/member/admin">
+            ⚙ 管理员入口
+        </a>
     </div>
 
     <h1 class="page-title">🙏 月费查询</h1>
@@ -3628,7 +3962,7 @@ MEMBER_HTML = """
         <div class="section-title">📋 缴费记录</div>
 
         {% if payments %}
-        <div style="overflow-x:auto;">
+        <div class="member-table-wrap">
             <table class="record-table">
                 <tr>
                     <th>付款日期</th>

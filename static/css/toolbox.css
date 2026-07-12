@@ -1185,88 +1185,6 @@ button{
     border-color:#2f66e8;
 }
 
-/* ============================================
-   Toolbox V4.1 Compatibility Patch
-   只新增，不覆盖旧页面
-============================================ */
-
-/* Page Alias */
-.page{
-    max-width:1180px;
-    margin:0 auto;
-    padding:18px;
-}
-
-/* Button Alias */
-.btn-primary{ background:var(--blue); }
-.btn-success{ background:var(--green); }
-.btn-danger{ background:var(--red); }
-.btn-warning{ background:var(--orange); }
-.btn-secondary{ background:var(--gray); }
-.btn-light{
-    background:#ffffff;
-    color:#374151;
-    border:2px solid #d1d5db;
-}
-
-.btn-light:hover{
-    color:#111827;
-}
-
-/* Card Soft */
-.card-soft{
-    background:#f8fafc;
-    border:1px solid #e5e7eb;
-    border-radius:18px;
-    padding:20px;
-}
-
-/* Section Alias */
-.section-subtitle{
-    font-size:22px;
-    color:#6b7280;
-    margin-top:-12px;
-    margin-bottom:18px;
-}
-
-/* Alert Alias */
-.alert-danger{
-    background:#fee2e2;
-    color:#991b1b;
-}
-
-/* Form Label Support */
-.form-group label{
-    display:block;
-    font-size:28px;
-    font-weight:bold;
-    margin-bottom:10px;
-}
-
-/* Table Alias */
-.table-responsive{
-    overflow-x:auto;
-}
-
-/* Mobile Safety */
-@media (max-width:700px){
-    .page{
-        padding:12px;
-    }
-
-    .btn-row{
-        gap:12px;
-        margin-top:18px;
-    }
-
-    .btn-tool{
-        width:100%;
-    }
-
-    .kpi-value{
-        font-size:42px;
-    }
-}
 
 /* ============================================
    观音堂 UI Toolbox V4.1
@@ -1287,6 +1205,16 @@ button{
 .btn-danger{ background:var(--red); }
 .btn-warning{ background:var(--orange); }
 .btn-secondary{ background:var(--gray); }
+
+.btn-teal{
+    background:#0f766e;
+    color:#ffffff;
+}
+
+.btn-teal:hover{
+    background:#115e59;
+    color:#ffffff;
+}
 
 .btn-light{
     background:#ffffff;
@@ -2113,5 +2041,103 @@ button{
     .special-box select,
     .date-input{
         font-size:17px;
+    }
+}
+
+
+/* =========================================================
+   Choice Grid / 选择按钮组
+   ========================================================= */
+
+.choice-grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(150px, 1fr));
+    gap:16px;
+    margin-top:14px;
+}
+
+.choice-btn{
+    min-height:96px;
+    padding:16px 12px;
+
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:4px;
+
+    background:#fff;
+    color:#1f2937;
+
+    border:2px solid #d7dde5;
+    border-radius:18px;
+
+    font-family:inherit;
+    cursor:pointer;
+    transition:
+        transform .15s ease,
+        border-color .15s ease,
+        background .15s ease,
+        color .15s ease,
+        box-shadow .15s ease;
+
+    box-sizing:border-box;
+}
+
+.choice-btn:hover{
+    border-color:#2f80ed;
+    transform:translateY(-1px);
+}
+
+.choice-btn.active{
+    background:#2f80ed;
+    color:#fff;
+    border-color:#2f80ed;
+    box-shadow:0 6px 16px rgba(47,128,237,.22);
+}
+
+.choice-icon{
+    font-size:28px;
+    line-height:1;
+}
+
+.choice-label{
+    font-size:24px;
+    font-weight:700;
+    line-height:1.2;
+}
+
+.choice-help{
+    font-size:15px;
+    font-weight:500;
+    opacity:.8;
+    line-height:1.2;
+}
+
+.choice-btn.active .choice-help{
+    color:#fff;
+}
+
+@media (max-width:700px){
+    .choice-grid{
+        grid-template-columns:repeat(2, minmax(0, 1fr));
+        gap:12px;
+    }
+
+    .choice-btn{
+        min-height:88px;
+        padding:14px 8px;
+    }
+
+    .choice-icon{
+        font-size:25px;
+    }
+
+    .choice-label{
+        font-size:21px;
+    }
+
+    .choice-help{
+        font-size:14px;
     }
 }

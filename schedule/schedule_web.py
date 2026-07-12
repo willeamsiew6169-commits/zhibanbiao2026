@@ -23,6 +23,7 @@ from schedule.builders.schedule_builder import sync_schedule_after_signup_change
 from schedule.services.admin_dashboard_service import load_admin_dashboard_data
 from lunar_rules import get_special_day_info, get_next_day_remove_info
 from flask import request, session, redirect, url_for, render_template_string, flash
+from schedule.services.food_offering_routes import register_food_offering_routes
 from schedule.builders.schedule_builder import (
     run_schedule_for_date,
     patch_schedule_for_date,
@@ -49,6 +50,7 @@ from schedule.services.settings_service import (
     get_schedule_settings,
     save_schedule_setting,
     set_schedule_setting,
+    is_schedule_setting_on,
 )
 
 from schedule.services.publish_service import (
@@ -111,6 +113,11 @@ PREBOOK_FILE = os.path.join(
 SCHEDULE_PIN = "1234"
 
 schedule_records = []
+
+register_food_offering_routes(
+    schedule_bp,
+    is_schedule_setting_on=is_schedule_setting_on,
+)
 
 def get_supabase_client():
     return create_client(
@@ -1145,6 +1152,7 @@ def schedule_admin():
         fixed_buddha_today=fixed_buddha_today,
         multi_day_signup_open=dashboard["multi_day_signup_open"],
         meal_signup_open=dashboard["meal_signup_open"],
+        food_offering_open=dashboard["food_offering_open"],
         records=dashboard["records"],
         pending_counts=dashboard["pending_counts"],
         day_summary=dashboard["day_summary"],
@@ -1384,6 +1392,8 @@ def schedule_add():
 @schedule_bp.route("/schedule/toggle_setting", methods=["POST"])
 def toggle_schedule_setting():
 
+    print("======== TOGGLE_SETTING ENTERED =======", flush=True)
+
     if not session.get("schedule_login"):
         return redirect(url_for("schedule.schedule_admin"))
 
@@ -1394,6 +1404,7 @@ def toggle_schedule_setting():
     allowed_keys = {
         "multi_day_signup_open",
         "meal_signup_open",
+        "food_offering_open",
     }
 
     if key not in allowed_keys:
@@ -1401,6 +1412,16 @@ def toggle_schedule_setting():
 
     if force in ("true", "false"):
         set_schedule_setting(key, force, updated_by="admin")
+
+        print("key =", key)
+        print("force =", force)
+        print(
+            "saved =",
+            get_schedule_setting(
+                "food_offering_open",
+                "false"
+            )
+        )
     else:
         current = get_schedule_setting(key, "false")
         new_value = "false" if current == "true" else "true"
@@ -4892,14 +4913,14 @@ html {
     </div>
 
     <div class="info-box">
-        <b>📢 缺人工提醒</b><br>
+        <b>📢 缺义工提醒</b><br>
 
         {% if shortage_summary %}
             {% for line in shortage_summary %}
                 {{ line }}<br>
             {% endfor %}
         {% else %}
-            🟢 目前没有缺人工岗位
+            🟢 目前没有缺义工岗位
         {% endif %}
     </div>
 </div>
@@ -5394,6 +5415,7 @@ html {
                 </form>
 
             </td>
+            
         </tr>
 
         <tr>
@@ -5453,6 +5475,74 @@ html {
                     <input type="hidden"
                            name="force"
                            value="false">
+
+                    <button class="btn-tool btn-red mini-btn">
+                        关闭
+                    </button>
+
+                </form>
+
+            </td>
+
+        </tr>
+
+        <tr>
+            <td colspan="2">
+                <hr>
+            </td>
+        </tr>
+
+        <!-- 素食结缘 -->
+
+        <tr>
+
+            <td style="padding:12px 0;">
+
+                <b>🥗 素食结缘报名</b><br>
+
+                {% if food_offering_open %}
+                    <span style="color:green;font-weight:bold;">
+                        🟢 已开放
+                    </span>
+                {% else %}
+                    <span style="color:#999;font-weight:bold;">
+                        ⚪ 已关闭
+                    </span>
+                {% endif %}
+
+            </td>
+
+            <td style="text-align:right;white-space:nowrap;">
+
+                <form method="post"
+                    action="/schedule/toggle_setting"
+                    class="inline-form">
+
+                    <input type="hidden"
+                        name="key"
+                        value="food_offering_open">
+
+                    <input type="hidden"
+                        name="force"
+                        value="true">
+
+                    <button class="btn-tool btn-green mini-btn">
+                        开启
+                    </button>
+
+                </form>
+
+                <form method="post"
+                    action="/schedule/toggle_setting"
+                    class="inline-form">
+
+                    <input type="hidden"
+                        name="key"
+                        value="food_offering_open">
+
+                    <input type="hidden"
+                        name="force"
+                        value="false">
 
                     <button class="btn-tool btn-red mini-btn">
                         关闭

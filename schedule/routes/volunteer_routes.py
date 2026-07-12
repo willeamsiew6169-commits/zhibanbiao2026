@@ -2,13 +2,12 @@
 
 import calendar
 
-from flask import request, redirect, url_for, render_template_string, redirect, session, jsonify
-from psycopg2.extras import RealDictCursor
-
 from db import get_conn
-from schedule.blueprint import schedule_bp
-from datetime import datetime, timedelta, date, timezone
 from utils import apply_branch_prefix
+from schedule.blueprint import schedule_bp
+from psycopg2.extras import RealDictCursor
+from datetime import datetime, timedelta, date, timezone
+from flask import request, redirect, url_for, render_template_string, redirect, session, jsonify
 from schedule.helpers import (
     find_volunteer_by_keyword,
     build_monthly_signup_text,
@@ -24,6 +23,15 @@ from schedule.builders.time_utils import time_to_minutes, malaysia_today, malays
 from schedule.services.publish_service import is_schedule_published
 from schedule.services.whatsapp_service import build_whatsapp_from_assigned
 from schedule.services.shortage_service import build_signup_shortage_notice
+from schedule.services.signup_rules import (
+    can_signup_supply_setup,
+    can_signup_supply_remove,
+)
+
+from schedule.services.supply_service import (
+    get_supply_signup_summary,
+)
+
 from schedule.volunteer_templates import (
     VOLUNTEER_SIGNUP_HTML,
     VOLUNTEER_PREBOOK_HTML,
@@ -47,6 +55,7 @@ def volunteer_home():
 
     multi_day_signup_open = is_schedule_setting_on("multi_day_signup_open")
     meal_signup_open = is_schedule_setting_on("meal_signup_open")
+    food_offering_open = is_schedule_setting_on("food_offering_open")
 
     if today.month == 12:
         prebook_year = today.year + 1
@@ -97,23 +106,53 @@ def volunteer_home():
         meal_button_date = check_date.strftime("%d/%m").lstrip("0").replace("/0", "/")
 
         meal_status_text = "已满" if meal_count >= 9 else f"{meal_count}/9"
+
+    target_date = datetime.strptime(
+        default_date,
+        "%Y-%m-%d"
+    ).date()
+
+    supply_summary = get_supply_signup_summary(default_date)
+
+    supply_setup_open = (
+        can_signup_supply_setup(target_date)
+        and not supply_summary["setup"]["is_full"]
+    )
+
+    supply_remove_open = (
+        can_signup_supply_remove(target_date)
+        and not supply_summary["remove"]["is_full"]
+    )
+
+    # 设供台或收供台只要还有一个可报名，就显示“供台”按钮
+    supply_signup_available = (
+        supply_setup_open
+        or supply_remove_open
+    )
         
     return render_template_string(
-        VOLUNTEER_SIGNUP_HTML,
-        default_date=default_date,
-        schedule_label=schedule_label,
-        times=TIME_OPTIONS,
-        signup_date=default_date,
-        prebook_year=prebook_year,
-        prebook_month=prebook_month,
-        meal_button_show=meal_button_show,
-        meal_status_text=meal_status_text,
-        meal_date=meal_date,
-        meal_button_date=meal_button_date,
-        meal_count=meal_count,
-        multi_day_signup_open=multi_day_signup_open,
-        meal_signup_open=meal_signup_open,
-    )
+    VOLUNTEER_SIGNUP_HTML,
+    default_date=default_date,
+    schedule_label=schedule_label,
+    times=TIME_OPTIONS,
+    signup_date=default_date,
+    prebook_year=prebook_year,
+    prebook_month=prebook_month,
+    meal_button_show=meal_button_show,
+    meal_status_text=meal_status_text,
+    meal_date=meal_date,
+    meal_button_date=meal_button_date,
+    meal_count=meal_count,
+    multi_day_signup_open=multi_day_signup_open,
+    meal_signup_open=meal_signup_open,
+    food_offering_open=food_offering_open,
+
+    # 供台报名状态
+    supply_signup_available=supply_signup_available,
+    supply_setup_open=supply_setup_open,
+    supply_remove_open=supply_remove_open,
+    supply_summary=supply_summary,
+)
 
 @schedule_bp.route("/volunteer/signup", methods=["POST"])
 def volunteer_signup():
@@ -121,6 +160,24 @@ def volunteer_signup():
     keyword = request.form.get("keyword", "").strip()
     signup_date = request.form.get("signup_date", "").strip()
     role = request.form.get("role", "").strip()
+
+    supply_task = (
+        request.form.get("supply_task", "")
+        .strip()
+        .lower()
+    )
+
+    food_offering_task = (
+        request.form.get("food_offering_task", "")
+        .strip()
+        .lower()
+    )
+
+    food_offering_item = (
+        request.form.get("food_offering_item", "")
+        .strip()
+    )
+
     start_time = request.form.get("start_time", "").strip()
     end_time = request.form.get("end_time", "").strip()
     branch = request.form.get("branch", "CHE").strip().upper()
@@ -194,24 +251,70 @@ def volunteer_signup():
 
     elif role == "供台":
 
-        date_obj = datetime.strptime(signup_date, "%Y-%m-%d").date()
+        date_obj = datetime.strptime(
+            signup_date,
+            "%Y-%m-%d"
+        ).date()
+
         special_info = get_special_day_info(date_obj)
 
-        if special_info.get("template_type") not in ["lunar_1_15", "buddhist_festival"]:
+        if special_info.get("template_type") not in [
+            "lunar_1_15",
+            "buddhist_festival"
+        ]:
+
             return """
             <h1>❌ 这一天不需要供台报名</h1>
-            <p>供台通常只开放在初一、十五或佛诞大日子。</p>
-            <p>请检查日期是否选错。</p>
-            <a href="/volunteer">返回重新报名</a>
+
+            <p>
+            供台通常只开放于初一、
+            十五及佛诞大日子。
+            </p>
+
+            <a href="/volunteer">
+            返回重新报名
+            </a>
             """
 
-        start_time = "6:00am"
-        end_time = "8:00am"
+        if supply_task not in [
+            "setup",
+            "remove"
+        ]:
+
+            return """
+            <h1>❌ 请先选择供台工作</h1>
+
+            <p>
+            请选择：
+            设供台 或 收供台
+            </p>
+
+            <a href="/volunteer">
+            返回
+            </a>
+            """
+
+        if supply_task == "setup":
+
+            start_time = "6:00am"
+            end_time = "8:00am"
+
+        else:
+
+            start_time = "12:00pm"
+            end_time = "1:00pm"
 
     elif role == "膳食":
 
-        selected_date = datetime.strptime(signup_date, "%Y-%m-%d").date()
-        meal_date, special_info = find_next_meal_signup_date(selected_date, days_ahead=7)
+        selected_date = datetime.strptime(
+            signup_date,
+            "%Y-%m-%d"
+        ).date()
+
+        meal_date, special_info = find_next_meal_signup_date(
+            selected_date,
+            days_ahead=7
+        )
 
         if not meal_date:
             return """
@@ -225,29 +328,101 @@ def volunteer_signup():
         start_time = "8:00am"
         end_time = "2:00pm"
 
+
+    elif role == "素食结缘":
+
+        if not is_schedule_setting_on(
+            "food_offering_open"
+        ):
+            return """
+            <h1>❌ 素食结缘报名尚未开放</h1>
+            <p>请等待负责人开放报名。</p>
+            <a href="/volunteer">返回</a>
+            """
+
+        valid_food_offering_tasks = {
+            "main_food",
+            "vegetable",
+            "dessert",
+            "fruit",
+            "drink",
+        }
+
+        if food_offering_task not in valid_food_offering_tasks:
+            return """
+            <h1>❌ 请先选择素食结缘项目</h1>
+
+            <p>
+            请选择主食、菜肴、甜品、水果或饮料。
+            </p>
+
+            <a href="/volunteer">
+            返回重新报名
+            </a>
+            """
+
+        # 素食结缘暂时没有固定值班时间
+        start_time = None
+        end_time = None
+
+
     else:
         return "❌ 岗位错误，请重新选择<br><a href='/volunteer'>返回</a>"
 
     # =========================
     # 新增 / 更新报名
     # =========================
+    if role != "供台":
+        supply_task = None
+
+    if role != "素食结缘":
+        food_offering_task = None
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
+            # 默认值，避免非膳食报名时 meal_role 未定义
+            meal_role = None
+
+            # 只有对应岗位才保留细项
+            if role != "供台":
+                supply_task = None
+
+            if role != "素食结缘":
+                food_offering_task = None
+                food_offering_item = None
+
+            # 检查是否已经有相同岗位、相同细项的报名
             cur.execute("""
                 select id
                 from volunteer_schedule_signups
                 where volunteer_id = %s
                 and signup_date = %s
                 and role = %s
+                and (
+                        role <> '供台'
+                        or coalesce(supply_task, 'setup')
+                        = coalesce(%s, 'setup')
+                    )
+                and (
+                        role <> '素食结缘'
+                        or food_offering_task = %s
+                    )
                 and coalesce(status, 'pending') <> 'cancelled'
                 limit 1
-            """, (vol_id, signup_date, role))
+            """, (
+                vol_id,
+                signup_date,
+                role,
+                supply_task,
+                food_offering_task
+            ))
 
             existing = cur.fetchone()
 
+            # 膳食组自动安排报名身份
             if role == "膳食":
+
                 cur.execute("""
                     select count(*) as cnt
                     from volunteer_schedule_signups
@@ -271,7 +446,10 @@ def volunteer_signup():
 
                 cur.execute("""
                     update volunteer_schedule_signups
-                    set start_time = %s,
+                    set supply_task = %s,
+                        food_offering_task = %s,
+                        food_offering_item = %s,
+                        start_time = %s,
                         end_time = %s,
                         status = 'pending',
                         assigned_place = null,
@@ -279,6 +457,9 @@ def volunteer_signup():
                         meal_role = %s
                     where id = %s
                 """, (
+                    supply_task,
+                    food_offering_task,
+                    food_offering_item,
                     start_time,
                     end_time,
                     meal_role,
@@ -296,6 +477,9 @@ def volunteer_signup():
                         name,
                         signup_date,
                         role,
+                        supply_task,
+                        food_offering_task,
+                        food_offering_item,
                         start_time,
                         end_time,
                         status,
@@ -304,7 +488,15 @@ def volunteer_signup():
                     )
                     values
                     (
-                        %s, %s, %s, %s, %s, %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
                         'pending',
                         '义工报名',
                         %s
@@ -315,6 +507,9 @@ def volunteer_signup():
                     name,
                     signup_date,
                     role,
+                    supply_task,
+                    food_offering_task,
+                    food_offering_item,
                     start_time,
                     end_time,
                     meal_role
@@ -325,7 +520,7 @@ def volunteer_signup():
                 result_title = "🎉 报名成功"
 
             conn.commit()
-
+    
     # =========================
     # V2 同步：只走统一函数
     # =========================
@@ -2574,3 +2769,5 @@ def volunteer_day_info():
         "lunar_text": info.get("lunar_text", ""),
         "special_names": info.get("special_names", [])
     }
+
+

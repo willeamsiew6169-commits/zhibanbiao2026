@@ -44,6 +44,7 @@ def load_admin_dashboard_data(mode, override_date):
     special_day_info = get_special_day_info(selected_date)
     multi_day_signup_open = is_schedule_setting_on("multi_day_signup_open")
     meal_signup_open = is_schedule_setting_on("meal_signup_open")
+    food_offering_open = is_schedule_setting_on("food_offering_open")
 
     template_text = {
         "normal": "平时值班模板",
@@ -128,4 +129,5 @@ def load_admin_dashboard_data(mode, override_date):
         "records": display_records,
         "multi_day_signup_open": multi_day_signup_open,
         "meal_signup_open": meal_signup_open,
+        "food_offering_open": food_offering_open,
     }

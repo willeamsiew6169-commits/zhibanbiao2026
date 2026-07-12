@@ -3,12 +3,11 @@
 import io
 import pandas as pd
 
-
-from datetime import date, datetime
 from io import BytesIO
 from db import db_query
 from utils import get_text
 from openpyxl import Workbook
+from datetime import date, datetime
 from utils import now_date_str, get_text
 from utils import get_display_today_code
 from psycopg2.extras import RealDictCursor
