@@ -1,6 +1,5 @@
 # dharma_class_web.py
 
-
 from io import BytesIO
 from db import get_conn
 from flask import send_file
@@ -41,6 +40,145 @@ SCRIPTURE_STATUS_LABELS = {
     "absent": "缺席",
 }
 
+AUDIT_FIELD_LABELS = {
+    "status": "出席状态",
+    "baihua_status": "白话佛法功课",
+    "scripture_status": "经文功课",
+    "teacher_name": "负责老师",
+    "topic": "课题",
+    "material": "教材／资源",
+    "content": "教学内容",
+    "remark": "备注",
+    "name": "学生姓名",
+    "english_name": "英文名",
+    "gender": "性别",
+    "birth_year": "出生年份",
+    "parent_name": "父／母／监护人",
+    "parent_phone": "联系电话",
+    "group_id": "组别",
+    "student_status": "学生状态",
+}
+
+AUDIT_VALUE_LABELS = {
+    "present": "出席",
+    "late": "迟到",
+    "farm": "农舍",
+    "absent": "缺席",
+    "submitted_done": "有交",
+    "submitted_no_answer": "有交，没做题",
+    "submitted_recited": "有交，有念",
+    "submitted_not_recited": "有交，没念",
+    "submitted": "有交（旧状态）",
+    "missing": "没交",
+    "active": "在读",
+    "inactive": "暂停",
+    "paused": "暂停",
+    "graduated": "毕业",
+    "withdrawn": "退学",
+    "transferred": "转组／转会",
+}
+
+HIGH_GROUP_TEACHERS = [
+    "黄莉珍",
+    "刘永耀",
+    "许愫芩",
+    "王康芬",
+    "黄薈菏",
+]
+
+YOUTH_GROUP_TEACHERS = [
+    "许银铃",
+    "林臣顺",
+    "许茹慧",
+    "刘铧忆",
+    "吴文杰",
+    "王康芬",
+    "方玉芬",
+]
+
+LOW_GROUP_TEACHERS = [
+    "陈映如",
+    "黄丽萍",
+    "伍蔚枋",
+]
+
+GROUP_TEACHERS = {
+    "低年组": LOW_GROUP_TEACHERS,
+    "少年组": YOUTH_GROUP_TEACHERS,
+    "高年组": HIGH_GROUP_TEACHERS,
+}
+
+
+def _audit_text(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return AUDIT_VALUE_LABELS.get(text, text)
+
+
+def write_dharma_audit_log(
+    cur,
+    *,
+    actor_name,
+    action_type,
+    entity_type,
+    field_name,
+    old_value=None,
+    new_value=None,
+    entity_id=None,
+    student_id=None,
+    student_name=None,
+    record_date=None,
+    group_id=None,
+    branch="CHE",
+):
+    """只在值真的改变时写入审计记录。"""
+
+    old_text = "" if old_value is None else str(old_value)
+    new_text = "" if new_value is None else str(new_value)
+
+    if old_text == new_text:
+        return
+
+    cur.execute("""
+        insert into dharma_audit_logs
+        (
+            branch,
+            actor_name,
+            action_type,
+            entity_type,
+            entity_id,
+            student_id,
+            student_name,
+            record_date,
+            group_id,
+            field_name,
+            old_value,
+            new_value,
+            source_ip
+        )
+        values
+        (
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, %s
+        )
+    """, (
+        branch,
+        actor_name or "老师",
+        action_type,
+        entity_type,
+        entity_id,
+        student_id,
+        student_name,
+        record_date,
+        group_id,
+        field_name,
+        old_text or None,
+        new_text or None,
+        request.headers.get("X-Forwarded-For", request.remote_addr),
+    ))
+
 def beautify_simple_excel(ws):
 
     header_fill = PatternFill("solid", fgColor="5B9BD5")
@@ -80,9 +218,6 @@ def beautify_simple_excel(ws):
 @dharma_class_bp.route("/")
 def class_home():
 
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
     malaysia_now = datetime.now(
         ZoneInfo("Asia/Kuala_Lumpur")
     )
@@ -97,7 +232,7 @@ def class_home():
         "星期四",
         "星期五",
         "星期六",
-        "星期日"
+        "星期日",
     ]
 
     today_display = (
@@ -112,7 +247,6 @@ def class_home():
             cursor_factory=RealDictCursor
         ) as cur:
 
-            # 每个组别今日统计
             cur.execute("""
                 select
                     g.id,
@@ -130,7 +264,11 @@ def class_home():
 
                     count(
                         distinct case
-                            when a.status in ('present', 'late', 'farm')
+                            when a.status in (
+                                'present',
+                                'late',
+                                'farm'
+                            )
                             then s.id
                         end
                     ) as attended_count,
@@ -158,7 +296,10 @@ def class_home():
 
                     count(
                         distinct case
-                            when a.status in ('absent', 'leave')
+                            when a.status in (
+                                'absent',
+                                'leave'
+                            )
                             then s.id
                         end
                     ) as absent_count,
@@ -194,30 +335,19 @@ def class_home():
                     g.id
             """, (
                 today_str,
-                today_str
+                today_str,
             ))
 
             group_stats = cur.fetchall()
 
-            # 首页总统计
-            total_students = sum(
-                int(g["total_students"] or 0)
-                for g in group_stats
-            )
+            group_order = {
+                "低年组": 1,
+                "高年组": 2,
+                "少年组": 3,
+            }
 
-            total_marked = sum(
-                int(g["marked_count"] or 0)
-                for g in group_stats
-            )
-
-            total_attended = sum(
-                int(g["attended_count"] or 0)
-                for g in group_stats
-            )
-
-            total_lessons = sum(
-                int(g["lesson_count"] or 0)
-                for g in group_stats
+            group_stats.sort(
+                key=lambda x: group_order.get(x["name"], 99)
             )
 
     return render_template_string("""
@@ -231,6 +361,21 @@ def class_home():
     content="width=device-width, initial-scale=1"
 >
 
+<link
+    rel="manifest"
+    href="/dharma-class-manifest.json"
+>
+
+<link
+    rel="icon"
+    href="/static/dharma_icon.png?v=1"
+>
+
+<meta
+    name="theme-color"
+    content="#f6c54e"
+>
+
 <title>蕉赖佛学班系统</title>
 
 <link
@@ -239,223 +384,252 @@ def class_home():
 >
 
 <style>
-.class-dashboard-note {
-    background: linear-gradient(135deg, #fff8e8, #fffdf6);
-    border: 1px solid #f3d98c;
-    border-radius: 16px;
-    padding: 16px;
-    margin: 16px 0 20px;
-    text-align: center;
-    font-size: 18px;
-    line-height: 1.6;
-}
 
-.overall-summary {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 12px;
-    margin: 18px 0 22px;
-}
+/* =========================================================
+   老师首页
+   ========================================================= */
 
-.overall-box {
-    background: #ffffff;
-    border-radius: 16px;
-    padding: 16px 10px;
-    text-align: center;
-    border: 1px solid #edf0f3;
+.teacher-home-card {
     position: relative;
     overflow: hidden;
+    background:
+        linear-gradient(
+            145deg,
+            #ffffff 0%,
+            #fffdf7 58%,
+            #fff6dc 100%
+        );
 }
 
-.overall-box::before {
-    content: "";
+.teacher-home-card::after {
+    content: "🌸";
     position: absolute;
-    left: 0;
-    right: 0;
-    top: 0;
-    height: 5px;
-    background: #60a5fa;
+    right: 18px;
+    bottom: 10px;
+    font-size: 72px;
+    opacity: 0.08;
+    pointer-events: none;
 }
 
-.overall-box:nth-child(2)::before { background: #a78bfa; }
-.overall-box:nth-child(3)::before { background: #34d399; }
-.overall-box:nth-child(4)::before { background: #fbbf24; }
+.teacher-admin-link {
+    position: absolute;
+    top: 15px;
+    right: 15px;
 
-.overall-label {
-    color: #666;
-    font-size: 16px;
-}
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
 
-.overall-number {
-    font-size: 30px;
+    min-height: 40px;
+    padding: 7px 12px;
+
+    border: 1px solid #ead9a4;
+    border-radius: 999px;
+
+    background: rgba(255,255,255,0.9);
+    color: #795d17;
+
+    font-size: 15px;
     font-weight: 800;
-    margin-top: 6px;
+    text-decoration: none;
 }
 
-.group-dashboard-grid{
-    display:grid;
-    grid-template-columns:repeat(3, 1fr);
-    gap:18px;
-    margin-top:16px;
+.teacher-admin-link:hover {
+    background: #fff7d6;
 }
 
-@media (max-width:900px){
-    .group-dashboard-grid{
-        grid-template-columns:repeat(2,1fr);
-    }
+.teacher-welcome {
+    padding-right: 112px;
 }
 
-@media (max-width:600px){
-    .group-dashboard-grid{
-        grid-template-columns:1fr;
-    }
-}
-
-.group-dashboard-card{
-    border:1px solid #e5e7eb;
-    border-top:5px solid #60a5fa;
-    border-radius:18px;
-    padding:18px;
-    background:#fff;
-
-    display:flex;
-    flex-direction:column;
-    justify-content:space-between;
-
-    min-height:260px;
-}
-
-.group-dashboard-card:nth-child(2) { border-top-color:#f59e0b; }
-.group-dashboard-card:nth-child(3) { border-top-color:#a78bfa; }
-
-.group-dashboard-name {
-    display:inline-block;
-    width:fit-content;
-    padding:7px 12px;
-    border-radius:10px;
-    background:#eef6ff;
-    color:#1d4ed8;
-    font-size: 22px;
+.teacher-blessing {
+    color: #8a6d3b;
     font-weight: 800;
-    margin-bottom: 12px;
-}
-
-.group-main-number {
-    font-size: 30px;
-    font-weight: 800;
-    margin-bottom: 8px;
-}
-
-.group-detail {
-    color: #666;
-    font-size: 16px;
     line-height: 1.7;
 }
 
-.group-status {
-    display: inline-block;
-    border-radius: 999px;
-    padding: 6px 12px;
-    margin-top: 12px;
-    font-size: 15px;
-    font-weight: 700;
+.today-banner {
+    margin: 18px 0 22px;
+    padding: 17px;
+
+    border: 1px solid #f2d58d;
+    border-radius: 18px;
+
+    background:
+        linear-gradient(
+            135deg,
+            #fff8e8,
+            #fffdf7
+        );
+
+    text-align: center;
+    font-size: 19px;
+    font-weight: 900;
+    color: #6f5315;
 }
 
-.status-complete {
+/* =========================================================
+   今日组别
+   ========================================================= */
+
+.today-group-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    margin-top: 14px;
+}
+
+.today-group-card {
+    border: 1px solid #e6e9ed;
+    border-top: 5px solid #60a5fa;
+    border-radius: 18px;
+    padding: 17px;
+    background: #fff;
+}
+
+.today-group-card:nth-child(2) {
+    border-top-color: #f59e0b;
+}
+
+.today-group-card:nth-child(3) {
+    border-top-color: #a78bfa;
+}
+
+.today-group-name {
+    font-size: 21px;
+    font-weight: 900;
+}
+
+.today-group-main {
+    margin: 10px 0 7px;
+    font-size: 29px;
+    font-weight: 900;
+}
+
+.today-group-detail {
+    color: #666;
+    font-size: 15px;
+    line-height: 1.7;
+}
+
+.today-group-status {
+    display: inline-block;
+    margin-top: 11px;
+    padding: 6px 11px;
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 800;
+}
+
+.group-complete {
     background: #dcfce7;
     color: #166534;
 }
 
-.status-pending {
+.group-pending {
     background: #fef3c7;
     color: #92400e;
 }
 
-.status-no-class {
-    background: #f3f4f6;
-    color: #555;
+.group-empty {
+    background: #f1f5f9;
+    color: #64748b;
 }
 
-.home-section-title {
+/* =========================================================
+   老师主要功能
+   ========================================================= */
+
+.teacher-main-action {
+    margin-top: 22px;
+}
+
+.teacher-main-action .btn-tool {
+    min-height: 76px;
+    font-size: 26px;
+    border-radius: 20px;
+}
+
+.student-search-box {
+    margin-top: 24px;
+    padding-top: 22px;
+    border-top: 1px solid #ece6d6;
+}
+
+.student-search-title {
+    margin-bottom: 12px;
     font-size: 21px;
-    font-weight: 800;
-    margin: 24px 0 10px;
+    font-weight: 900;
 }
 
-@media (max-width: 700px) {
-    .overall-summary {
-        grid-template-columns: repeat(2, 1fr);
+.student-search-help {
+    margin: -4px 0 13px;
+    color: #777;
+    line-height: 1.6;
+}
+
+.student-search-box .btn-tool {
+    min-height: 58px;
+    font-size: 20px;
+}
+
+/* =========================================================
+   手机
+   ========================================================= */
+
+@media (max-width: 760px) {
+
+    .teacher-welcome {
+        padding-right: 0;
+        padding-top: 48px;
     }
 
-    .group-dashboard-grid {
+    .teacher-admin-link {
+        top: 12px;
+        right: 12px;
+    }
+
+    .today-group-grid {
         grid-template-columns: 1fr;
     }
+
+    .today-group-card {
+        min-height: auto;
+    }
 }
+
 </style>
 </head>
 
 <body>
 <div class="page">
 
-    <div class="card">
+    <div class="card teacher-home-card">
 
-        <h1 class="page-title">
-            📘 蕉赖佛学班系统
-        </h1>
+        <a
+            class="teacher-admin-link"
+            href="{{ url_for(
+                'dharma_class.class_admin'
+            ) }}"
+        >
+            ⚙️ 负责人
+        </a>
 
-        <p class="page-subtitle">
-            学生资料、课程记录、点名与出席统计。<br>
-            <span style="color:#8a6d3b;font-weight:700;">
+        <div class="teacher-welcome">
+
+            <h1 class="page-title">
+                📘 蕉赖佛学班
+            </h1>
+
+            <p class="page-subtitle teacher-blessing">
                 🌸 学习佛法・增长智慧・培养慈悲 🌸
-            </span>
-        </p>
+            </p>
 
-        <div class="class-dashboard-note">
-            📅 今日：{{ today_display }}
         </div>
 
-        <div class="overall-summary">
-
-            <div class="overall-box">
-                <div class="overall-label">
-                    在读学生
-                </div>
-
-                <div class="overall-number">
-                    {{ total_students }}
-                </div>
-            </div>
-
-            <div class="overall-box">
-                <div class="overall-label">
-                    今日已点名
-                </div>
-
-                <div class="overall-number">
-                    {{ total_marked }}
-                </div>
-            </div>
-
-            <div class="overall-box">
-                <div class="overall-label">
-                    今日出席
-                </div>
-
-                <div class="overall-number">
-                    {{ total_attended }}
-                </div>
-            </div>
-
-            <div class="overall-box">
-                <div class="overall-label">
-                    今日课程
-                </div>
-
-                <div class="overall-number">
-                    {{ total_lessons }}
-                </div>
-            </div>
-
+        <div class="today-banner">
+            📅 今日：{{ today_display }}
         </div>
 
         <h2 class="section-title">
@@ -464,23 +638,23 @@ def class_home():
 
         {% if group_stats %}
 
-            <div class="group-dashboard-grid">
+            <div class="today-group-grid">
 
                 {% for g in group_stats %}
 
-                    <div class="group-dashboard-card">
+                    <div class="today-group-card">
 
-                        <div class="group-dashboard-name">
+                        <div class="today-group-name">
                             {{ g.name }}
                         </div>
 
-                        <div class="group-main-number">
+                        <div class="today-group-main">
                             {{ g.attended_count or 0 }}
                             /
                             {{ g.total_students or 0 }}
                         </div>
 
-                        <div class="group-detail">
+                        <div class="today-group-detail">
                             已点名：{{ g.marked_count or 0 }} 位<br>
                             出席：{{ g.present_count or 0 }} 位<br>
                             迟到：{{ g.late_count or 0 }} 位<br>
@@ -493,19 +667,35 @@ def class_home():
                             and g.total_students
                             and g.marked_count == g.total_students
                         %}
-                            <div class="group-status status-complete">
-                                ✅ 课程与点名已完成
+
+                            <div class="
+                                today-group-status
+                                group-complete
+                            ">
+                                ✅ 已完成
                             </div>
 
-                        {% elif g.lesson_count or g.marked_count %}
-                            <div class="group-status status-pending">
-                                ⏳ 记录尚未完成
+                        {% elif
+                            g.lesson_count
+                            or g.marked_count
+                        %}
+
+                            <div class="
+                                today-group-status
+                                group-pending
+                            ">
+                                ⏳ 记录中
                             </div>
 
                         {% else %}
-                            <div class="group-status status-no-class">
-                                尚未建立今日记录
+
+                            <div class="
+                                today-group-status
+                                group-empty
+                            ">
+                                尚未记录
                             </div>
+
                         {% endif %}
 
                     </div>
@@ -522,104 +712,60 @@ def class_home():
 
         {% endif %}
 
-        <div class="home-section-title">
-            每周主要功能
-        </div>
+        <div class="teacher-main-action">
 
-        <div class="btn-row">
             <a
                 class="btn-tool btn-primary"
                 href="{{ url_for(
                     'dharma_class.class_attendance'
                 ) }}"
             >
-                📚 今日上课
-            </a>
-        </div>
-
-        <div class="btn-row">
-
-            <a
-                class="btn-tool btn-purple"
-                href="{{ url_for(
-                    'dharma_class.class_lessons'
-                ) }}"
-            >
-                📖 课程记录
-            </a>
-
-            <a
-                class="btn-tool btn-purple"
-                href="/class/records"
-            >
-                📅 点名记录
+                📚 点名
             </a>
 
         </div>
 
-        <div class="home-section-title">
-            🔎 学生个人档案
-        </div>
+        <div class="student-search-box">
 
-        <form
-            method="get"
-            action="{{ url_for('dharma_class.class_student_search') }}"
-            class="home-student-search"
-        >
-            <div class="form-group" style="margin-bottom:10px;">
-                <label class="form-label">
-                    搜索学生
-                </label>
-
-                <input
-                    class="form-input"
-                    name="q"
-                    placeholder="输入中文姓名／英文名／学生编号／联系电话"
-                    required
-                >
+            <div class="student-search-title">
+                
             </div>
 
-            <div class="btn-row">
-                <button
-                    class="btn-tool btn-success"
-                    type="submit"
-                >
-                    🔎 查看学生全年档案
-                </button>
+            <div class="student-search-help">
+                输入学生姓名、英文名或父／母／监护人电话。
             </div>
-        </form>
 
-        <div class="home-section-title">
-            学生与统计管理
-        </div>
-
-        <div class="btn-row">
-
-            <a
-                class="btn-tool btn-warning"
-                href="{{ url_for(
-                    'dharma_class.class_students'
+            <form
+                method="get"
+                action="{{ url_for(
+                    'dharma_class.class_student_search'
                 ) }}"
             >
-                👧 学生名单
-            </a>
 
-            <a
-                class="btn-tool btn-warning"
-                href="/class/reports"
-            >
-                📊 出席统计
-            </a>
+                <div class="form-group">
 
-        </div>
+                    <input
+                        class="form-input"
+                        name="q"
+                        placeholder="例如：陈小明"
+                        required
+                    >
 
-        <div class="btn-row">
-            <a
-                class="btn-tool btn-warning"
-                href="/class/promote"
-            >
-                🎓 年度升班
-            </a>
+                </div>
+
+                <div class="btn-row">
+
+                    <button
+                        class="btn-tool btn-success"
+                        type="submit"
+                    >
+                        🔎 查看学生个人档案
+                    </button>
+
+                </div>
+
+            </form>
+
         </div>
 
     </div>
@@ -631,19 +777,434 @@ def class_home():
         today_str=today_str,
         today_display=today_display,
         group_stats=group_stats,
-        total_students=total_students,
-        total_marked=total_marked,
-        total_attended=total_attended,
-        total_lessons=total_lessons
     )
+
+@dharma_class_bp.route("/admin")
+def class_admin():
+
+    return render_template_string("""
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+>
+
+<title>佛学班负责人中心</title>
+
+<link
+    rel="stylesheet"
+    href="/static/css/toolbox.css"
+>
+
+<style>
+
+/* =========================================================
+   负责人中心
+   ========================================================= */
+
+.admin-center-header {
+    background:
+        linear-gradient(
+            135deg,
+            #fff8e8,
+            #ffffff
+        );
+    border: 1px solid #f0d89b;
+}
+
+.admin-center-note {
+    margin-top: 15px;
+    padding: 14px 16px;
+
+    border-radius: 15px;
+    background: #f8fafc;
+    color: #666;
+
+    font-size: 17px;
+    line-height: 1.6;
+}
+
+.admin-section {
+    margin-top: 25px;
+}
+
+.admin-section-title {
+    margin-bottom: 12px;
+    font-size: 21px;
+    font-weight: 900;
+}
+
+.admin-tool-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 13px;
+}
+
+.admin-tool {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+
+    min-height: 82px;
+    padding: 15px 17px;
+
+    border: 1px solid #e4e7eb;
+    border-radius: 18px;
+
+    background: #fff;
+    color: #333;
+    text-decoration: none;
+
+    transition:
+        transform .15s ease,
+        box-shadow .15s ease;
+}
+
+.admin-tool:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 7px 20px rgba(0,0,0,.07);
+}
+
+.admin-tool-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    width: 48px;
+    height: 48px;
+    flex: 0 0 48px;
+
+    border-radius: 15px;
+    background: #eef6ff;
+
+    font-size: 25px;
+}
+
+.admin-tool-text {
+    min-width: 0;
+}
+
+.admin-tool-title {
+    font-size: 19px;
+    font-weight: 900;
+}
+
+.admin-tool-help {
+    margin-top: 4px;
+    color: #777;
+    font-size: 14px;
+    line-height: 1.4;
+}
+
+.tool-student .admin-tool-icon {
+    background: #fff2df;
+}
+
+.tool-teaching .admin-tool-icon {
+    background: #f1edff;
+}
+
+.tool-report .admin-tool-icon {
+    background: #e8f7ed;
+}
+
+.tool-system .admin-tool-icon {
+    background: #eef2f6;
+}
+                                  
+.admin-tool-grid-one{
+    grid-template-columns:1fr;
+}
+
+.compact-tool-row{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:14px;
+    margin:14px 0 24px;
+}
+
+.compact-tool-row a{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+
+    height:50px;
+
+    background:#fff8e8;
+    border:1px solid #f0d68a;
+    border-radius:14px;
+
+    color:#795d17;
+    text-decoration:none;
+    font-size:18px;
+    font-weight:700;
+
+    transition:.2s;
+}
+
+.compact-tool-row a:hover{
+    background:#ffe8a6;
+    transform:translateY(-1px);
+}
+
+@media (max-width: 680px) {
+
+    .admin-tool-grid {
+        grid-template-columns: 1fr;
+    }
+
+}
+
+</style>
+</head>
+
+<body>
+<div class="page">
+
+    <div class="card admin-center-header">
+
+        <h1 class="page-title">
+            ⚙️ 佛学班负责人中心
+        </h1>
+
+        <p class="page-subtitle">
+            学生、课程、报表及系统管理功能。
+        </p>
+
+        <div class="admin-center-note">
+            老师日常点名请使用首页的
+            “今日上课”。这里主要提供负责人管理功能。
+        </div>
+
+    </div>
+
+    <div class="card">
+
+        <!-- 学生管理 -->
+
+        <div class="admin-section">
+
+            <div class="admin-section-title">
+                👨‍🎓 学生管理
+            </div>
+
+            <div class="admin-tool-grid admin-tool-grid-one">
+
+                <a
+                    class="admin-tool tool-student"
+                    href="{{ url_for(
+                        'dharma_class.class_students'
+                    ) }}"
+                >
+                    <div class="admin-tool-icon">
+                        👧
+                    </div>
+
+                    <div class="admin-tool-text">
+                        <div class="admin-tool-title">
+                            学生名单
+                        </div>
+
+                        <div class="admin-tool-help">
+                            搜索、查看档案、编辑及新增学生
+                        </div>
+                    </div>
+                </a>
+
+            </div>
+
+            <div class="compact-tool-row">
+
+                <a href="/class/students/import">
+                    📥 导入学生 Excel
+                </a>
+
+                <a href="/class/students/export">
+                    📤 导出学生名单
+                </a>
+
+            </div>
+
+        </div>
+
+
+        <!-- 教学管理 -->
+
+        <div class="admin-section">
+
+            <div class="admin-section-title">
+                📖 教学管理
+            </div>
+
+            <div class="admin-tool-grid">
+
+                <a
+                    class="admin-tool tool-teaching"
+                    href="{{ url_for(
+                        'dharma_class.class_lessons'
+                    ) }}"
+                >
+                    <div class="admin-tool-icon">
+                        📖
+                    </div>
+
+                    <div class="admin-tool-text">
+                        <div class="admin-tool-title">
+                            课程记录
+                        </div>
+
+                        <div class="admin-tool-help">
+                            查看及编辑历次课程内容
+                        </div>
+                    </div>
+                </a>
+
+                <a
+                    class="admin-tool tool-teaching"
+                    href="{{ url_for(
+                        'dharma_class.class_records'
+                    ) }}"
+                >
+                    <div class="admin-tool-icon">
+                        📅
+                    </div>
+
+                    <div class="admin-tool-text">
+                        <div class="admin-tool-title">
+                            点名记录
+                        </div>
+
+                        <div class="admin-tool-help">
+                            按日期查看及修改点名资料
+                        </div>
+                    </div>
+                </a>
+
+            </div>
+
+        </div>
+
+
+        <!-- 报表 -->
+
+        <div class="admin-section">
+
+            <div class="admin-section-title">
+                📊 报表
+            </div>
+
+            <div class="admin-tool-grid admin-tool-grid-one">
+
+                <a
+                    class="admin-tool tool-report"
+                    href="{{ url_for(
+                        'dharma_class.class_reports'
+                    ) }}"
+                >
+                    <div class="admin-tool-icon">
+                        📊
+                    </div>
+
+                    <div class="admin-tool-text">
+                        <div class="admin-tool-title">
+                            报表中心
+                        </div>
+
+                        <div class="admin-tool-help">
+                            月报、年报及功课追踪表
+                        </div>
+                    </div>
+                </a>
+
+            </div>
+
+        </div>
+
+
+        <!-- 系统管理 -->
+
+        <div class="admin-section">
+
+            <div class="admin-section-title">
+                🛠️ 系统管理
+            </div>
+
+            <div class="admin-tool-grid">
+
+                <a
+                    class="admin-tool tool-system"
+                    href="{{ url_for(
+                        'dharma_class.class_audit_log'
+                    ) }}"
+                >
+                    <div class="admin-tool-icon">
+                        🛡️
+                    </div>
+
+                    <div class="admin-tool-text">
+                        <div class="admin-tool-title">
+                            修改记录
+                        </div>
+
+                        <div class="admin-tool-help">
+                            查看哪位老师修改了资料
+                        </div>
+                    </div>
+                </a>
+
+                <a
+                    class="admin-tool tool-system"
+                    href="/class/promote"
+                >
+                    <div class="admin-tool-icon">
+                        🎓
+                    </div>
+
+                    <div class="admin-tool-text">
+                        <div class="admin-tool-title">
+                            年度升班
+                        </div>
+
+                        <div class="admin-tool-help">
+                            处理学生年度组别调整
+                        </div>
+                    </div>
+                </a>
+
+            </div>
+
+        </div>
+
+
+        <div class="btn-row">
+
+            <a
+                class="btn-tool btn-secondary"
+                href="{{ url_for(
+                    'dharma_class.class_home'
+                ) }}"
+            >
+                ⬅ 返回老师首页
+            </a>
+
+        </div>
+
+    </div>
+
+</div>
+</body>
+</html>
+""")
 
 
 @dharma_class_bp.route("/attendance", methods=["GET", "POST"])
 def class_attendance():
 
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
+    
     malaysia_today = datetime.now(
         ZoneInfo("Asia/Kuala_Lumpur")
     ).date()
@@ -657,7 +1218,7 @@ def class_attendance():
         request.values.get("group_id")
         or ""
     ).strip()
-
+    
     with get_conn() as conn:
         with conn.cursor(
             cursor_factory=RealDictCursor
@@ -680,12 +1241,23 @@ def class_attendance():
             if not selected_group_id and groups:
                 selected_group_id = str(groups[0]["id"])
 
+            selected_group_name = ""
+
+            for group in groups:
+                if str(group["id"]) == str(selected_group_id):
+                    selected_group_name = group["name"]
+                    break
+
+            teacher_list = GROUP_TEACHERS.get(
+                selected_group_name,
+                []
+            )
+
             lesson = {
                 "teacher_name": "",
+                "record_teacher": "",
                 "topic": "",
-                "material": "",
-                "content": "",
-                "remark": ""
+                "content": ""
             }
 
             # =========================================================
@@ -698,23 +1270,18 @@ def class_attendance():
                     ""
                 ).strip()
 
+                record_teacher = request.form.get(
+                    "record_teacher",
+                    ""
+                ).strip()
+
                 topic = request.form.get(
                     "topic",
                     ""
                 ).strip()
 
-                material = request.form.get(
-                    "material",
-                    ""
-                ).strip()
-
                 content = request.form.get(
                     "content",
-                    ""
-                ).strip()
-
-                lesson_remark = request.form.get(
-                    "lesson_remark",
                     ""
                 ).strip()
 
@@ -724,10 +1291,9 @@ def class_attendance():
 
                 lesson = {
                     "teacher_name": teacher_name,
+                    "record_teacher": record_teacher,
                     "topic": topic,
-                    "material": material,
-                    "content": content,
-                    "remark": lesson_remark
+                    "content": content
                 }
 
                 if not selected_group_id:
@@ -738,12 +1304,53 @@ def class_attendance():
 
                 else:
 
+                    # 保存前先读取旧值，供 Audit Log 比较。
+                    sid_list = [int(sid) for sid in student_ids if str(sid).isdigit()]
+
+                    old_attendance_map = {}
+                    old_homework_map = {}
+                    student_name_map = {}
+
+                    if sid_list:
+                        cur.execute("""
+                            select id, name
+                            from dharma_students
+                            where id = any(%s)
+                        """, (sid_list,))
+                        student_name_map = {
+                            row["id"]: row["name"]
+                            for row in cur.fetchall()
+                        }
+
+                        cur.execute("""
+                            select student_id, status
+                            from dharma_attendance
+                            where branch = 'CHE'
+                              and class_date = %s
+                              and student_id = any(%s)
+                        """, (selected_date, sid_list))
+                        old_attendance_map = {
+                            row["student_id"]: row["status"]
+                            for row in cur.fetchall()
+                        }
+
+                        cur.execute("""
+                            select student_id, baihua_status, scripture_status
+                            from dharma_homework
+                            where branch = 'CHE'
+                              and class_date = %s
+                              and student_id = any(%s)
+                        """, (selected_date, sid_list))
+                        old_homework_map = {
+                            row["student_id"]: row
+                            for row in cur.fetchall()
+                        }
+
                     has_lesson_data = any([
                         teacher_name,
+                        record_teacher,
                         topic,
-                        material,
-                        content,
-                        lesson_remark
+                        content
                     ])
 
                     # -------------------------------------------------
@@ -753,21 +1360,29 @@ def class_attendance():
                     if has_lesson_data:
 
                         cur.execute("""
+                            select id, teacher_name, record_teacher, topic, content
+                            from dharma_class_lessons
+                            where branch = 'CHE'
+                              and lesson_date = %s
+                              and group_id = %s
+                            limit 1
+                        """, (selected_date, selected_group_id))
+                        old_lesson = cur.fetchone() or {}
+
+                        cur.execute("""
                             insert into dharma_class_lessons
                             (
                                 branch,
                                 lesson_date,
                                 group_id,
                                 teacher_name,
+                                record_teacher,
                                 topic,
-                                material,
-                                content,
-                                remark
+                                content
                             )
                             values
                             (
                                 'CHE',
-                                %s,
                                 %s,
                                 %s,
                                 %s,
@@ -783,21 +1398,40 @@ def class_attendance():
                             )
                             do update set
                                 teacher_name = excluded.teacher_name,
+                                record_teacher = excluded.record_teacher,
                                 topic = excluded.topic,
-                                material = excluded.material,
-                                content = excluded.content,
-                                remark = excluded.remark
+                                content = excluded.content
                         """, (
                             selected_date,
                             selected_group_id,
                             teacher_name or None,
+                            record_teacher or None,
                             topic or None,
-                            material or None,
-                            content or None,
-                            lesson_remark or None
+                            content or None
                         ))
 
-                    marked_by = teacher_name or "老师"
+                        lesson_changes = {
+                            "teacher_name": teacher_name or None,
+                            "record_teacher": record_teacher or None,
+                            "topic": topic or None,
+                            "content": content or None,
+                        }
+
+                        for field_name, new_value in lesson_changes.items():
+                            write_dharma_audit_log(
+                                cur,
+                                actor_name=record_teacher or teacher_name or "老师",
+                                action_type="update" if old_lesson else "create",
+                                entity_type="lesson",
+                                entity_id=old_lesson.get("id"),
+                                record_date=selected_date,
+                                group_id=selected_group_id,
+                                field_name=field_name,
+                                old_value=old_lesson.get(field_name),
+                                new_value=new_value,
+                            )
+
+                    marked_by = record_teacher or teacher_name or "老师"
 
                     # -------------------------------------------------
                     # 保存每位学生
@@ -893,6 +1527,27 @@ def class_attendance():
                             marked_by
                         ))
 
+                        sid_int = int(sid)
+                        student_name = student_name_map.get(sid_int, "")
+
+                        write_dharma_audit_log(
+                            cur,
+                            actor_name=marked_by,
+                            action_type=(
+                                "update"
+                                if sid_int in old_attendance_map
+                                else "create"
+                            ),
+                            entity_type="attendance",
+                            student_id=sid_int,
+                            student_name=student_name,
+                            record_date=selected_date,
+                            group_id=selected_group_id,
+                            field_name="status",
+                            old_value=old_attendance_map.get(sid_int),
+                            new_value=attendance_status,
+                        )
+
                         # ---------------------------------------------
                         # 至少记录了一项功课，才写入功课表
                         # ---------------------------------------------
@@ -945,6 +1600,44 @@ def class_attendance():
                                 marked_by
                             ))
 
+                            old_hw = old_homework_map.get(sid_int, {})
+
+                            write_dharma_audit_log(
+                                cur,
+                                actor_name=marked_by,
+                                action_type=(
+                                    "update"
+                                    if sid_int in old_homework_map
+                                    else "create"
+                                ),
+                                entity_type="homework",
+                                student_id=sid_int,
+                                student_name=student_name,
+                                record_date=selected_date,
+                                group_id=selected_group_id,
+                                field_name="baihua_status",
+                                old_value=old_hw.get("baihua_status"),
+                                new_value=baihua_status or None,
+                            )
+
+                            write_dharma_audit_log(
+                                cur,
+                                actor_name=marked_by,
+                                action_type=(
+                                    "update"
+                                    if sid_int in old_homework_map
+                                    else "create"
+                                ),
+                                entity_type="homework",
+                                student_id=sid_int,
+                                student_name=student_name,
+                                record_date=selected_date,
+                                group_id=selected_group_id,
+                                field_name="scripture_status",
+                                old_value=old_hw.get("scripture_status"),
+                                new_value=scripture_status or None,
+                            )
+
                     conn.commit()
 
                     if has_lesson_data:
@@ -972,10 +1665,9 @@ def class_attendance():
             cur.execute("""
                 select
                     teacher_name,
+                    record_teacher,
                     topic,
-                    material,
-                    content,
-                    remark
+                    content
                 from dharma_class_lessons
                 where branch = 'CHE'
                   and lesson_date = %s
@@ -997,9 +1689,10 @@ def class_attendance():
             cur.execute("""
                 select
                     s.id,
-                    s.student_no,
                     s.name,
                     s.english_name,
+                    s.gender,
+                    s.birth_year,
 
                     coalesce(
                         a.status,
@@ -1018,7 +1711,7 @@ def class_attendance():
                   and s.group_id = %s
 
                 order by
-                    s.student_no nulls last,
+                    s.birth_year desc nulls last,
                     s.name
             """, (
                 selected_date,
@@ -1026,6 +1719,18 @@ def class_attendance():
             ))
 
             students = cur.fetchall()
+
+            if selected_group_name == "少年组":
+
+                students.sort(
+                    key=lambda s: (
+                        0 if s["gender"] == "女"
+                        else 1 if s["gender"] == "男"
+                        else 2,
+                        -(s["birth_year"] or 0),
+                        s["name"]
+                    )
+                )
 
             # =========================================================
             # 读取学生功课
@@ -1079,8 +1784,8 @@ def class_attendance():
                         student["baihua_status"] = "absent"
                         student["scripture_status"] = "absent"
                     else:
-                        student["baihua_status"] = None
-                        student["scripture_status"] = None
+                        student["baihua_status"] = "submitted_done"
+                        student["scripture_status"] = "submitted_recited"
 
     return render_template_string("""
 <!doctype html>
@@ -1131,22 +1836,6 @@ def class_attendance():
 }
 
 /* =========================================================
-   快速操作
-   ========================================================= */
-
-.quick-actions {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
-    margin-bottom: 22px;
-}
-
-.quick-actions .btn-tool {
-    min-height: 58px;
-    font-size: 18px;
-}
-
-/* =========================================================
    学生卡片
    ========================================================= */
 
@@ -1162,22 +1851,10 @@ def class_attendance():
     box-shadow: 0 3px 10px rgba(0, 0, 0, 0.04);
 }
 
-/* 四种柔和底色循环 */
-
-.student-card:nth-child(4n+1) {
-    background: #f0f7ff;
-}
-
-.student-card:nth-child(4n+2) {
-    background: #fff2f6;
-}
-
-.student-card:nth-child(4n+3) {
-    background: #f4fbf1;
-}
-
-.student-card:nth-child(4n+4) {
-    background: #fffbed;
+/* 统一白色学生卡，避免颜色被误解为缺席状态 */
+.student-card {
+    background: #ffffff;
+    border-left: 6px solid #e7bd4f;
 }
 
 .student-header {
@@ -1187,21 +1864,43 @@ def class_attendance():
     margin-bottom: 16px;
 }
 
-.student-number {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 38px;
-    height: 38px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.85);
-    font-size: 18px;
-    font-weight: 900;
-    flex: 0 0 38px;
+.student-number{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    width:46px;
+    height:46px;
+    flex:0 0 46px;
+    border-radius:50%;
+    font-size:22px;
+    font-weight:900;
 }
 
+.student-number-boy{
+
+    background:#EAF6FF;
+    border:2px solid #7EC8F8;
+    color:#1565C0;
+
+}
+
+.student-number-girl{
+
+    background:#FFF1F7;
+    border:2px solid #F5A3C7;
+    color:#C2185B;
+
+}
+
+.student-number-unknown{
+    background:#FFF8DF;
+    border:2px solid #F0C94E;
+    color:#7A5A00;
+
+}
+                                  
 .student-name {
-    font-size: 24px;
+    font-size: 40px;
     font-weight: 900;
 }
 
@@ -1210,6 +1909,18 @@ def class_attendance():
     font-size: 17px;
     font-weight: 400;
     margin-left: 6px;
+}
+                                  
+.student-card-1{
+    background:#FFF8E8;   /* 莲花米黄（比现在明显一点） */
+}
+
+.student-card-2{
+    background:#E8F4FF;   /* 天空蓝 */
+}
+
+.student-card-3{
+    background:#F5FFF2;   /* 莲花绿 */
 }
 
 /* =========================================================
@@ -1232,15 +1943,22 @@ def class_attendance():
    出席按钮
    ========================================================= */
 
-.attendance-options {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 9px;
+.attendance-options{
+    display:grid;
+    gap:9px;
+}
+
+.attendance-options-3{
+    grid-template-columns:repeat(3, 1fr);
+}
+
+.attendance-options-4{
+    grid-template-columns:repeat(4, 1fr);
 }
 
 .homework-options {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     gap: 9px;
 }
 
@@ -1373,23 +2091,41 @@ def class_attendance():
         padding-right: 5px;
     }
 }
+                                  
+.teacher-grid{
+
+    display:grid;
+
+    grid-template-columns:1fr 1fr;
+
+    gap:16px;
+
+    margin-bottom:16px;
+
+}
+
+@media (max-width:700px){
+
+    .teacher-grid{
+
+        grid-template-columns:1fr;
+
+    }
+
+}
 
 /* =========================================================
    手机
    ========================================================= */
 
-@media (max-width: 800px) {
+@media (max-width: 800px){
 
-    .quick-actions {
-        grid-template-columns: 1fr;
+    .attendance-options-3{
+        grid-template-columns:repeat(3, 1fr);
     }
 
-    .attendance-options {
-        grid-template-columns: repeat(2, 1fr);
-    }
-
-    .student-card {
-        padding: 16px;
+    .attendance-options-4{
+        grid-template-columns:repeat(2, 1fr);
     }
 }
 
@@ -1531,79 +2267,92 @@ def class_attendance():
         <div class="card">
 
             <h2 class="section-title">
-                📖 课程记录
+                📖 教课记录
             </h2>
 
             <div class="lesson-note">
-                补录以前的点名时，老师和课题可以留空。
-                有填写课程资料时，系统才会建立课程记录。
+                请填写教课老师、记录老师及简单课程内容，下面即可开始点名。
+            </div>
+
+            <div class="teacher-grid">
+
+                <div class="form-group">
+
+                    <label class="form-label">
+                        🎤 教课老师
+                    </label>
+
+                    <select
+                        class="form-input"
+                        name="teacher_name">
+
+                        <option value="">
+                            请选择教课老师
+                        </option>
+
+                        {% for teacher in teacher_list %}
+
+                            <option
+                                value="{{ teacher }}"
+                                {% if lesson.teacher_name == teacher %}
+                                    selected
+                                {% endif %}
+                            >
+                                {{ teacher }}
+                            </option>
+
+                        {% endfor %}
+
+                    </select>
+
+                </div>
+
+                <div class="form-group">
+
+                    <label class="form-label">
+                        📝 记录老师
+                    </label>
+
+                    <select
+                        class="form-input"
+                        name="record_teacher">
+
+                        <option value="">
+                            请选择记录老师
+                        </option>
+
+                        {% for teacher in teacher_list %}
+
+                            <option
+                                value="{{ teacher }}"
+                                {% if lesson.record_teacher == teacher %}
+                                    selected
+                                {% endif %}
+                            >
+                                {{ teacher }}
+                            </option>
+
+                        {% endfor %}
+
+                    </select>
+
+                </div>
+
             </div>
 
             <div class="form-group">
                 <label class="form-label">
-                    负责老师
-                </label>
-
-                <input
-                    class="form-input"
-                    name="teacher_name"
-                    value="{{ lesson.teacher_name or '' }}"
-                    placeholder="补录旧点名时可不填"
-                >
-            </div>
-
-            <div class="form-group">
-                <label class="form-label">
-                    今日课题
+                    📖 今日课题
                 </label>
 
                 <input
                     class="form-input"
                     name="topic"
                     value="{{ lesson.topic or '' }}"
-                    placeholder="补录旧点名时可不填"
+                    placeholder="例如：学习慈悲"
                 >
             </div>
-
-            <div class="form-group">
-                <label class="form-label">
-                    教材／教学资源
-                </label>
-
-                <input
-                    class="form-input"
-                    name="material"
-                    value="{{ lesson.material or '' }}"
-                    placeholder="例如：故事、影片、白话佛法"
-                >
-            </div>
-
-            <div class="form-group">
-                <label class="form-label">
-                    教学内容
-                </label>
-
-                <textarea
-                    class="form-input"
-                    name="content"
-                    rows="3"
-                    placeholder="可不填"
-                >{{ lesson.content or '' }}</textarea>
-            </div>
-
-            <div class="form-group">
-                <label class="form-label">
-                    课程备注
-                </label>
-
-                <textarea
-                    class="form-input"
-                    name="lesson_remark"
-                    rows="2"
-                    placeholder="可不填"
-                >{{ lesson.remark or '' }}</textarea>
-            </div>
-
+            
         </div>
 
         <!-- =================================================
@@ -1616,39 +2365,14 @@ def class_attendance():
                 📝 学生点名与功课
             </h2>
 
-            <div class="quick-actions">
-
-                <button
-                    class="btn-tool btn-success"
-                    type="button"
-                    onclick="markAllPresent()"
-                >
-                    ✅ 全部出席
-                </button>
-
-                <button
-                    class="btn-tool btn-purple"
-                    type="button"
-                    onclick="markAllBaihuaSubmitted()"
-                >
-                    📚 白话全部有交
-                </button>
-
-                <button
-                    class="btn-tool btn-primary"
-                    type="button"
-                    onclick="markAllScriptureSubmitted()"
-                >
-                    📿 经文全部有交有念
-                </button>
-
-            </div>
-
             <div class="student-list">
 
                 {% for s in students %}
 
-                    <div class="student-card">
+                    <div class="
+                    student-card
+                    student-card-{{ (loop.index0 % 3)+1 }}
+                    ">
 
                         <input
                             type="hidden"
@@ -1658,7 +2382,16 @@ def class_attendance():
 
                         <div class="student-header">
 
-                            <div class="student-number">
+                            <div class="
+                                student-number
+                                {% if s.gender == '男' %}
+                                    student-number-boy
+                                {% elif s.gender == '女' %}
+                                    student-number-girl
+                                {% else %}
+                                    student-number-unknown
+                                {% endif %}
+                            ">
                                 {{ loop.index }}
                             </div>
 
@@ -1684,48 +2417,56 @@ def class_attendance():
                                 📝 出席情况
                             </div>
 
-                            <div class="attendance-options">
+                            <div class="
+                                attendance-options
+                                {% if selected_group_name == '少年组' %}
+                                    attendance-options-4
+                                {% else %}
+                                    attendance-options-3
+                                {% endif %}
+                            ">
 
                                 {% for key, label in status_labels.items() %}
 
-                                    <label class="
-                                        choice-option
-                                        {% if key == 'present' %}
-                                            choice-present
-                                        {% elif key == 'late' %}
-                                            choice-late
-                                        {% elif key == 'farm' %}
-                                            choice-farm
-                                        {% elif key == 'absent' %}
-                                            choice-absent
-                                        {% endif %}
-                                    ">
+                                    {% if key != "farm" or selected_group_name == "少年组" %}
 
-                                        <input
-                                            type="radio"
-                                            name="status_{{ s.id }}"
-                                            value="{{ key }}"
-                                            {% if
-                                                s.attendance_status
-                                                == key
-                                            %}
-                                                checked
+                                        <label class="
+                                            choice-option
+                                            {% if key == 'present' %}
+                                                choice-present
+                                            {% elif key == 'late' %}
+                                                choice-late
+                                            {% elif key == 'farm' %}
+                                                choice-farm
+                                            {% elif key == 'absent' %}
+                                                choice-absent
                                             {% endif %}
-                                        >
+                                        ">
 
-                                        {% if key == "present" %}
-                                            ✅
-                                        {% elif key == "late" %}
-                                            ⏰
-                                        {% elif key == "farm" %}
-                                            🌱
-                                        {% elif key == "absent" %}
-                                            ❌
-                                        {% endif %}
+                                            <input
+                                                type="radio"
+                                                name="status_{{ s.id }}"
+                                                value="{{ key }}"
+                                                {% if s.attendance_status == key %}
+                                                    checked
+                                                {% endif %}
+                                            >
 
-                                        {{ label }}
+                                            {% if key == "present" %}
+                                                ✅
+                                            {% elif key == "absent" %}
+                                                ❌
+                                            {% elif key == "late" %}
+                                                ⏰
+                                            {% elif key == "farm" %}
+                                                🌱
+                                            {% endif %}
 
-                                    </label>
+                                            {{ label }}
+
+                                        </label>
+
+                                    {% endif %}
 
                                 {% endfor %}
 
@@ -1751,9 +2492,14 @@ def class_attendance():
                                 </label>
 
                                 <label class="choice-option choice-missing">
-                                    <input type="radio" name="baihua_{{ s.id }}"
-                                           value="missing"
-                                           {% if s.baihua_status == "missing" %}checked{% endif %}>
+                                    <input
+                                        type="radio"
+                                        name="baihua_{{ s.id }}"
+                                        value="missing"
+                                        {% if s.baihua_status in ["missing", "absent"] %}
+                                            checked
+                                        {% endif %}
+                                    >
                                     ✗ 没交
                                 </label>
 
@@ -1763,14 +2509,7 @@ def class_attendance():
                                            {% if s.baihua_status == "submitted_no_answer" %}checked{% endif %}>
                                     ○ 有交，没做题
                                 </label>
-
-                                <label class="choice-option choice-homework-absent">
-                                    <input type="radio" name="baihua_{{ s.id }}"
-                                           value="absent"
-                                           {% if s.baihua_status == "absent" %}checked{% endif %}>
-                                    缺 缺席
-                                </label>
-
+                                
                             </div>
 
                         </div>
@@ -1780,7 +2519,7 @@ def class_attendance():
                         <div class="student-section">
 
                             <div class="student-section-title">
-                                📿 念经文功课
+                                📿 经文功课
                             </div>
 
                             <div class="homework-options">
@@ -1800,19 +2539,17 @@ def class_attendance():
                                 </label>
 
                                 <label class="choice-option choice-missing">
-                                    <input type="radio" name="scripture_{{ s.id }}"
-                                           value="missing"
-                                           {% if s.scripture_status == "missing" %}checked{% endif %}>
+                                    <input
+                                        type="radio"
+                                        name="scripture_{{ s.id }}"
+                                        value="missing"
+                                        {% if s.scripture_status in ["missing", "absent"] %}
+                                            checked
+                                        {% endif %}
+                                    >
                                     ✗ 没交
                                 </label>
-
-                                <label class="choice-option choice-homework-absent">
-                                    <input type="radio" name="scripture_{{ s.id }}"
-                                           value="absent"
-                                           {% if s.scripture_status == "absent" %}checked{% endif %}>
-                                    缺 缺席
-                                </label>
-
+                                
                             </div>
 
                         </div>
@@ -1824,14 +2561,7 @@ def class_attendance():
             </div>
 
             <div class="btn-row">
-
-                <button
-                    class="btn-tool btn-success"
-                    type="submit"
-                >
-                    💾 保存课程、点名与功课
-                </button>
-
+                
             </div>
 
         </div>
@@ -1904,51 +2634,6 @@ def class_attendance():
 
 <script>
 
-/* =========================================================
-   全部出席
-   ========================================================= */
-
-function markAllPresent() {
-
-    document
-        .querySelectorAll(
-            'input[type="radio"][value="present"]'
-        )
-        .forEach(function(radio) {
-            radio.checked = true;
-        });
-}
-
-
-/* =========================================================
-   白话佛法全部已交
-   同时自动设为出席
-   ========================================================= */
-
-function markAllBaihuaSubmitted() {
-    document
-        .querySelectorAll(
-            'input[name^="baihua_"][value="submitted_done"]'
-        )
-        .forEach(function(radio) {
-            radio.checked = true;
-            const studentId = radio.name.replace("baihua_", "");
-            markStudentPresentIfNeeded(studentId);
-        });
-}
-
-function markAllScriptureSubmitted() {
-    document
-        .querySelectorAll(
-            'input[name^="scripture_"][value="submitted_recited"]'
-        )
-        .forEach(function(radio) {
-            radio.checked = true;
-            const studentId = radio.name.replace("scripture_", "");
-            markStudentPresentIfNeeded(studentId);
-        });
-}
-
 function markStudentPresentIfNeeded(studentId) {
     const selected = document.querySelector(
         'input[name="status_' + studentId + '"]:checked'
@@ -1979,6 +2664,33 @@ function markStudentHomeworkAbsent(studentId) {
 
     if (baihuaAbsent) baihuaAbsent.checked = true;
     if (scriptureAbsent) scriptureAbsent.checked = true;
+}
+
+function markStudentHomeworkAbsent(studentId) {
+
+    // 页面已经取消功课“缺席”按钮，
+    // 所以学生缺席时，画面自动选中“没交”。
+    const baihuaMissing = document.querySelector(
+        'input[name="baihua_' + studentId + '"][value="missing"]'
+    );
+
+    const scriptureMissing = document.querySelector(
+        'input[name="scripture_' + studentId + '"][value="missing"]'
+    );
+
+    if (baihuaMissing) {
+        baihuaMissing.checked = true;
+        baihuaMissing.dispatchEvent(
+            new Event("change", { bubbles: true })
+        );
+    }
+
+    if (scriptureMissing) {
+        scriptureMissing.checked = true;
+        scriptureMissing.dispatchEvent(
+            new Event("change", { bubbles: true })
+        );
+    }
 }
 
 function goTop(){
@@ -2030,6 +2742,22 @@ document.addEventListener(
 
                     if (this.value === "absent") {
                         markStudentHomeworkAbsent(studentId);
+                    } else {
+                        const baihuaSelected = document.querySelector(
+                            'input[name="baihua_' + studentId + '"]:checked'
+                        );
+                        const scriptureSelected = document.querySelector(
+                            'input[name="scripture_' + studentId + '"]:checked'
+                        );
+
+                        if (
+                            !baihuaSelected
+                            || baihuaSelected.value === "absent"
+                            || !scriptureSelected
+                            || scriptureSelected.value === "absent"
+                        ) {
+                            markStudentHomeworkDefault(studentId);
+                        }
                     }
                 });
             });
@@ -2045,10 +2773,12 @@ document.addEventListener(
         students=students,
         selected_date=selected_date,
         selected_group_id=selected_group_id,
+        selected_group_name=selected_group_name,
         status_labels=STATUS_LABELS,
         baihua_status_labels=BAIHUA_STATUS_LABELS,
         scripture_status_labels=SCRIPTURE_STATUS_LABELS,
-        lesson=lesson
+        lesson=lesson,
+        teacher_list=teacher_list
     )
 
 @dharma_class_bp.route("/lessons")
@@ -2670,9 +3400,9 @@ def class_lessons():
         <div class="btn-row">
             <a
                 class="btn-tool btn-secondary"
-                href="/class"
+                href="{{ url_for('dharma_class.class_admin') }}"
             >
-                ⬅ 返回佛学班首页
+                ⬅ 返回负责人中心
             </a>
         </div>
 
@@ -2694,10 +3424,7 @@ def class_lessons():
 
 @dharma_class_bp.route("/students")
 def class_students():
-
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
+   
     current_year = datetime.now(
         ZoneInfo("Asia/Kuala_Lumpur")
     ).year
@@ -2750,8 +3477,7 @@ def class_students():
                         or s.english_name ilike %s
                         or s.parent_name ilike %s
                         or s.parent_phone ilike %s
-                        or s.student_no ilike %s
-                    )
+                        )
                 """
 
                 params.extend([
@@ -2765,7 +3491,6 @@ def class_students():
             cur.execute(f"""
                 select
                     s.id,
-                    s.student_no,
                     s.name,
                     s.english_name,
                     s.gender,
@@ -2783,11 +3508,49 @@ def class_students():
                 {where_sql}
                 order by
                     g.sort_order,
-                    s.student_no nulls last,
                     s.name
             """, params)
 
             students = cur.fetchall()
+
+            def student_list_sort_key(student):
+
+                group_name = student["group_name"] or ""
+                birth_year = student["birth_year"]
+                gender = student["gender"] or ""
+
+                # 没有出生年份的排最后
+                no_birth_year = 1 if not birth_year else 0
+
+                # 年龄小到大：
+                # 出生年份越大，年龄越小
+                birth_order = -birth_year if birth_year else 0
+
+                if group_name == "少年组":
+
+                    if gender == "女":
+                        gender_order = 0
+                    elif gender == "男":
+                        gender_order = 1
+                    else:
+                        gender_order = 2
+
+                else:
+                    gender_order = 0
+
+                return (
+                    student["group_sort_order"]
+                    if student["group_sort_order"] is not None
+                    else 999,
+
+                    gender_order,
+                    no_birth_year,
+                    birth_order,
+                    student["name"] or "",
+                )
+
+
+            students.sort(key=student_list_sort_key)
 
     return render_template_string("""
 <!doctype html>
@@ -2846,7 +3609,34 @@ def class_students():
     padding: 8px 12px;
     white-space: nowrap;
 }
+                                  
+.bottom-bar{
 
+    position:fixed;
+    left:0;
+    right:0;
+    bottom:0;
+
+    display:flex;
+    justify-content:center;
+    gap:18px;
+
+    padding:10px 14px;
+
+    background:#fff;
+
+    border-top:1px solid #ddd;
+    box-shadow:0 -4px 12px rgba(0,0,0,.08);
+
+    z-index:9999;
+
+}
+
+                                  
+body{
+    padding-bottom:90px;
+}
+                                  
 @media (max-width: 700px) {
     .student-table {
         min-width: 1200px;
@@ -2893,7 +3683,7 @@ def class_students():
                     class="form-input"
                     name="q"
                     value="{{ q or '' }}"
-                    placeholder="姓名／英文名／监护人／电话／编号"
+                    placeholder="姓名／英文名／监护人／电话"
                 >
             </div>
 
@@ -2997,7 +3787,7 @@ def class_students():
     <div class="card">
 
         <h2 class="section-title">
-            学生列表
+            学生名单
         </h2>
 
         {% if students %}
@@ -3008,7 +3798,6 @@ def class_students():
 
                     <thead>
                         <tr>
-                            <th>编号</th>
                             <th>姓名</th>
                             <th>英文名</th>
                             <th>性别</th>
@@ -3026,11 +3815,7 @@ def class_students():
 
                         {% for s in students %}
                         <tr>
-
-                            <td>
-                                {{ s.student_no or "—" }}
-                            </td>
-
+                            
                             <td class="student-name">
                                 {{ s.name }}
                             </td>
@@ -3100,28 +3885,51 @@ def class_students():
 
                 </table>
 
+                    </div>
+
+                {% else %}
+
+                    <div class="empty-state">
+                        没有找到符合条件的学生资料。
+                    </div>
+
+                {% endif %}
+
             </div>
 
-        {% else %}
+            <div class="bottom-bar">
 
-            <div class="empty-state">
-                没有找到符合条件的学生资料。
+                <a
+                    class="btn-tool btn-secondary"
+                    href="{{ url_for('dharma_class.class_admin') }}"
+                >
+                    ← 返回
+                </a>
+
+                
+
+                <button
+                    type="button"
+                    class="btn-tool btn-primary"
+                    onclick="goTop()"
+                >
+                    ↑ 顶部
+                </button>
+
             </div>
 
-        {% endif %}
-
-        <div class="btn-row">
-            <a
-                class="btn-tool btn-secondary"
-                href="/class"
-            >
-                ⬅ 返回佛学班首页
-            </a>
         </div>
 
-    </div>
-
 </div>
+<script>
+function goTop() {
+    window.scrollTo({
+        top: 0,
+        left: 0,
+        behavior: "smooth"
+    });
+}
+</script>
 </body>
 </html>
 """,
@@ -3147,7 +3955,6 @@ def class_student_search():
                 cur.execute("""
                     select
                         s.id,
-                        s.student_no,
                         s.name,
                         s.english_name,
                         s.parent_name,
@@ -3161,18 +3968,15 @@ def class_student_search():
                       and (
                             s.name ilike %s
                          or coalesce(s.english_name, '') ilike %s
-                         or coalesce(s.student_no, '') ilike %s
                          or coalesce(s.parent_name, '') ilike %s
                          or coalesce(s.parent_phone, '') ilike %s
                       )
                     order by
                         case when s.status = 'active' then 0 else 1 end,
                         g.sort_order,
-                        s.student_no nulls last,
                         s.name
                     limit 50
                 """, (
-                    like,
                     like,
                     like,
                     like,
@@ -3226,7 +4030,7 @@ def class_student_search():
     <div class="card">
         <h1 class="page-title">🔎 搜索学生个人档案</h1>
         <p class="page-subtitle">
-            可使用中文姓名、英文名、学生编号或联系电话搜索。
+            可使用中文姓名、英文名、或联系电话搜索。
         </p>
 
         <form method="get">
@@ -3236,7 +4040,7 @@ def class_student_search():
                     class="form-input"
                     name="q"
                     value="{{ q }}"
-                    placeholder="例如：萧呈轩"
+                    placeholder="例如：陈小明"
                     autofocus
                     required
                 >
@@ -3267,7 +4071,6 @@ def class_student_search():
                         </div>
 
                         <div class="search-result-meta">
-                            编号：{{ s.student_no or '—' }}<br>
                             组别：{{ s.group_name or '—' }}<br>
                             父／母／监护人：{{ s.parent_name or '—' }}<br>
                             电话：{{ s.parent_phone or '—' }}<br>
@@ -3301,8 +4104,11 @@ def class_student_search():
         {% endif %}
 
         <div class="btn-row">
-            <a class="btn-tool btn-secondary" href="{{ url_for('dharma_class.class_home') }}">
-                ⬅ 返回佛学班首页
+            <a
+                class="btn-tool btn-secondary"
+                href="{{ url_for('dharma_class.class_admin') }}"
+            >
+                ⬅ 返回负责人中心
             </a>
         </div>
     </div>
@@ -3343,7 +4149,6 @@ def class_student_profile(student_id):
                 select
                     s.id,
                     s.branch,
-                    s.student_no,
                     s.name,
                     s.english_name,
                     s.gender,
@@ -3499,11 +4304,20 @@ def class_student_profile(student_id):
             ("—", "未记录", "empty")
         )
 
-    attended = (
-        attendance_count["present"]
-        + attendance_count["late"]
-        + attendance_count["farm"]
-    )
+    if student["group_name"] == "少年组":
+
+        attended = (
+            attendance_count["present"]
+            + attendance_count["late"]
+            + attendance_count["farm"]
+        )
+
+    else:
+
+        attended = (
+            attendance_count["present"]
+            + attendance_count["late"]
+        )
     attendance_denominator = attended + attendance_count["absent"]
     attendance_rate = (
         round(attended * 100 / attendance_denominator, 1)
@@ -3557,9 +4371,17 @@ def class_student_profile(student_id):
 }
 .profile-summary-grid{
     display:grid;
-    grid-template-columns:repeat(5,1fr);
+    grid-template-columns:repeat(5,minmax(0,1fr));
     gap:11px;
     margin-top:16px;
+}
+
+.profile-summary-grid-4{
+    grid-template-columns:repeat(4,minmax(0,1fr));
+}
+
+.profile-summary-grid-5{
+    grid-template-columns:repeat(5,minmax(0,1fr));
 }
 .profile-summary-box{
     border-radius:15px;
@@ -3598,7 +4420,15 @@ def class_student_profile(student_id):
 .status-empty{background:#f3f4f6;color:#666;}
 .profile-table{min-width:1000px;}
 @media(max-width:850px){
-    .profile-summary-grid{grid-template-columns:repeat(2,1fr);}
+    .profile-summary-grid{
+        grid-template-columns:repeat(2, 1fr) !important;
+    }
+}
+
+@media(max-width:480px){
+    .profile-summary-grid{
+        grid-template-columns:1fr !important;
+    }
 }
 </style>
 </head>
@@ -3616,14 +4446,29 @@ def class_student_profile(student_id):
         </div>
 
         <div class="profile-meta">
-            编号：{{ student.student_no or '—' }} ｜
-            组别：{{ student.group_name or '—' }} ｜
-            性别：{{ student.gender or '—' }} ｜
-            出生年份：{{ student.birth_year or '—' }}<br>
-            父／母／监护人：{{ student.parent_name or '—' }} ｜
-            电话：{{ student.parent_phone or '—' }} ｜
-            状态：{{ student.status or '—' }}<br>
+
+            组别：{{ student.group_name or '—' }}
+            ｜
+            {{ student.gender or '—' }}
+            ｜
+            {% if student.birth_year %}
+                {{ selected_year - student.birth_year }}岁
+            {% else %}
+                —
+            {% endif %}
+
+            <br>
+
+            父／母／监护人：{{ student.parent_name or '—' }}
+            ｜
+            电话：{{ student.parent_phone or '—' }}
+            ｜
+            状态：{{ student.status or '—' }}
+
+            <br>
+
             备注：{{ student.remark or '—' }}
+
         </div>
 
         <div class="btn-row">
@@ -3670,12 +4515,42 @@ def class_student_profile(student_id):
 
     <div class="card">
         <h2 class="section-title">📝 {{ selected_year }}年出席总览</h2>
-        <div class="profile-summary-grid">
-            <div class="profile-summary-box"><div class="profile-summary-label">课程记录</div><div class="profile-summary-number">{{ records|length }}</div></div>
-            <div class="profile-summary-box"><div class="profile-summary-label">出席</div><div class="profile-summary-number">{{ attendance_count.present }}</div></div>
-            <div class="profile-summary-box"><div class="profile-summary-label">迟到</div><div class="profile-summary-number">{{ attendance_count.late }}</div></div>
-            <div class="profile-summary-box"><div class="profile-summary-label">农舍</div><div class="profile-summary-number">{{ attendance_count.farm }}</div></div>
-            <div class="profile-summary-box"><div class="profile-summary-label">缺席</div><div class="profile-summary-number">{{ attendance_count.absent }}</div></div>
+        <div class="
+            profile-summary-grid
+            {% if student.group_name == '少年组' %}
+                profile-summary-grid-5
+            {% else %}
+                profile-summary-grid-4
+            {% endif %}
+        ">
+
+            <div class="profile-summary-box">
+                <div class="profile-summary-label">课程记录</div>
+                <div class="profile-summary-number">{{ records|length }}</div>
+            </div>
+
+            <div class="profile-summary-box">
+                <div class="profile-summary-label">出席</div>
+                <div class="profile-summary-number">{{ attendance_count.present }}</div>
+            </div>
+
+            <div class="profile-summary-box">
+                <div class="profile-summary-label">迟到</div>
+                <div class="profile-summary-number">{{ attendance_count.late }}</div>
+            </div>
+
+            {% if student.group_name == "少年组" %}
+                <div class="profile-summary-box">
+                    <div class="profile-summary-label">农舍</div>
+                    <div class="profile-summary-number">{{ attendance_count.farm }}</div>
+                </div>
+            {% endif %}
+
+            <div class="profile-summary-box">
+                <div class="profile-summary-label">缺席</div>
+                <div class="profile-summary-number">{{ attendance_count.absent }}</div>
+            </div>
+
         </div>
         <div class="profile-rate">全年出席率：{{ attendance_rate ~ '%' if attendance_rate is not none else '—' }}</div>
     </div>
@@ -3692,7 +4567,7 @@ def class_student_profile(student_id):
     </div>
 
     <div class="card">
-        <h2 class="section-title">📿 念经文功课</h2>
+        <h2 class="section-title">📿 经文功课</h2>
         <div class="profile-summary-grid">
             <div class="profile-summary-box"><div class="profile-summary-label">✓ 有交有念</div><div class="profile-summary-number">{{ scripture_count.full }}</div></div>
             <div class="profile-summary-box"><div class="profile-summary-label">○ 有交没念</div><div class="profile-summary-number">{{ scripture_count.partial }}</div></div>
@@ -3795,7 +4670,6 @@ def class_student_profile_export(student_id):
             cur.execute("""
                 select
                     s.id,
-                    s.student_no,
                     s.name,
                     s.english_name,
                     s.gender,
@@ -3892,7 +4766,6 @@ def class_student_profile_export(student_id):
     ws.row_dimensions[1].height = 34
 
     details = [
-        ("学生编号", student["student_no"] or "—"),
         ("中文姓名", student["name"] or "—"),
         ("英文名", student["english_name"] or "—"),
         ("组别", student["group_name"] or "—"),
@@ -3986,7 +4859,6 @@ def class_students_add():
     ).year
 
     form_data = {
-        "student_no": "",
         "name": "",
         "english_name": "",
         "gender": "",
@@ -4009,11 +4881,7 @@ def class_students_add():
             groups = cur.fetchall()
 
             if request.method == "POST":
-
-                student_no = request.form.get(
-                    "student_no", ""
-                ).strip()
-
+                
                 name = request.form.get(
                     "name", ""
                 ).strip()
@@ -4059,7 +4927,6 @@ def class_students_add():
                 )
 
                 form_data = {
-                    "student_no": student_no,
                     "name": name,
                     "english_name": english_name,
                     "gender": gender,
@@ -4093,7 +4960,6 @@ def class_students_add():
                         insert into dharma_students
                         (
                             branch,
-                            student_no,
                             name,
                             english_name,
                             gender,
@@ -4119,7 +4985,6 @@ def class_students_add():
                             %s
                         )
                     """, (
-                        student_no or None,
                         name,
                         english_name or None,
                         gender,
@@ -4176,19 +5041,6 @@ def class_students_add():
         {% endwith %}
 
         <form method="post">
-
-            <div class="form-group">
-                <label class="form-label">
-                    学生编号
-                </label>
-
-                <input
-                    class="form-input"
-                    name="student_no"
-                    value="{{ form_data.student_no }}"
-                    placeholder="可不填，例如：S001"
-                >
-            </div>
 
             <div class="form-group">
                 <label class="form-label">
@@ -4399,6 +5251,7 @@ def class_students_edit(student_id):
             """, (student_id,))
 
             student = cur.fetchone()
+            original_student = dict(student) if student else None
 
             if not student:
                 flash("找不到这个学生。", "bad")
@@ -4424,6 +5277,20 @@ def class_students_edit(student_id):
                         where id = %s
                     """, (student_id,))
 
+                    write_dharma_audit_log(
+                        cur,
+                        actor_name="管理员",
+                        action_type="update",
+                        entity_type="student",
+                        entity_id=student_id,
+                        student_id=student_id,
+                        student_name=original_student.get("name"),
+                        group_id=original_student.get("group_id"),
+                        field_name="student_status",
+                        old_value=original_student.get("status"),
+                        new_value="inactive",
+                    )
+
                     conn.commit()
 
                     flash("学生已暂停。", "good")
@@ -4435,11 +5302,7 @@ def class_students_edit(student_id):
                     )
 
                 # 读取表单资料
-                student_no = request.form.get(
-                    "student_no",
-                    ""
-                ).strip()
-
+                
                 name = request.form.get(
                     "name",
                     ""
@@ -4494,7 +5357,6 @@ def class_students_edit(student_id):
 
                 # 将刚提交的资料放回 student
                 # 验证失败时，页面会保留用户刚输入的内容
-                student["student_no"] = student_no
                 student["name"] = name
                 student["english_name"] = english_name
                 student["gender"] = gender
@@ -4543,7 +5405,6 @@ def class_students_edit(student_id):
                     cur.execute("""
                         update dharma_students
                         set
-                            student_no = %s,
                             name = %s,
                             english_name = %s,
                             gender = %s,
@@ -4554,7 +5415,6 @@ def class_students_edit(student_id):
                             remark = %s
                         where id = %s
                     """, (
-                        student_no or None,
                         name,
                         english_name or None,
                         gender,
@@ -4565,6 +5425,32 @@ def class_students_edit(student_id):
                         remark or None,
                         student_id
                     ))
+
+                    student_changes = {
+                        "name": name,
+                        "english_name": english_name or None,
+                        "gender": gender,
+                        "birth_year": birth_year,
+                        "parent_name": parent_name or None,
+                        "parent_phone": parent_phone or None,
+                        "group_id": group_id,
+                        "remark": remark or None,
+                    }
+
+                    for field_name, new_value in student_changes.items():
+                        write_dharma_audit_log(
+                            cur,
+                            actor_name="管理员",
+                            action_type="update",
+                            entity_type="student",
+                            entity_id=student_id,
+                            student_id=student_id,
+                            student_name=name,
+                            group_id=group_id,
+                            field_name=field_name,
+                            old_value=original_student.get(field_name),
+                            new_value=new_value,
+                        )
 
                     conn.commit()
 
@@ -4626,20 +5512,7 @@ def class_students_edit(student_id):
         {% endwith %}
 
         <form method="post">
-
-            <div class="form-group">
-                <label class="form-label">
-                    学生编号
-                </label>
-
-                <input
-                    class="form-input"
-                    name="student_no"
-                    value="{{ student.student_no or '' }}"
-                    placeholder="例如：S001"
-                >
-            </div>
-
+            
             <div class="form-group">
                 <label class="form-label">
                     中文姓名
@@ -4837,6 +5710,145 @@ def class_students_edit(student_id):
         current_year=current_year
     )
 
+@dharma_class_bp.route("/audit")
+def class_audit_log():
+
+    q = request.args.get("q", "").strip()
+    actor = request.args.get("actor", "").strip()
+    entity_type = request.args.get("entity_type", "").strip()
+    field_name = request.args.get("field_name", "").strip()
+    date_from = request.args.get("date_from", "").strip()
+    date_to = request.args.get("date_to", "").strip()
+
+    where_sql = "where a.branch = 'CHE'"
+    params = []
+
+    if q:
+        like = f"%{q}%"
+        where_sql += """
+            and (
+                a.student_name ilike %s
+                or a.actor_name ilike %s
+                or a.old_value ilike %s
+                or a.new_value ilike %s
+            )
+        """
+        params.extend([like, like, like, like])
+
+    if actor:
+        where_sql += " and a.actor_name = %s"
+        params.append(actor)
+
+    if entity_type:
+        where_sql += " and a.entity_type = %s"
+        params.append(entity_type)
+
+    if field_name:
+        where_sql += " and a.field_name = %s"
+        params.append(field_name)
+
+    if date_from:
+        where_sql += " and a.created_at >= %s::date"
+        params.append(date_from)
+
+    if date_to:
+        where_sql += " and a.created_at < (%s::date + interval '1 day')"
+        params.append(date_to)
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select distinct actor_name
+                from dharma_audit_logs
+                where branch = 'CHE'
+                  and coalesce(actor_name, '') <> ''
+                order by actor_name
+            """)
+            actors = [row["actor_name"] for row in cur.fetchall()]
+
+            cur.execute(f"""
+                select
+                    a.id,
+                    a.actor_name,
+                    a.action_type,
+                    a.entity_type,
+                    a.student_id,
+                    a.student_name,
+                    a.record_date,
+                    a.group_id,
+                    g.name as group_name,
+                    a.field_name,
+                    a.old_value,
+                    a.new_value,
+                    a.source_ip,
+                    a.created_at
+                from dharma_audit_logs a
+                left join dharma_class_groups g
+                    on g.id = a.group_id
+                {where_sql}
+                order by a.created_at desc, a.id desc
+                limit 1000
+            """, params)
+            logs = cur.fetchall()
+
+    return render_template_string("""
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>佛学班 Audit Log</title>
+<link rel="stylesheet" href="/static/css/toolbox.css">
+<style>
+.audit-summary{background:#fff8e8;border:1px solid #f3d98c;border-radius:16px;padding:14px 16px;margin:14px 0;text-align:center;font-weight:800}
+.audit-old{color:#b91c1c;font-weight:700}.audit-new{color:#15803d;font-weight:700}.audit-time{white-space:nowrap}.audit-table{min-width:1200px}
+.audit-badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#eef2ff;font-weight:800;font-size:14px}
+@media(max-width:700px){.audit-table{min-width:1250px}}
+</style>
+</head>
+<body>
+<div class="page">
+<div class="card">
+<h1 class="page-title">🛡️ 修改记录 Audit Log</h1>
+<p class="page-subtitle">查看哪位老师在什么时间，把哪一项资料从什么改成什么。</p>
+<div class="audit-summary">目前显示最近 {{ logs|length }} 笔修改记录（最多 1000 笔）</div>
+<form method="get">
+<div class="form-group"><label class="form-label">搜索</label><input class="form-input" name="q" value="{{ q }}" placeholder="学生姓名／老师／旧值／新值"></div>
+<div class="form-group"><label class="form-label">老师</label><select class="form-input" name="actor"><option value="">全部老师</option>{% for name in actors %}<option value="{{ name }}" {% if actor == name %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
+<div class="form-group"><label class="form-label">资料类型</label><select class="form-input" name="entity_type"><option value="">全部</option><option value="attendance" {% if entity_type=='attendance' %}selected{% endif %}>出席</option><option value="homework" {% if entity_type=='homework' %}selected{% endif %}>功课</option><option value="lesson" {% if entity_type=='lesson' %}selected{% endif %}>课程</option><option value="student" {% if entity_type=='student' %}selected{% endif %}>学生资料</option></select></div>
+<div class="form-group"><label class="form-label">修改项目</label><select class="form-input" name="field_name"><option value="">全部项目</option>{% for key, label in field_labels.items() %}<option value="{{ key }}" {% if field_name==key %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+<div class="form-group"><label class="form-label">开始日期</label><input class="form-input" type="date" name="date_from" value="{{ date_from }}"></div>
+<div class="form-group"><label class="form-label">结束日期</label><input class="form-input" type="date" name="date_to" value="{{ date_to }}"></div>
+<div class="btn-row"><button class="btn-tool btn-primary" type="submit">🔍 查询</button><a class="btn-tool btn-secondary" href="{{ url_for('dharma_class.class_audit_log') }}">↺ 清除</a></div>
+</form>
+</div>
+<div class="card">
+{% if logs %}
+<div class="table-responsive"><table class="record-table audit-table"><thead><tr><th>修改时间</th><th>老师</th><th>学生</th><th>记录日期</th><th>组别</th><th>资料</th><th>项目</th><th>原本</th><th>修改后</th><th>来源</th></tr></thead><tbody>
+{% for r in logs %}<tr><td class="audit-time">{{ r.created_at.strftime('%Y-%m-%d %H:%M:%S') if r.created_at else '—' }}</td><td><strong>{{ r.actor_name or '老师' }}</strong></td><td>{% if r.student_id %}<a href="{{ url_for('dharma_class.class_student_profile', student_id=r.student_id) }}">{{ r.student_name or ('学生 #' ~ r.student_id) }}</a>{% else %}—{% endif %}</td><td>{{ r.record_date or '—' }}</td><td>{{ r.group_name or '—' }}</td><td><span class="audit-badge">{% if r.entity_type=='attendance' %}出席{% elif r.entity_type=='homework' %}功课{% elif r.entity_type=='lesson' %}课程{% elif r.entity_type=='student' %}学生资料{% else %}{{ r.entity_type }}{% endif %}</span></td><td>{{ field_labels.get(r.field_name, r.field_name) }}</td><td class="audit-old">{{ value_labels.get(r.old_value, r.old_value) if r.old_value else '（空白）' }}</td><td class="audit-new">{{ value_labels.get(r.new_value, r.new_value) if r.new_value else '（空白）' }}</td><td>{{ r.source_ip or '—' }}</td></tr>{% endfor %}
+</tbody></table></div>
+{% else %}<div class="empty-state">没有找到符合条件的修改记录。</div>{% endif %}
+<a
+    class="btn-tool btn-secondary"
+    href="{{ url_for('dharma_class.class_admin') }}"
+>
+    ⬅ 返回负责人中心
+</a>
+</div></div></body></html>
+""",
+        logs=logs,
+        actors=actors,
+        q=q,
+        actor=actor,
+        entity_type=entity_type,
+        field_name=field_name,
+        date_from=date_from,
+        date_to=date_to,
+        field_labels=AUDIT_FIELD_LABELS,
+        value_labels=AUDIT_VALUE_LABELS,
+    )
+
+
 @dharma_class_bp.route("/reports")
 def class_reports():
 
@@ -4959,7 +5971,6 @@ def class_reports():
                     g.sort_order,
 
                     s.id as student_id,
-                    s.student_no,
                     s.name,
                     s.english_name,
 
@@ -5003,13 +6014,11 @@ def class_reports():
                     g.name,
                     g.sort_order,
                     s.id,
-                    s.student_no,
                     s.name,
                     s.english_name
 
                 order by
                     g.sort_order,
-                    s.student_no nulls last,
                     s.name
             """, student_params)
 
@@ -5490,7 +6499,6 @@ def class_reports():
                     <thead>
                         <tr>
                             <th>组别</th>
-                            <th>编号</th>
                             <th>姓名</th>
                             <th>已记录</th>
                             <th>出席</th>
@@ -5509,11 +6517,7 @@ def class_reports():
                             <td>
                                 {{ r.group_name or "—" }}
                             </td>
-
-                            <td>
-                                {{ r.student_no or "—" }}
-                            </td>
-
+                            
                             <td>
                                 <strong>{{ r.name }}</strong>
 
@@ -5679,11 +6683,9 @@ def class_reports():
         <div class="btn-row">
             <a
                 class="btn-tool btn-secondary"
-                href="{{ url_for(
-                    'dharma_class.class_home'
-                ) }}"
+                href="{{ url_for('dharma_class.class_admin') }}"
             >
-                ⬅ 返回佛学班首页
+                ⬅ 返回负责人中心
             </a>
         </div>
 
@@ -5734,7 +6736,6 @@ def class_records():
 
             cur.execute(f"""
                 select
-                    s.student_no,
                     s.name,
                     s.english_name,
                     g.name as group_name,
@@ -5747,7 +6748,7 @@ def class_records():
                 left join dharma_class_groups g on g.id = s.group_id
                 where a.class_date = %s
                 {where_group}
-                order by g.sort_order, s.student_no nulls last, s.name
+                order by g.sort_order, s.name
             """, params)
 
             records = cur.fetchall()
@@ -5805,7 +6806,6 @@ def class_records():
                     <thead>
                         <tr>
                             <th>组别</th>
-                            <th>编号</th>
                             <th>姓名</th>
                             <th>状态</th>
                             <th>备注</th>
@@ -5817,7 +6817,7 @@ def class_records():
                         {% for r in records %}
                         <tr>
                             <td>{{ r.group_name or "-" }}</td>
-                            <td>{{ r.student_no or "-" }}</td>
+                            
                             <td>
                                 {{ r.name }}
                                 {% if r.english_name %}
@@ -5852,8 +6852,11 @@ def class_records():
         {% endif %}
 
         <div class="btn-row">
-            <a class="btn-tool btn-secondary" href="/class">
-                ⬅ 返回佛学班首页
+            <a
+                class="btn-tool btn-secondary"
+                href="{{ url_for('dharma_class.class_admin') }}"
+            >
+                ⬅ 返回负责人中心
             </a>
         </div>
     </div>
@@ -5913,7 +6916,6 @@ def class_export_monthly_report():
             cur.execute("""
                 select
                     s.id,
-                    s.student_no,
                     s.name,
                     s.english_name,
                     s.group_id,
@@ -5926,7 +6928,6 @@ def class_export_monthly_report():
                   and g.is_active = true
                 order by
                     g.sort_order,
-                    s.student_no nulls last,
                     s.name
             """)
             students = cur.fetchall()
@@ -6232,7 +7233,6 @@ def class_export_monthly_report():
         )
 
         headers = [
-            "学生编号",
             "学生姓名",
         ]
 
@@ -6299,7 +7299,6 @@ def class_export_monthly_report():
             absent_count = 0
 
             row_data = [
-                s["student_no"] or "",
                 s["name"] or "",
             ]
 
@@ -6564,8 +7563,7 @@ def class_students_import():
                 }
 
                 for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-
-                    student_no = str(row[0]).strip() if len(row) > 0 and row[0] else ""
+                    
                     name = str(row[1]).strip() if len(row) > 1 and row[1] else ""
                     english_name = str(row[2]).strip() if len(row) > 2 and row[2] else ""
 
@@ -6619,22 +7617,17 @@ def class_students_import():
                         )
                         continue
 
-                    # 重复检查：优先学生编号，其次 中文姓名 + 家长电话
-                    if student_no:
-                        cur.execute("""
-                            select id
-                            from dharma_students
-                            where student_no = %s
-                            limit 1
-                        """, (student_no,))
-                    else:
-                        cur.execute("""
-                            select id
-                            from dharma_students
-                            where name = %s
-                              and coalesce(parent_phone, '') = %s
-                            limit 1
-                        """, (name, parent_phone or ""))
+                    # 重复检查：中文姓名 + 家长电话
+                    cur.execute("""
+                        select id
+                        from dharma_students
+                        where name = %s
+                        and coalesce(parent_phone, '') = %s
+                        limit 1
+                    """, (
+                        name,
+                        parent_phone or ""
+                    ))
 
                     exists = cur.fetchone()
 
@@ -6643,11 +7636,11 @@ def class_students_import():
                         duplicate_names.append(name)
                         continue
 
+
                     cur.execute("""
                         insert into dharma_students
                         (
                             branch,
-                            student_no,
                             name,
                             english_name,
                             gender,
@@ -6659,9 +7652,19 @@ def class_students_import():
                             remark
                         )
                         values
-                            ('CHE', %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s)
+                        (
+                            'CHE',
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            'active',
+                            %s
+                        )
                     """, (
-                        student_no or None,
                         name,
                         english_name or None,
                         gender or None,
@@ -6674,20 +7677,6 @@ def class_students_import():
 
                     inserted += 1
                     inserted_names.append(name)
-
-                conn.commit()
-
-        result = {
-            "inserted": inserted,
-            "duplicate": duplicate,
-            "blank": blank,
-            "invalid": invalid,
-            "inserted_names": inserted_names,
-            "duplicate_names": duplicate_names,
-            "error_messages": error_messages,
-        }
-
-        flash("导入完成。", "good")
 
     return render_template_string("""
 <!doctype html>
@@ -6716,7 +7705,7 @@ def class_students_import():
 
         <div class="empty-state" style="text-align:left;">
             Excel 第一行标题请使用：<br><br>
-            学生编号｜中文姓名｜英文名｜家长姓名｜家长电话｜组别｜备注<br><br>
+            中文姓名｜家长姓名｜家长电话｜组别｜备注<br><br>
             组别目前只接受：低年组、少年组、高年组
         </div>
 
@@ -6799,8 +7788,11 @@ def class_students_import():
 
     <div class="card">
         <div class="btn-row">
-            <a class="btn-tool btn-secondary" href="/class/students">
-                ⬅ 返回学生名单
+            <a
+                class="btn-tool btn-secondary"
+                href="{{ url_for('dharma_class.class_admin') }}"
+            >
+                ⬅ 返回负责人中心
             </a>
         </div>
     </div>
@@ -6818,7 +7810,6 @@ def class_students_template():
     ws.title = "学生导入模板"
 
     headers = [
-        "学生编号",
         "中文姓名",
         "英文名",
         "性别",
@@ -6875,7 +7866,6 @@ def class_students_export():
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 select
-                    s.student_no,
                     s.name,
                     s.english_name,
                     s.parent_name,
@@ -6885,7 +7875,7 @@ def class_students_export():
                     s.remark
                 from dharma_students s
                 left join dharma_class_groups g on g.id = s.group_id
-                order by g.sort_order, s.student_no nulls last, s.name
+                order by g.sort_order, s.name
             """)
             rows = cur.fetchall()
 
@@ -6894,7 +7884,6 @@ def class_students_export():
     ws.title = "学生名单"
 
     ws.append([
-        "学生编号",
         "中文姓名",
         "英文名",
         "家长姓名",
@@ -6906,7 +7895,6 @@ def class_students_export():
 
     for r in rows:
         ws.append([
-            r["student_no"] or "",
             r["name"] or "",
             r["english_name"] or "",
             r["parent_name"] or "",
@@ -6954,7 +7942,6 @@ def class_export_yearly_report():
             cur.execute("""
                 select
                     s.id,
-                    s.student_no,
                     s.name,
                     s.english_name,
                     s.group_id,
@@ -6967,7 +7954,6 @@ def class_export_yearly_report():
                   and g.is_active = true
                 order by
                     g.sort_order,
-                    s.student_no nulls last,
                     s.name
             """)
             students = cur.fetchall()
@@ -7234,7 +8220,7 @@ def class_export_yearly_report():
         )
 
         headers = [
-            "学生编号",
+            
             "学生姓名",
         ]
 
@@ -7293,7 +8279,6 @@ def class_export_yearly_report():
         for s in group_students:
 
             row_data = [
-                s["student_no"] or "",
                 s["name"] or "",
             ]
 
@@ -7517,7 +8502,7 @@ def build_homework_tracking_excel(
     year,
     month=None
 ):
-    """生成白话佛法／念经文功课追踪 Excel。"""
+    """生成白话佛法／经文功课追踪 Excel。"""
 
     if report_type == "baihua":
         report_title = "白话佛法功课追踪表"
@@ -7530,7 +8515,7 @@ def build_homework_tracking_excel(
         legend_partial = "○ = 有交，没做题"
 
     elif report_type == "scripture":
-        report_title = "念经文功课追踪表"
+        report_title = "经文功课追踪表"
         status_field = "scripture_status"
         full_statuses = {"submitted_recited", "submitted"}
         partial_statuses = {"submitted_not_recited"}
@@ -7577,7 +8562,6 @@ def build_homework_tracking_excel(
             cur.execute("""
                 select
                     s.id,
-                    s.student_no,
                     s.name,
                     s.english_name,
                     s.group_id,
@@ -7589,7 +8573,6 @@ def build_homework_tracking_excel(
                   and g.is_active = true
                 order by
                     g.sort_order,
-                    s.student_no nulls last,
                     s.name
             """)
             students = cur.fetchall()
@@ -7669,7 +8652,7 @@ def build_homework_tracking_excel(
         ]
         class_dates = group_dates_map.get(group["id"], [])
 
-        headers = ["学生编号", "学生姓名"]
+        headers = ["学生姓名"]
         headers += [f"{d.month}/{d.day}" for d in class_dates]
         headers += [
             full_label,
@@ -7720,7 +8703,7 @@ def build_homework_tracking_excel(
             ws.append(["", "目前没有学生资料"])
 
         for student in group_students:
-            row_data = [student["student_no"] or "", student["name"] or ""]
+            row_data = [student["name"] or ""]
 
             full_count = 0
             partial_count = 0
@@ -8007,7 +8990,6 @@ def class_promote():
             cur.execute("""
                 select
                     s.id,
-                    s.student_no,
                     s.name,
                     s.english_name,
                     s.group_id,
@@ -8015,7 +8997,7 @@ def class_promote():
                 from dharma_students s
                 join dharma_class_groups g on g.id = s.group_id
                 where s.status = 'active'
-                order by g.sort_order, s.student_no nulls last, s.name
+                order by g.sort_order, s.name
             """)
             students = cur.fetchall()
 
@@ -8112,7 +9094,6 @@ def class_promote():
                 <table class="record-table">
                     <thead>
                         <tr>
-                            <th>编号</th>
                             <th>姓名</th>
                             <th>英文名</th>
                             <th>目前组别</th>
@@ -8122,7 +9103,6 @@ def class_promote():
                     <tbody>
                         {% for s in students %}
                         <tr>
-                            <td>{{ s.student_no or "-" }}</td>
                             <td>{{ s.name }}</td>
                             <td>{{ s.english_name or "-" }}</td>
                             <td>{{ s.group_name }}</td>
@@ -8168,8 +9148,11 @@ def class_promote():
         {% endif %}
 
         <div class="btn-row">
-            <a class="btn-tool btn-secondary" href="/class">
-                ⬅ 返回佛学班首页
+            <a
+                class="btn-tool btn-secondary"
+                href="{{ url_for('dharma_class.class_admin') }}"
+            >
+                ⬅ 返回负责人中心
             </a>
         </div>
     </div>
@@ -8182,4 +9165,3 @@ def class_promote():
         groups=groups,
         students=students
     )
-

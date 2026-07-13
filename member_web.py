@@ -3868,7 +3868,7 @@ MEMBER_HTML = """
     </div>
 
     {% if candidates %}
-    <div class="card">
+    <div id="member-result" class="result-card">
         <div class="section-title">👥 找到多位会员，请选择</div>
 
         <form method="post">
@@ -3899,7 +3899,7 @@ MEMBER_HTML = """
     {% endif %}
 
     {% if member %}
-    <div class="card">
+    <div id="member-result" class="member-card">
         <div class="section-title">👤 会员资料</div>
 
         <div class="member-title-line">
@@ -4010,6 +4010,22 @@ function toggleBranch() {
         btn.style.background = "#16a34a";
     }
 }
+
+window.addEventListener("load", function () {
+
+    const result = document.getElementById("member-result");
+
+    if (result) {
+        setTimeout(function () {
+            result.scrollIntoView({
+                behavior: "smooth",
+                block: "start"
+            });
+        }, 150);
+    }
+
+});
+
 </script>
 
 </body>
@@ -4204,7 +4220,7 @@ MEMBER_ADMIN_HTML = """
     </div>
 
     {% if member %}
-    <div class="info-card">
+    <div id="member-result" class="member-card">
         <div class="section-title">👤 会员资料</div>
 
         <div class="person-name">
@@ -4356,6 +4372,29 @@ function toggleBranch() {
         btn.style.background = "#16a34a";
     }
 }
+
+document.addEventListener("DOMContentLoaded", function () {
+
+    const result = document.getElementById("member-result");
+
+    if (result) {
+        setTimeout(function () {
+
+            const topPosition =
+                result.getBoundingClientRect().top
+                + window.pageYOffset
+                - 20;
+
+            window.scrollTo({
+                top: topPosition,
+                behavior: "smooth"
+            });
+
+        }, 300);
+    }
+
+});
+
 </script>
 
 </body>

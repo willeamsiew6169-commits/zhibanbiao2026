@@ -89,3 +89,20 @@ def library_manifest():
             "type": "image/png"
         }]
     }
+
+@manifest_bp.route("/dharma-class-manifest.json")
+def dharma_class_manifest():
+    return {
+        "name": "蕉赖佛学班系统",
+        "short_name": "佛学班",
+        "start_url": "/class/",
+        "scope": "/class/",
+        "display": "standalone",
+        "background_color": "#fffaf0",
+        "theme_color": "#f6c54e",
+        "icons": [{
+            "src": "/static/dharma_icon.png?v=1",
+            "sizes": "512x512",
+            "type": "image/png"
+        }]
+    }

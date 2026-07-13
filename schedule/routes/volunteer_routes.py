@@ -863,6 +863,31 @@ def volunteer_signup():
         font-weight:normal;
         color:#555;
     }
+                                  
+    .daily-quote-card{
+        background:#fff8f7;
+        border:1px solid #f3c7c3;
+        border-radius:18px;
+        padding:24px 28px;
+        text-align:center;
+    }
+
+    .daily-quote-title{
+        color:#b56a00;
+        font-size:24px;
+        font-weight:bold;
+        margin-bottom:16px;
+    }
+
+    .quote-text{
+        white-space: pre-line;
+        line-height: 1.9;
+        font-size:22px;
+        color:#c94840;
+        text-align:left;
+        display:inline-block;
+        margin:auto;
+    }
     
     @media (max-width:700px) {
         body {
@@ -916,15 +941,13 @@ def volunteer_signup():
 
         </div>
 
-        <div class="quote-card">
+        <div class="daily-quote-card">
 
-            <div class="quote-title">
+            <div class="daily-quote-title">
                 🌸 每日佛言佛语
             </div>
 
-            <div class="quote-content">
-                {{ daily_quote }}
-            </div>
+            <div class="quote-text">{{ daily_quote }}</div>
 
         </div>
 
