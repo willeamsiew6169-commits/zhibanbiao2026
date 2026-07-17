@@ -1,0 +1,10 @@
+[ ] 执行 SQL 成功
+[ ] Flask 启动无 ImportError
+[ ] /finance 正常
+[ ] /finance/month_end 正常
+[ ] /member 正常
+[ ] /finance/audit/ 可进入
+[ ] 作废记录成功且 Audit 有记录
+[ ] Month Close 成功且 Audit 有记录
+[ ] 已月结月份不能新增／作废
+[ ] 原有 Dashboard、Records、Member Query 正常

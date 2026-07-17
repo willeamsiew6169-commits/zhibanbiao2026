@@ -5,9 +5,10 @@ from db import get_conn
 from flask import send_file
 from zoneinfo import ZoneInfo
 from datetime import date, datetime
-from openpyxl import Workbook, load_workbook
 from psycopg2.extras import RealDictCursor
+from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from flask import Blueprint, render_template_string, request, redirect, url_for, flash, send_file
 
@@ -83,7 +84,6 @@ HIGH_GROUP_TEACHERS = [
     "刘永耀",
     "许愫芩",
     "王康芬",
-    "黄薈菏",
 ]
 
 YOUTH_GROUP_TEACHERS = [
@@ -92,8 +92,8 @@ YOUTH_GROUP_TEACHERS = [
     "许茹慧",
     "刘铧忆",
     "吴文杰",
-    "王康芬",
     "方玉芬",
+    "林凤美",
 ]
 
 LOW_GROUP_TEACHERS = [
@@ -104,8 +104,8 @@ LOW_GROUP_TEACHERS = [
 
 GROUP_TEACHERS = {
     "低年组": LOW_GROUP_TEACHERS,
-    "少年组": YOUTH_GROUP_TEACHERS,
     "高年组": HIGH_GROUP_TEACHERS,
+    "少年组": YOUTH_GROUP_TEACHERS,
 }
 
 
@@ -658,7 +658,9 @@ def class_home():
                             已点名：{{ g.marked_count or 0 }} 位<br>
                             出席：{{ g.present_count or 0 }} 位<br>
                             迟到：{{ g.late_count or 0 }} 位<br>
-                            农舍：{{ g.farm_count or 0 }} 位<br>
+                            {% if g.name == "少年组" %}
+                                农舍：{{ g.farm_count or 0 }} 位<br>
+                            {% endif %}
                             缺席：{{ g.absent_count or 0 }} 位
                         </div>
 
@@ -1255,7 +1257,6 @@ def class_attendance():
 
             lesson = {
                 "teacher_name": "",
-                "record_teacher": "",
                 "topic": "",
                 "content": ""
             }
@@ -1269,12 +1270,7 @@ def class_attendance():
                     "teacher_name",
                     ""
                 ).strip()
-
-                record_teacher = request.form.get(
-                    "record_teacher",
-                    ""
-                ).strip()
-
+                
                 topic = request.form.get(
                     "topic",
                     ""
@@ -1291,7 +1287,6 @@ def class_attendance():
 
                 lesson = {
                     "teacher_name": teacher_name,
-                    "record_teacher": record_teacher,
                     "topic": topic,
                     "content": content
                 }
@@ -1348,7 +1343,6 @@ def class_attendance():
 
                     has_lesson_data = any([
                         teacher_name,
-                        record_teacher,
                         topic,
                         content
                     ])
@@ -1360,7 +1354,7 @@ def class_attendance():
                     if has_lesson_data:
 
                         cur.execute("""
-                            select id, teacher_name, record_teacher, topic, content
+                            select id, teacher_name, topic, content
                             from dharma_class_lessons
                             where branch = 'CHE'
                               and lesson_date = %s
@@ -1376,14 +1370,12 @@ def class_attendance():
                                 lesson_date,
                                 group_id,
                                 teacher_name,
-                                record_teacher,
                                 topic,
                                 content
                             )
                             values
                             (
                                 'CHE',
-                                %s,
                                 %s,
                                 %s,
                                 %s,
@@ -1398,21 +1390,18 @@ def class_attendance():
                             )
                             do update set
                                 teacher_name = excluded.teacher_name,
-                                record_teacher = excluded.record_teacher,
                                 topic = excluded.topic,
                                 content = excluded.content
                         """, (
                             selected_date,
                             selected_group_id,
                             teacher_name or None,
-                            record_teacher or None,
                             topic or None,
                             content or None
                         ))
 
                         lesson_changes = {
                             "teacher_name": teacher_name or None,
-                            "record_teacher": record_teacher or None,
                             "topic": topic or None,
                             "content": content or None,
                         }
@@ -1420,7 +1409,6 @@ def class_attendance():
                         for field_name, new_value in lesson_changes.items():
                             write_dharma_audit_log(
                                 cur,
-                                actor_name=record_teacher or teacher_name or "老师",
                                 action_type="update" if old_lesson else "create",
                                 entity_type="lesson",
                                 entity_id=old_lesson.get("id"),
@@ -1431,7 +1419,7 @@ def class_attendance():
                                 new_value=new_value,
                             )
 
-                    marked_by = record_teacher or teacher_name or "老师"
+                    marked_by = teacher_name or "老师"
 
                     # -------------------------------------------------
                     # 保存每位学生
@@ -1665,7 +1653,6 @@ def class_attendance():
             cur.execute("""
                 select
                     teacher_name,
-                    record_teacher,
                     topic,
                     content
                 from dharma_class_lessons
@@ -2306,38 +2293,7 @@ def class_attendance():
                     </select>
 
                 </div>
-
-                <div class="form-group">
-
-                    <label class="form-label">
-                        📝 记录老师
-                    </label>
-
-                    <select
-                        class="form-input"
-                        name="record_teacher">
-
-                        <option value="">
-                            请选择记录老师
-                        </option>
-
-                        {% for teacher in teacher_list %}
-
-                            <option
-                                value="{{ teacher }}"
-                                {% if lesson.record_teacher == teacher %}
-                                    selected
-                                {% endif %}
-                            >
-                                {{ teacher }}
-                            </option>
-
-                        {% endfor %}
-
-                    </select>
-
-                </div>
-
+                
             </div>
 
             <div class="form-group">
@@ -3947,6 +3903,12 @@ def class_student_search():
     q = request.args.get("q", "").strip()
     students = []
 
+    malaysia_today = datetime.now(
+        ZoneInfo("Asia/Kuala_Lumpur")
+    ).date()
+
+    current_year = malaysia_today.year
+
     if q:
         like = f"%{q}%"
 
@@ -3957,6 +3919,8 @@ def class_student_search():
                         s.id,
                         s.name,
                         s.english_name,
+                        s.gender,
+                        s.birth_year,
                         s.parent_name,
                         s.parent_phone,
                         s.status,
@@ -4071,10 +4035,23 @@ def class_student_search():
                         </div>
 
                         <div class="search-result-meta">
-                            组别：{{ s.group_name or '—' }}<br>
+
+                            组别：{{ s.group_name or '—' }}
+                            ｜ 性别：{{ s.gender or '—' }}
+                            ｜ 年龄：
+                            {% if s.birth_year %}
+                                {{ current_year - s.birth_year }}岁
+                            {% else %}
+                                —
+                            {% endif %}
+                            <br>
+
                             父／母／监护人：{{ s.parent_name or '—' }}<br>
+
                             电话：{{ s.parent_phone or '—' }}<br>
+
                             状态：{{ s.status or '—' }}
+
                         </div>
 
                         <div class="btn-row">
@@ -4118,7 +4095,8 @@ def class_student_search():
 </html>
 """,
         q=q,
-        students=students
+        students=students,
+        current_year=current_year
     )
 
 
@@ -7706,7 +7684,7 @@ def class_students_import():
         <div class="empty-state" style="text-align:left;">
             Excel 第一行标题请使用：<br><br>
             中文姓名｜家长姓名｜家长电话｜组别｜备注<br><br>
-            组别目前只接受：低年组、少年组、高年组
+            组别目前只接受：低年组、高年组、少年组
         </div>
 
         <div class="btn-row">
@@ -7822,8 +7800,8 @@ def class_students_template():
 
     ws.append(headers)
 
+    # 示例资料
     ws.append([
-        "001",
         "张小明",
         "Zhang Xiao Ming",
         "男",
@@ -7835,18 +7813,85 @@ def class_students_template():
     ])
 
     ws.append([
-        "002",
         "李小美",
         "Lee Mei Mei",
         "女",
         2014,
         "李妈妈",
         "01122334455",
-        "少年组",
+        "高年组",
         ""
     ])
 
-    beautify_simple_excel(ws)
+    #
+    # 样式
+    #
+
+    header_fill = PatternFill(
+        fill_type="solid",
+        fgColor="4F81BD"
+    )
+
+    for cell in ws[1]:
+        cell.font = Font(
+            bold=True,
+            color="FFFFFF"
+        )
+        cell.fill = header_fill
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center"
+        )
+
+    #
+    # 自动栏宽
+    #
+
+    widths = {
+        "A":18,
+        "B":22,
+        "C":10,
+        "D":12,
+        "E":22,
+        "F":18,
+        "G":15,
+        "H":25,
+    }
+
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+
+    #
+    # 下拉：性别
+    #
+
+    gender_dv = DataValidation(
+        type="list",
+        formula1='"男,女"',
+        allow_blank=True
+    )
+
+    ws.add_data_validation(gender_dv)
+    gender_dv.add("C2:C500")
+
+    #
+    # 下拉：组别
+    #
+
+    group_dv = DataValidation(
+        type="list",
+        formula1='"低年组,高年组,少年组"',
+        allow_blank=True
+    )
+
+    ws.add_data_validation(group_dv)
+    group_dv.add("G2:G500")
+
+    #
+    # 冻结标题
+    #
+
+    ws.freeze_panes = "A2"
 
     output = BytesIO()
     wb.save(output)

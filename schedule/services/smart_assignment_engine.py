@@ -138,7 +138,7 @@ def calculate_best_place(
 ):
     """
     V5 智能地点判断：
-    1. 财政 CHE-238 特殊规则
+    1. 财政 STW-152 固定活动中心
     2. 负责人/系统指定地点
     3. 佛堂卫生者优先活动中心
     4. 地点轮换
@@ -151,15 +151,16 @@ def calculate_best_place(
         or ""
     ).strip()
 
-    name = item.get("name") or item.get("姓名")
+    name = (
+        item.get("name")
+        or item.get("姓名")
+        or ""
+    ).strip()
 
     # 1. 财政特殊规则
-    if volunteer_id == "CHE-238":
-        if shift in ["绿", "橙"]:
-            return "活动中心"
-
-        if shift == "黄":
-            return "观音堂"
+    # 新财政 STW-152：所有值班时段固定安排活动中心
+    if volunteer_id == "STW-152":
+        return "活动中心"
 
     # 2. 已指定地点
     if preferred_place:

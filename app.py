@@ -25,12 +25,18 @@ from manifest import manifest_bp
 from db import db_query, get_conn
 from library_web import library_bp
 from reading_web import reading_bp
+
 from finance_web import finance_bp
+import finance_export
+
 from psycopg2.extras import RealDictCursor
+from finance_import import finance_import_bp
 from lunar_rules import get_special_day_info
 from dharma_class_web import dharma_class_bp
 from schedule.schedule_web import schedule_bp
 from datetime import datetime, date, timedelta
+from finance_month_end import finance_month_end_bp
+from finance_audit import finance_audit_bp
 from flask import (
     Flask, request, redirect, url_for,
     render_template_string, flash, jsonify,
@@ -102,6 +108,9 @@ ATTENDANCE_HEADERS = [
 app = Flask(__name__)
 app.secret_key = "change-this-simple-secret"
 app.permanent_session_lifetime = timedelta(hours=2)
+app.register_blueprint(finance_month_end_bp)
+app.register_blueprint(finance_import_bp)
+app.register_blueprint(finance_audit_bp)
 app.register_blueprint(dharma_class_bp)
 app.register_blueprint(schedule_bp)
 app.register_blueprint(manifest_bp)

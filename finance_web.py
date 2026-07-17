@@ -2,19 +2,145 @@
 
 import os
 import re
+import tempfile
 
-from flask import Blueprint, request, redirect, url_for, render_template_string, send_file
-from psycopg2.extras import RealDictCursor
-from datetime import date
-from openpyxl import Workbook
-from db import db_query
-from utils import normalize_member_id
-from flask import send_file, request
-from openpyxl import Workbook
-from flask import session
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+from copy import copy
 from io import BytesIO
+from db import db_query
+from finance_common import (
+    money,
+    normalize_finance_date,
+    get_finance_ym,
+    get_month_close_record,
+    is_finance_month_closed,
+    get_month_lock_message,
+    require_finance_month_open,
+    get_current_finance_user,
+)
+from finance_audit import write_finance_audit
+from openpyxl import Workbook, load_workbook
+from datetime import date, datetime
+from flask import send_file, request, flash
+from utils import normalize_member_id
+from psycopg2.extras import RealDictCursor
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from flask import Blueprint, request, redirect, url_for, render_template_string, send_file, session
+
+
+EXPENSE_SUB_CATEGORY_OPTIONS = {
+    "供花": ["鲜花"],
+    "供果": ["水果", "供果用品", "其它"],
+    "供油": ["灯油"],
+    "佛台用品": ["佛具", "佛台用品", "佛堂用品", "其它"],
+    "电费": ["TNB 20-1", "TNB 20-2", "其它"],
+    "水费": [
+        "Air Selangor 20-1",
+        "Air Selangor 20-2",
+        "Indah Water 20-1",
+        "Indah Water 20-2",
+        "其它",
+    ],
+    "电话及网络费": [
+        "Digi Reload",
+        "Celcom Reload",
+        "Unifi Internet",
+        "Maxis",
+        "其它",
+    ],
+    "维修保养": [
+        "Air-con Service",
+        "电器维修",
+        "水管维修",
+        "建筑维修",
+        "其它",
+    ],
+    "装修": ["GYT装修", "观音堂装修", "活动中心装修", "其它"],
+    "日常采购": ["文具", "厨房用品", "清洁用品", "日常用品", "其它"],
+    "执照及行政费": ["License Fee", "政府费用", "行政费用", "其它"],
+    "其它支出": ["印刷", "交通", "杂项", "其它"],
+}
+
+EXPENSE_VENDOR_BY_SUB_CATEGORY = {
+    # 供花
+    "鲜花": "Pudu Ria Florist Trading Sdn Bhd",
+    "供花用品": "Pudu Ria Florist Trading Sdn Bhd",
+
+    # 供油
+    "灯油": "Laohongka Sdn Bhd",
+    "油灯用品": "Laohongka Sdn Bhd",
+
+    # 电费
+    "TNB 20-1": "Tenaga Nasional",
+    "TNB 20-2": "Tenaga Nasional",
+
+    # 水费
+    "Air Selangor 20-1": "Air Selangor",
+    "Air Selangor 20-2": "Air Selangor",
+    "Indah Water 20-1": "Indah Water",
+    "Indah Water 20-2": "Indah Water",
+
+    # 电话及网络
+    "Digi Reload": "Digi",
+    "Celcom Reload": "Celcom",
+    "Unifi Internet": "TM Unifi",
+    "Maxis": "Maxis",
+}
+
+AUTO_VENDOR_CATEGORIES = {
+    "供花",
+    "供油",
+    "电费",
+    "水费",
+    "电话及网络费",
+}
+# =========================================================
+# Finance Web local helpers
+# These remain here because they are domain-specific to
+# daily finance input rather than generic shared utilities.
+# =========================================================
+
+def get_fund_account(category, record_type="income"):
+    if record_type == "expense":
+        return "观音堂日常户口"
+
+    if category == "月费":
+        return "观音堂日常户口"
+
+    return "总会户口"
+
+
+def add_months_ym(ym, months):
+    y, m = map(int, ym.split("-"))
+    m += months
+    y += (m - 1) // 12
+    m = (m - 1) % 12 + 1
+    return f"{y:04d}-{m:02d}"
+
+
+def next_month_ym(d):
+    if not d:
+        return date.today().strftime("%Y-%m")
+
+    return add_months_ym(
+        d.strftime("%Y-%m"),
+        1
+    )
+
+
+def get_active_finance_vendors():
+    return db_query("""
+        select
+            id,
+            vendor_name,
+            sort_order
+        from finance_vendors
+        where is_active = true
+        order by
+            sort_order,
+            vendor_name
+    """, fetchall=True)
+
 
 finance_bp = Blueprint("finance", __name__, url_prefix="/finance")
 
@@ -277,43 +403,339 @@ body{
 </style>
 """
 
+FINANCE_DATE_COMPONENT = """
+<style>
+.finance-date-control{
+    display:grid;
+    gap:9px;
+    width:100%;
+}
 
-def money(v):
-    try:
-        return float(v or 0)
-    except:
-        return 0
-    
-def get_fund_account(category, record_type="income"):
-    if record_type == "expense":
-        return "观音堂日常户口"
+.finance-date-main{
+    display:grid;
+    grid-template-columns:52px minmax(0,1fr) 52px;
+    gap:9px;
+    align-items:stretch;
+}
 
-    if category == "月费":
-        return "观音堂日常户口"
+.finance-date-main .form-input,
+.finance-date-main input[type="date"]{
+    width:100%;
+    min-width:0;
+    margin:0;
+    text-align:center;
+    font-weight:800;
+}
 
-    return "总会户口"
-    
-def add_months_ym(ym, months):
-    y, m = map(int, ym.split("-"))
-    m += months
-    y += (m - 1) // 12
-    m = (m - 1) % 12 + 1
-    return f"{y:04d}-{m:02d}"
+.finance-date-step,
+.finance-date-quick{
+    border:1px solid #cbd5e1;
+    background:#f8fafc;
+    color:#334155;
+    border-radius:10px;
+    cursor:pointer;
+    font-weight:800;
+    transition:.15s ease;
+}
 
-def date_to_ym(d):
-    if not d:
-        return ""
-    return d.strftime("%Y-%m")
+.finance-date-step{
+    min-height:52px;
+    font-size:25px;
+}
 
-def next_month_ym(d):
-    if not d:
-        return date.today().strftime("%Y-%m")
-    return add_months_ym(d.strftime("%Y-%m"), 1)
+.finance-date-step:hover,
+.finance-date-quick:hover{
+    background:#eaf4ff;
+    border-color:#8fbce0;
+    color:#1769aa;
+}
 
-def calc_month_count(amount):
-    if amount <= 0:
-        return 1
-    return max(1, round(amount / 50))
+.finance-date-step:active,
+.finance-date-quick:active{
+    transform:scale(.97);
+}
+
+.finance-date-shortcuts{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:8px;
+}
+
+.finance-date-quick{
+    min-height:42px;
+    padding:8px 10px;
+    font-size:15px;
+}
+
+.finance-date-status{
+    min-height:22px;
+    font-size:14px;
+    font-weight:700;
+    line-height:1.45;
+}
+
+.finance-date-today{
+    border-color:#86efac !important;
+    background:#f0fdf4 !important;
+    color:#166534 !important;
+}
+
+.finance-date-yesterday{
+    border-color:#fde68a !important;
+    background:#fffbeb !important;
+    color:#92400e !important;
+}
+
+.finance-date-old{
+    border-color:#fdba74 !important;
+    background:#fff7ed !important;
+    color:#9a3412 !important;
+}
+
+.finance-date-future{
+    border-color:#fca5a5 !important;
+    background:#fef2f2 !important;
+    color:#b91c1c !important;
+}
+
+@media(max-width:560px){
+    .finance-date-main{
+        grid-template-columns:48px minmax(0,1fr) 48px;
+    }
+
+    .finance-date-shortcuts{
+        grid-template-columns:1fr;
+    }
+}
+</style>
+
+<script>
+(function(){
+    function localISO(dateValue){
+        const year = dateValue.getFullYear();
+        const month = String(dateValue.getMonth() + 1).padStart(2, "0");
+        const day = String(dateValue.getDate()).padStart(2, "0");
+        return `${year}-${month}-${day}`;
+    }
+
+    function parseISO(value){
+        if(!value){
+            return null;
+        }
+
+        const parts = value.split("-").map(Number);
+
+        if(parts.length !== 3 || parts.some(Number.isNaN)){
+            return null;
+        }
+
+        return new Date(parts[0], parts[1] - 1, parts[2]);
+    }
+
+    function startOfDay(value){
+        return new Date(
+            value.getFullYear(),
+            value.getMonth(),
+            value.getDate()
+        );
+    }
+
+    function changeDate(input, days){
+        let current = parseISO(input.value);
+
+        if(!current){
+            current = new Date();
+        }
+
+        current.setDate(current.getDate() + days);
+        input.value = localISO(current);
+        input.dispatchEvent(new Event("change", {bubbles:true}));
+    }
+
+    function setRelativeDate(input, days){
+        const selected = new Date();
+        selected.setDate(selected.getDate() + days);
+        input.value = localISO(selected);
+        input.dispatchEvent(new Event("change", {bubbles:true}));
+    }
+
+    function openCalendar(input){
+        if(typeof input.showPicker === "function"){
+            try{
+                input.showPicker();
+                return;
+            }catch(error){}
+        }
+
+        input.focus();
+        input.click();
+    }
+
+    function updateStatus(input, status){
+        input.classList.remove(
+            "finance-date-today",
+            "finance-date-yesterday",
+            "finance-date-old",
+            "finance-date-future"
+        );
+
+        const selected = parseISO(input.value);
+
+        if(!selected){
+            status.textContent = "";
+            return;
+        }
+
+        const today = startOfDay(new Date());
+        const chosen = startOfDay(selected);
+        const difference = Math.round(
+            (chosen - today) / 86400000
+        );
+
+        if(difference === 0){
+            input.classList.add("finance-date-today");
+            status.textContent = "🟢 今天";
+        }else if(difference === -1){
+            input.classList.add("finance-date-yesterday");
+            status.textContent = "🟡 昨天";
+        }else if(difference > 0){
+            input.classList.add("finance-date-future");
+            status.textContent = `🔴 未来日期（${difference} 天后），请检查`;
+        }else if(difference < -30){
+            input.classList.add("finance-date-old");
+            status.textContent = `🟠 ${Math.abs(difference)} 天前，可能是旧账补录`;
+        }else{
+            status.textContent = `📅 ${Math.abs(difference)} 天前`;
+        }
+    }
+
+    function enhanceDateInput(input){
+        if(input.dataset.financeDateReady === "1"){
+            return;
+        }
+
+        input.dataset.financeDateReady = "1";
+
+        const control = document.createElement("div");
+        control.className = "finance-date-control";
+
+        const main = document.createElement("div");
+        main.className = "finance-date-main";
+
+        const previous = document.createElement("button");
+        previous.type = "button";
+        previous.className = "finance-date-step";
+        previous.textContent = "◀";
+        previous.title = "前一天";
+
+        const next = document.createElement("button");
+        next.type = "button";
+        next.className = "finance-date-step";
+        next.textContent = "▶";
+        next.title = "后一天";
+
+        const shortcuts = document.createElement("div");
+        shortcuts.className = "finance-date-shortcuts";
+
+        const yesterday = document.createElement("button");
+        yesterday.type = "button";
+        yesterday.className = "finance-date-quick";
+        yesterday.textContent = "昨天";
+
+        const today = document.createElement("button");
+        today.type = "button";
+        today.className = "finance-date-quick";
+        today.textContent = "今天";
+
+        const calendar = document.createElement("button");
+        calendar.type = "button";
+        calendar.className = "finance-date-quick";
+        calendar.textContent = "📅 选日期";
+
+        const status = document.createElement("div");
+        status.className = "finance-date-status";
+
+        const parent = input.parentNode;
+        parent.insertBefore(control, input);
+
+        main.appendChild(previous);
+        main.appendChild(input);
+        main.appendChild(next);
+
+        shortcuts.appendChild(yesterday);
+        shortcuts.appendChild(today);
+        shortcuts.appendChild(calendar);
+
+        control.appendChild(main);
+        control.appendChild(shortcuts);
+        control.appendChild(status);
+
+        previous.addEventListener("click", function(){
+            changeDate(input, -1);
+        });
+
+        next.addEventListener("click", function(){
+            changeDate(input, 1);
+        });
+
+        yesterday.addEventListener("click", function(){
+            setRelativeDate(input, -1);
+        });
+
+        today.addEventListener("click", function(){
+            setRelativeDate(input, 0);
+        });
+
+        calendar.addEventListener("click", function(){
+            openCalendar(input);
+        });
+
+        input.addEventListener("change", function(){
+            updateStatus(input, status);
+        });
+
+        input.addEventListener("keydown", function(event){
+            if(event.altKey || event.ctrlKey || event.metaKey){
+                return;
+            }
+
+            if(event.key === "ArrowLeft"){
+                event.preventDefault();
+                changeDate(input, -1);
+            }else if(event.key === "ArrowRight"){
+                event.preventDefault();
+                changeDate(input, 1);
+            }
+        });
+
+        updateStatus(input, status);
+    }
+
+    function initFinanceDates(root){
+        const selector = [
+            'input[type="date"][name="receipt_date"]',
+            'input[type="date"][name="record_date"]',
+            'input[type="date"][name="payment_date"]',
+            'input[type="date"][name="voucher_date"]',
+            'input[type="date"][name="payment_voucher_date"]'
+        ].join(",");
+
+        (root || document).querySelectorAll(selector).forEach(
+            enhanceDateInput
+        );
+    }
+
+    document.addEventListener("DOMContentLoaded", function(){
+        initFinanceDates(document);
+    });
+
+    window.initFinanceDates = initFinanceDates;
+})();
+</script>
+"""
+
+
+# Finance shared helpers are imported from finance_common.py.
 
 def get_next_receipt_no_by_category(category):
     row = db_query("""
@@ -384,7 +806,7 @@ def finance_login():
 
         error = "财政 PIN 不正确，请重新输入。"
 
-    return render_template_string("""
+    return render_template_string(FINANCE_DATE_COMPONENT + """
 <!doctype html>
 <html lang="zh">
 <head>
@@ -552,6 +974,7 @@ def late_members():
         from members m
         left join member_payments p
             on p.member_id = m.member_id
+           and coalesce(p.status, 'active') = 'active'
         where coalesce(m.member_status, m.status, '') not in (
             '停供',
             '停止',
@@ -645,7 +1068,7 @@ def late_members():
         else:
             r["wa_link"] = ""
 
-    return render_template_string("""
+    return render_template_string(FINANCE_DATE_COMPONENT + """
     <!doctype html>
     <html lang="zh">
     <head>
@@ -1264,16 +1687,6 @@ def late_members():
     )
     
     
-@finance_bp.route("/records/<int:record_id>/delete", methods=["POST"])
-def delete_record(record_id):
-
-    db_query("""
-        delete from finance_records
-        where id = %s
-    """, (record_id,))
-
-    return redirect(url_for("finance.records"))
-
 @finance_bp.route("/member/<member_id>/edit",
                   methods=["GET","POST"])
 def edit_member(member_id):
@@ -1305,7 +1718,7 @@ def edit_member(member_id):
             url_for("finance.member_management")
         )
 
-    return render_template_string(FINANCE_STYLE + """
+    return render_template_string(FINANCE_STYLE + FINANCE_DATE_COMPONENT + """
 
     <h1>{{ member.member_id }}</h1>
 
@@ -1370,7 +1783,7 @@ def finance_home():
     if not session.get("finance_login"):
         return redirect(url_for("finance.finance_login"))
 
-    return render_template_string(FINANCE_V5_STYLE + """
+    return render_template_string(FINANCE_V5_STYLE + FINANCE_DATE_COMPONENT + """
     <div class="finance-v5">
 
         <div class="v5-topbar">
@@ -1464,6 +1877,49 @@ def finance_home():
                     </div>
                 </div>
             </a>
+                                  
+            <a class="v5-menu-btn v5-report"
+                href="/finance/month_end">
+
+                <div class="v5-icon">📒</div>
+
+                <div class="v5-menu-text">
+
+                    <div class="v5-menu-title">
+                        财政月结
+                    </div>
+
+                    <div class="v5-menu-desc">
+
+                        Cash Bank In、
+                        对账及总会报表
+
+                    </div>
+
+                </div>
+
+            </a>
+                                  
+            <a class="v5-menu-btn v5-report"
+               href="{{ url_for('finance_import.import_home') }}">
+
+                <div class="v5-icon">
+                    📥
+                </div>
+
+                <div class="v5-menu-text">
+
+                    <div class="v5-menu-title">
+                        历史资料导入
+                    </div>
+
+                    <div class="v5-menu-desc">
+                        导入月费、善款、Petty Cash 及历史 Excel
+                    </div>
+
+                </div>
+
+            </a>
 
         </div>
 
@@ -1473,7 +1929,7 @@ def finance_home():
 @finance_bp.route("/menu/income")
 def finance_income_menu():
 
-    return render_template_string(FINANCE_V5_STYLE + """
+    return render_template_string(FINANCE_V5_STYLE + FINANCE_DATE_COMPONENT + """
     <div class="finance-v5">
 
         <div class="v5-topbar">
@@ -1604,57 +2060,94 @@ def finance_income_menu():
 def finance_expense_menu():
 
     expense_items = [
+
         ("🌸", "供花", "鲜花及供花相关支出"),
+
         ("🍎", "供果", "水果及供品相关支出"),
+
         ("🪔", "供油", "灯油及油品相关支出"),
-        ("⚡", "电费", "TNB 电费记录"),
-        ("💧", "水费", "水费记录"),
-        ("📶", "电话及网络费", "电话、WiFi、Internet"),
+
+        ("🛕", "佛台用品", "佛具、佛台及佛堂用品"),
+
+        ("⚡", "电费", "TNB 20-1、TNB 20-2"),
+
+        ("💧", "水费", "Air Selangor、Indah Water"),
+
+        ("📶", "电话及网络费", "Celcom、Digi、Unifi"),
+
         ("🛠️", "维修保养", "维修及保养费用"),
+
+        ("🏗️", "装修", "GYT、观音堂及活动中心装修"),
+
         ("🛒", "日常采购", "文具、厨房及日常用品"),
-        ("🧾", "其它支出", "其它杂项费用"),
+
+        ("📄", "执照及行政费", "License、政府及行政费用"),
+
+        ("🧾", "其它支出", "印刷、交通及其它杂项费用"),
+
     ]
 
-    return render_template_string(FINANCE_V5_STYLE + """
-    <div class="finance-v5">
+    return render_template_string(
+        FINANCE_V5_STYLE
+        + FINANCE_DATE_COMPONENT
+        + """
+<div class="finance-v5">
 
-        <div class="v5-topbar">
-            <a class="v5-back"
-               href="{{ url_for('finance.finance_home') }}">
-                ← 返回财政首页
-            </a>
-        </div>
+    <div class="v5-topbar">
 
-        <div class="v5-header">
-            <h1>🧾 支出录入</h1>
-            <p>请选择支出项目</p>
-        </div>
-
-        <div class="v5-menu-grid">
-
-            {% for icon, category, desc in expense_items %}
-            <a class="v5-menu-btn v5-expense"
-               href="{{ url_for('finance.expense', category=category) }}">
-
-                <div class="v5-icon">{{ icon }}</div>
-
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">{{ category }}</div>
-                    <div class="v5-menu-desc">{{ desc }}</div>
-                </div>
-
-            </a>
-            {% endfor %}
-
-        </div>
+        <a class="v5-back"
+           href="{{ url_for('finance.finance_home') }}">
+            ← 返回财政首页
+        </a>
 
     </div>
-    """, expense_items=expense_items)
+
+    <div class="v5-header">
+
+        <h1>🧾 支出录入</h1>
+
+        <p>请选择支出项目</p>
+
+    </div>
+
+    <div class="v5-menu-grid">
+
+        {% for icon, category, desc in expense_items %}
+
+        <a class="v5-menu-btn v5-expense"
+           href="{{ url_for('finance.expense', category=category) }}">
+
+            <div class="v5-icon">
+                {{ icon }}
+            </div>
+
+            <div class="v5-menu-text">
+
+                <div class="v5-menu-title">
+                    {{ category }}
+                </div>
+
+                <div class="v5-menu-desc">
+                    {{ desc }}
+                </div>
+
+            </div>
+
+        </a>
+
+        {% endfor %}
+
+    </div>
+
+</div>
+""",
+        expense_items=expense_items,
+    )
 
 @finance_bp.route("/menu/member")
 def finance_member_menu():
 
-    return render_template_string(FINANCE_V5_STYLE + """
+    return render_template_string(FINANCE_V5_STYLE + FINANCE_DATE_COMPONENT + """
     <div class="finance-v5">
 
         <div class="v5-topbar">
@@ -1714,60 +2207,274 @@ def finance_report_menu():
 
     today_ym = date.today().strftime("%Y-%m")
 
-    return render_template_string(FINANCE_V5_STYLE + """
-    <div class="finance-v5">
+    return render_template_string(
+        FINANCE_V5_STYLE + FINANCE_DATE_COMPONENT + """
+        <style>
+            .v5-export-card{
+                display:flex;
+                align-items:center;
+                gap:16px;
+                padding:22px;
+                border-radius:18px;
+                background:#ffffff;
+                box-shadow:0 4px 14px rgba(0,0,0,.08);
+            }
 
-        <div class="v5-topbar">
-            <a class="v5-back"
-               href="{{ url_for('finance.finance_home') }}">
-                ← 返回财政首页
-            </a>
-        </div>
+            .v5-export-icon{
+                font-size:42px;
+                flex:0 0 auto;
+            }
 
-        <div class="v5-header">
-            <h1>📊 报表与查询</h1>
-            <p>统计、记录与 Excel 月报</p>
-        </div>
+            .v5-export-content{
+                flex:1;
+                min-width:0;
+            }
 
-        <div class="v5-menu-grid">
+            .v5-export-title{
+                font-size:24px;
+                font-weight:700;
+                margin-bottom:6px;
+            }
 
-            <a class="v5-menu-btn v5-report"
-               href="{{ url_for('finance.dashboard') }}">
-                <div class="v5-icon">📈</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">财政 Dashboard</div>
-                    <div class="v5-menu-desc">
-                        查看每月收入、支出和户口统计
+            .v5-export-desc{
+                font-size:17px;
+                color:#666;
+                margin-bottom:14px;
+                line-height:1.5;
+            }
+
+            .v5-export-form{
+                display:flex;
+                align-items:center;
+                gap:10px;
+                flex-wrap:wrap;
+            }
+
+            .v5-month-input{
+                min-height:48px;
+                padding:8px 12px;
+                border:2px solid #d6dbe3;
+                border-radius:10px;
+                font-size:19px;
+                background:#fff;
+            }
+
+            .v5-download-btn{
+                min-height:48px;
+                padding:9px 18px;
+                border:0;
+                border-radius:10px;
+                font-size:18px;
+                font-weight:700;
+                cursor:pointer;
+                background:#198754;
+                color:#fff;
+            }
+
+            .v5-download-btn:hover{
+                filter:brightness(.95);
+            }
+
+            .v5-download-btn.report{
+                background:#246bfd;
+            }
+
+            @media (max-width:600px){
+                .v5-export-card{
+                    align-items:flex-start;
+                }
+
+                .v5-export-form{
+                    display:grid;
+                    grid-template-columns:1fr;
+                }
+
+                .v5-month-input,
+                .v5-download-btn{
+                    width:100%;
+                    box-sizing:border-box;
+                }
+            }
+        </style>
+
+        <div class="finance-v5">
+
+            <div class="v5-topbar">
+                <a class="v5-back"
+                href="{{ url_for('finance.finance_home') }}">
+                    ← 返回财政首页
+                </a>
+            </div>
+
+            <div class="v5-header">
+                <h1>📊 报表与查询</h1>
+                <p>统计、记录与 Excel 月报</p>
+            </div>
+
+            <div class="v5-menu-grid">
+
+                <a class="v5-menu-btn v5-report"
+                href="{{ url_for('finance.dashboard') }}">
+                    <div class="v5-icon">📈</div>
+
+                    <div class="v5-menu-text">
+                        <div class="v5-menu-title">
+                            财政 Dashboard
+                        </div>
+
+                        <div class="v5-menu-desc">
+                            查看每月收入、支出和户口统计
+                        </div>
+                    </div>
+                </a>
+
+                <a class="v5-menu-btn v5-report"
+                href="{{ url_for('finance.records') }}">
+                    <div class="v5-icon">🔎</div>
+
+                    <div class="v5-menu-text">
+                        <div class="v5-menu-title">
+                            财政记录搜索
+                        </div>
+
+                        <div class="v5-menu-desc">
+                            搜索收条、会员编号、姓名与银行 Reference
+                        </div>
+                    </div>
+                </a>
+
+                <!-- 月费收纳表 -->
+                <div class="v5-export-card">
+
+                    <div class="v5-export-icon">
+                        🧾
+                    </div>
+
+                    <div class="v5-export-content">
+
+                        <div class="v5-export-title">
+                            月费收纳表
+                        </div>
+
+                        <div class="v5-export-desc">
+                            选择月份后，导出该月份的月费收纳 Excel
+                        </div>
+
+                        <form
+                            method="get"
+                            action="{{ url_for('finance.export_monthly_fee_excel') }}"
+                            class="v5-export-form"
+                        >
+                            <input
+                                type="month"
+                                name="ym"
+                                value="{{ today_ym }}"
+                                class="v5-month-input"
+                                required
+                            >
+
+                            <button
+                                type="submit"
+                                class="v5-download-btn"
+                            >
+                                📥 下载月费收纳表
+                            </button>
+                        </form>
+
                     </div>
                 </div>
-            </a>
 
-            <a class="v5-menu-btn v5-report"
-               href="{{ url_for('finance.records') }}">
-                <div class="v5-icon">🔎</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">财政记录搜索</div>
-                    <div class="v5-menu-desc">
-                        搜索收条、会员编号、姓名与银行 Reference
+                <!-- 专业版月报 -->
+                <div class="v5-export-card">
+
+                    <div class="v5-export-icon">
+                        📊
+                    </div>
+
+                    <div class="v5-export-content">
+
+                        <div class="v5-export-title">
+                            下载专业版月报
+                        </div>
+
+                        <div class="v5-export-desc">
+                            选择月份后，下载收入、支出及户口统计月报
+                        </div>
+
+                        <form
+                            method="get"
+                            action="{{ url_for('finance.export_monthly_report') }}"
+                            class="v5-export-form"
+                        >
+                            <input
+                                type="month"
+                                name="ym"
+                                value="{{ today_ym }}"
+                                class="v5-month-input"
+                                required
+                            >
+
+                            <button
+                                type="submit"
+                                class="v5-download-btn report"
+                            >
+                                📥 下载专业版月报
+                            </button>
+                        </form>
+
                     </div>
                 </div>
-            </a>
 
-            <a class="v5-menu-btn v5-report"
-               href="{{ url_for('finance.export_monthly_report', ym=today_ym) }}">
-                <div class="v5-icon">📥</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">下载专业版月报</div>
-                    <div class="v5-menu-desc">
-                        下载 {{ today_ym }} Excel 财政月报
+            </div>
+
+            <div class="v5-export-card">
+
+                <div class="v5-export-icon">🙏</div>
+
+                <div class="v5-export-content">
+
+                    <div class="v5-export-title">
+                        财布施收纳表
                     </div>
+
+                    <div class="v5-export-desc">
+                        选择月份后，导出财布施 Excel
+                    </div>
+
+                    <form
+                        method="get"
+                        action="{{ url_for('finance.export_donation_excel') }}"
+                        class="v5-export-form"
+                    >
+                        <input
+                            type="hidden"
+                            name="category"
+                            value="财布施"
+                        >
+
+                        <input
+                            type="month"
+                            name="ym"
+                            value="{{ today_ym }}"
+                            class="v5-month-input"
+                            required
+                        >
+
+                        <button
+                            type="submit"
+                            class="v5-download-btn"
+                        >
+                            📥 下载财布施收纳表
+                        </button>
+                    </form>
+
                 </div>
-            </a>
+            </div>
 
         </div>
-
-    </div>
-    """, today_ym=today_ym)
+        """,
+        today_ym=today_ym,
+    )
 
 @finance_bp.route("/member_management")
 def member_management():
@@ -1816,7 +2523,7 @@ def member_management():
 
     total_members = len(rows)
 
-    return render_template_string("""
+    return render_template_string(FINANCE_DATE_COMPONENT + """
     <!doctype html>
     <html lang="zh">
     <head>
@@ -2338,7 +3045,7 @@ def monthly_fee_batch(branch):
 
     default_amount = money(
         request.form.get("default_amount")
-        or 50
+        or 350
     )
 
     def make_receipt_no(start_no, index):
@@ -2382,6 +3089,7 @@ def monthly_fee_batch(branch):
         rows = []
         current_receipt_date = default_receipt_date
         receipt_index = 0
+        today_date = date.today()
 
         for line_no, original_line in enumerate(
             raw_text.splitlines(),
@@ -2400,30 +3108,49 @@ def monthly_fee_batch(branch):
                         "error": (
                             f"第 {line_no} 行日期无效：{line}"
                         ),
+                        "warning": "",
                         "raw": line,
                         "receipt_date": "",
                     })
+
                 elif not parsed_date:
                     rows.append({
                         "error": (
                             f"第 {line_no} 行日期格式错误，"
                             "请使用 @YYYY-MM-DD"
                         ),
+                        "warning": "",
                         "raw": line,
                         "receipt_date": "",
                     })
+
                 else:
                     current_receipt_date = parsed_date
 
                 continue
 
             parts = line.split()
-            raw_member_id = parts[0].strip()
 
-            if len(parts) >= 2:
-                amount = money(parts[1])
+            # 支持：
+            # 108
+            # 108 100
+            # 张三
+            # 张三 100
+            if (
+                len(parts) >= 2
+                and re.fullmatch(
+                    r"\d+(?:\.\d+)?",
+                    parts[-1]
+                )
+            ):
+                amount = money(parts[-1])
+                raw_member_keyword = (
+                    " ".join(parts[:-1]).strip()
+                )
+
             else:
                 amount = default_amount
+                raw_member_keyword = line
 
             receipt_no = make_receipt_no(
                 receipt_start,
@@ -2431,25 +3158,84 @@ def monthly_fee_batch(branch):
             )
             receipt_index += 1
 
+            error_messages = []
+            warning_messages = []
+
+            # A. 金额基本检查
             if amount <= 0:
+                error_messages.append(
+                    f"第 {line_no} 行金额无效：{line}"
+                )
+
+            # 月费必须是 RM50 的倍数
+            elif amount % 50 != 0:
+                error_messages.append(
+                    f"月费 RM{amount:.2f} "
+                    "不是 RM50 的倍数"
+                )
+
+            # B. 日期检查
+            try:
+                receipt_date_obj = date.fromisoformat(
+                    current_receipt_date
+                )
+
+                # V6：检查该收条月份是否已经月结
+                month_lock_error = require_finance_month_open(
+                    current_receipt_date,
+                    get_fund_account("月费")
+                )
+
+                if month_lock_error:
+                    error_messages.append(
+                        month_lock_error
+                    )
+
+                if receipt_date_obj > today_date:
+                    error_messages.append(
+                        "收条日期是未来日期"
+                    )
+
+                else:
+                    days_old = (
+                        today_date - receipt_date_obj
+                    ).days
+
+                    if days_old > 30:
+                        warning_messages.append(
+                            f"收条日期距今已有 "
+                            f"{days_old} 天，"
+                            "请确认是否为旧账补录"
+                        )
+
+            except (TypeError, ValueError):
+                error_messages.append(
+                    "收条日期格式无效"
+                )
+
+            if error_messages:
                 rows.append({
-                    "error": (
-                        f"第 {line_no} 行金额无效：{line}"
-                    ),
+                    "error": "；".join(error_messages),
+                    "warning": "；".join(warning_messages),
                     "raw": line,
                     "receipt_no": receipt_no,
                     "receipt_date": current_receipt_date,
                 })
                 continue
 
-            if raw_member_id.isdigit():
-                member_id = f"{branch}-{int(raw_member_id)}"
+            # C. 会员查找
+            if raw_member_keyword.isdigit():
+                member_id = (
+                    f"{branch}-{int(raw_member_keyword)}"
+                )
+
             else:
                 member_id = normalize_member_id(
-                    raw_member_id,
+                    raw_member_keyword,
                     default_branch=branch
                 )
 
+            # 先按会员编号查找
             member = db_query("""
                 select *
                 from members
@@ -2459,22 +3245,72 @@ def monthly_fee_batch(branch):
                 member_id,
             ), fetchone=True)
 
+            # 编号找不到时，再按中文名或英文名查找
+            if not member:
+                name_matches = db_query("""
+                    select *
+                    from members
+                    where branch = %s
+                      and (
+                            lower(trim(name))
+                                = lower(trim(%s))
+                         or lower(
+                                trim(
+                                    coalesce(
+                                        english_name,
+                                        ''
+                                    )
+                                )
+                            )
+                                = lower(trim(%s))
+                      )
+                    order by member_id
+                    limit 2
+                """, (
+                    branch,
+                    raw_member_keyword,
+                    raw_member_keyword,
+                ), fetchall=True) or []
+
+                if len(name_matches) == 1:
+                    member = name_matches[0]
+
+                elif len(name_matches) > 1:
+                    rows.append({
+                        "error": (
+                            f"第 {line_no} 行姓名有重复，"
+                            "请改用会员编号："
+                            f"{raw_member_keyword}"
+                        ),
+                        "warning": "",
+                        "raw": line,
+                        "receipt_no": receipt_no,
+                        "receipt_date": current_receipt_date,
+                    })
+                    continue
+
             if not member:
                 rows.append({
                     "error": (
                         f"第 {line_no} 行找不到会员："
-                        f"{raw_member_id}"
+                        f"{raw_member_keyword}"
                     ),
+                    "warning": "",
                     "raw": line,
                     "receipt_no": receipt_no,
                     "receipt_date": current_receipt_date,
                 })
                 continue
 
+            # 姓名查找成功后，必须改用数据库里的正式编号
+            member_id = member["member_id"]
+
+            # D. 计算供养月份
             paid = db_query("""
                 select max(end_month) as paid_until
                 from member_payments
                 where member_id = %s
+                  and coalesce(status, 'active') = 'active'
             """, (
                 member_id,
             ), fetchone=True)
@@ -2489,17 +3325,15 @@ def monthly_fee_batch(branch):
                 paid_until_date
             )
 
-            month_count = max(
-                1,
-                round(amount / 50)
-            )
+            month_count = int(amount / 50)
 
             month_to = add_months_ym(
                 month_from,
                 month_count - 1
             )
 
-            existing = db_query("""
+            # E. 收条重复检查
+            existing_finance = db_query("""
                 select id
                 from finance_records
                 where receipt_no = %s
@@ -2508,21 +3342,93 @@ def monthly_fee_batch(branch):
                 receipt_no,
             ), fetchone=True)
 
+            existing_payment = db_query("""
+                select id
+                from member_payments
+                where receipt_no = %s
+                  and coalesce(status, 'active') = 'active'
+                limit 1
+            """, (
+                receipt_no,
+            ), fetchone=True)
+
+            if existing_finance and existing_payment:
+                error_messages.append(
+                    "收条已存在于财政记录和月费查询"
+                )
+
+            elif existing_finance:
+                error_messages.append(
+                    "收条已存在于财政记录"
+                )
+
+            elif existing_payment:
+                error_messages.append(
+                    "收条已存在于月费查询"
+                )
+
+            # F. 同一会员、同一天重复月费提醒
+            same_day_payment = db_query("""
+                select
+                    receipt_no,
+                    amount
+                from member_payments
+                where member_id = %s
+                  and receipt_date = %s
+                  and coalesce(status, 'active') = 'active'
+                order by id desc
+                limit 1
+            """, (
+                member_id,
+                current_receipt_date,
+            ), fetchone=True)
+
+            if same_day_payment:
+                old_receipt = (
+                    same_day_payment.get("receipt_no")
+                    or "无收条编号"
+                )
+
+                old_amount = float(
+                    same_day_payment.get("amount")
+                    or 0
+                )
+
+                warning_messages.append(
+                    "此会员同一天已有月费记录："
+                    f"{old_receipt}，"
+                    f"RM{old_amount:.2f}"
+                )
+
+            # G. 银行付款日期检查
             if payment_method == "银行过账":
                 row_payment_date = bank_payment_date
+
+                try:
+                    payment_date_obj = date.fromisoformat(
+                        row_payment_date
+                    )
+
+                    if payment_date_obj > today_date:
+                        error_messages.append(
+                            "银行付款日期是未来日期"
+                        )
+
+                except (TypeError, ValueError):
+                    error_messages.append(
+                        "银行付款日期格式无效"
+                    )
+
             else:
                 row_payment_date = current_receipt_date
 
             rows.append({
-                "error": (
-                    "收条已存在"
-                    if existing
-                    else ""
-                ),
+                "error": "；".join(error_messages),
+                "warning": "；".join(warning_messages),
                 "receipt_no": receipt_no,
                 "receipt_date": current_receipt_date,
                 "payment_date": row_payment_date,
-                "member_id": member["member_id"],
+                "member_id": member_id,
                 "name": (
                     member.get("姓名")
                     or member.get("name")
@@ -2554,7 +3460,7 @@ def monthly_fee_batch(branch):
             )
 
         elif not raw_text:
-            message = "请输入批量月费资料"
+            message = "请先加入或贴上月费资料"
 
         else:
             preview_rows = build_preview()
@@ -2575,101 +3481,153 @@ def monthly_fee_batch(branch):
 
             elif action == "confirm" and not has_error:
 
+                confirm_lock_error = None
+
+                # 保存前重新检查所有月份
+                # 防止预览后，该月份才被别人完成月结
                 for row in data_rows:
-                    month_from_db = (
-                        row["month_from"] + "-01"
+
+                    confirm_lock_error = (
+                        require_finance_month_open(
+                            row["receipt_date"],
+                            get_fund_account("月费")
+                        )
                     )
 
-                    month_to_db = (
-                        row["month_to"] + "-01"
-                    )
+                    if confirm_lock_error:
+                        break
 
-                    db_query("""
-                        insert into finance_records
-                        (
-                            record_type,
-                            fund_account,
-                            record_date,
-                            receipt_date,
-                            category,
-                            receipt_no,
-                            member_id,
-                            name,
-                            phone,
-                            amount,
+                if confirm_lock_error:
+
+                    message = confirm_lock_error
+
+                else:
+
+                    for row in data_rows:
+                        month_from_db = (
+                            row["month_from"] + "-01"
+                        )
+
+                        month_to_db = (
+                            row["month_to"] + "-01"
+                        )
+
+                        db_query("""
+                            insert into finance_records
+                            (
+                                record_type,
+                                fund_account,
+                                record_date,
+                                receipt_date,
+                                category,
+                                receipt_no,
+                                member_id,
+                                name,
+                                phone,
+                                amount,
+                                payment_method,
+                                month_from,
+                                month_to,
+                                remarks
+                            )
+                            values
+                            (
+                                %s, %s, %s, %s,
+                                '月费',
+                                %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s
+                            )
+                        """, (
+                            "income",
+                            get_fund_account("月费"),
+                            row["payment_date"],
+                            row["receipt_date"],
+                            row["receipt_no"],
+                            row["member_id"],
+                            row["name"],
+                            row["phone"],
+                            row["amount"],
                             payment_method,
-                            month_from,
-                            month_to,
-                            remarks
-                        )
-                        values
-                        (
-                            %s, %s, %s, %s,
-                            '月费',
-                            %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s
-                        )
-                    """, (
-                        "income",
-                        get_fund_account("月费"),
-                        row["payment_date"],
-                        row["receipt_date"],
-                        row["receipt_no"],
-                        row["member_id"],
-                        row["name"],
-                        row["phone"],
-                        row["amount"],
-                        payment_method,
-                        row["month_from"],
-                        row["month_to"],
-                        "批量月费录入",
-                    ))
+                            row["month_from"],
+                            row["month_to"],
+                            "批量月费录入",
+                        ))
 
-                    db_query("""
-                        insert into member_payments
-                        (
-                            payment_date,
-                            receipt_date,
-                            member_id,
-                            name,
-                            receipt_no,
-                            amount,
-                            start_month,
-                            end_month,
-                            month_count
-                        )
-                        values
-                        (
-                            %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s
-                        )
-                    """, (
-                        row["payment_date"],
-                        row["receipt_date"],
-                        row["member_id"],
-                        row["name"],
-                        row["receipt_no"],
-                        row["amount"],
-                        month_from_db,
-                        month_to_db,
-                        row["month_count"],
-                    ))
+                        db_query("""
+                            insert into member_payments
+                            (
+                                payment_date,
+                                receipt_date,
+                                member_id,
+                                name,
+                                receipt_no,
+                                amount,
+                                start_month,
+                                end_month,
+                                month_count
+                            )
+                            values
+                            (
+                                %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s
+                            )
+                        """, (
+                            row["payment_date"],
+                            row["receipt_date"],
+                            row["member_id"],
+                            row["name"],
+                            row["receipt_no"],
+                            row["amount"],
+                            month_from_db,
+                            month_to_db,
+                            row["month_count"],
+                        ))
 
-                return redirect(
-                    url_for("finance.records")
-                )
+                    return redirect(
+                        url_for("finance.records")
+                    )
 
-    return render_template_string("""
+# ============================================================
+# 页面预览区还要做以下两处修改
+# ============================================================
+
+# 1. 在 <style> 中加入：
+#
+# .preview-warning{
+#     color:#b77900;
+#     font-weight:700;
+# }
+#
+# 2. 把“检查结果”单元格替换成：
+#
+# {% if r.error %}
+#     <span class="preview-error">
+#         ❌ {{ r.error }}
+#     </span>
+#
+# {% elif r.warning %}
+#     <span class="preview-warning">
+#         ⚠️ {{ r.warning }}
+#     </span>
+#
+# {% else %}
+#     <span class="preview-success">
+#         ✅ 可以入账
+#     </span>
+# {% endif %}
+#
+# 注意：
+# - error 会阻止“确认全部入账”
+# - warning 只提醒，仍然允许确认入账
+
+    return render_template_string(FINANCE_DATE_COMPONENT + """
     <!doctype html>
     <html lang="zh">
     <head>
         <meta charset="utf-8">
-        <meta
-            name="viewport"
-            content="width=device-width, initial-scale=1"
-        >
+        <meta name="viewport" content="width=device-width, initial-scale=1">
 
-        <title>{{ branch }} 批量月费录入</title>
+        <title>{{ branch }} 月费录入</title>
 
         <link
             rel="stylesheet"
@@ -2678,7 +3636,7 @@ def monthly_fee_batch(branch):
 
         <style>
             .finance-form-page{
-                max-width:980px;
+                max-width:920px;
             }
 
             .finance-header-card{
@@ -2696,28 +3654,38 @@ def monthly_fee_batch(branch):
                 margin-bottom:16px;
             }
 
+            .step-title{
+                display:flex;
+                align-items:center;
+                gap:10px;
+                margin-bottom:18px;
+            }
+
+            .step-title .section-title{
+                margin:0;
+            }
+
             .step-badge{
+                flex:0 0 auto;
                 display:inline-flex;
                 align-items:center;
                 justify-content:center;
-                min-width:34px;
-                height:34px;
-                padding:0 10px;
-                margin-right:8px;
-                border-radius:999px;
+                width:36px;
+                height:36px;
+                border-radius:50%;
                 background:#1769aa;
                 color:#fff;
-                font-size:16px;
+                font-size:17px;
                 font-weight:800;
             }
 
-            .finance-form-grid{
+            .settings-grid{
                 display:grid;
                 grid-template-columns:repeat(2,minmax(0,1fr));
                 gap:16px;
             }
 
-            .finance-form-grid .form-group{
+            .settings-grid .form-group{
                 margin:0;
             }
 
@@ -2727,13 +3695,12 @@ def monthly_fee_batch(branch):
 
             .receipt-input-row{
                 display:flex;
-                align-items:center;
+                align-items:stretch;
                 gap:10px;
             }
 
             .receipt-prefix{
-                min-height:52px;
-                min-width:76px;
+                min-width:78px;
                 display:flex;
                 align-items:center;
                 justify-content:center;
@@ -2758,63 +3725,128 @@ def monthly_fee_batch(branch):
                 margin-top:7px;
             }
 
+            .quick-member-row{
+                display:grid;
+                grid-template-columns:minmax(0,1fr) 280px;
+                gap:14px;
+                align-items:end;
+            }
+
+            .amount-panel{
+                display:grid;
+                grid-template-columns:54px 1fr 54px;
+                gap:8px;
+                align-items:stretch;
+            }
+
+            .amount-step-btn{
+                border:1px solid #cbd5e1;
+                border-radius:10px;
+                background:#f8fafc;
+                color:#172033;
+                font-size:25px;
+                font-weight:800;
+                cursor:pointer;
+            }
+
+            .amount-step-btn:hover{
+                background:#eaf4ff;
+                border-color:#8fbce0;
+            }
+
+            .amount-step-btn:active{
+                transform:scale(.97);
+            }
+
+            #quick_amount{
+                text-align:center;
+                font-size:25px;
+                font-weight:800;
+            }
+
+            .amount-shortcuts{
+                display:flex;
+                flex-wrap:wrap;
+                gap:8px;
+                margin-top:12px;
+            }
+
+            .amount-chip{
+                min-width:72px;
+                border:1px solid #cbd5e1;
+                border-radius:999px;
+                background:#fff;
+                padding:9px 14px;
+                color:#1769aa;
+                font-size:16px;
+                font-weight:800;
+                cursor:pointer;
+            }
+
+            .amount-chip:hover{
+                background:#eaf4ff;
+                border-color:#8fbce0;
+            }
+
+            .quick-add-btn{
+                width:100%;
+                margin-top:16px;
+            }
+
             .batch-textarea{
                 width:100%;
-                min-height:330px;
+                min-height:250px;
                 resize:vertical;
                 line-height:1.75;
                 font-family:Consolas,"Microsoft YaHei",monospace;
                 font-size:18px;
             }
 
-            .batch-guide-grid{
+            .batch-help-grid{
                 display:grid;
                 grid-template-columns:repeat(3,minmax(0,1fr));
-                gap:12px;
-                margin-top:14px;
+                gap:10px;
+                margin-top:12px;
             }
 
-            .batch-guide-item{
-                background:#f8fafc;
+            .batch-help-item{
+                padding:12px 14px;
                 border:1px solid #dbe3ed;
                 border-radius:12px;
-                padding:13px 15px;
+                background:#f8fafc;
                 color:#475467;
                 font-size:14px;
-                line-height:1.65;
+                line-height:1.6;
             }
 
-            .batch-guide-item strong{
+            .batch-help-item strong{
                 display:block;
                 margin-bottom:4px;
                 color:#172033;
             }
 
-            .batch-guide-item code{
-                font-family:Consolas,monospace;
+            .batch-help-item code{
                 color:#1769aa;
                 font-weight:800;
             }
 
-            .date-note{
-                margin-top:14px;
-                padding:14px 16px;
-                border-radius:12px;
-                background:#fff8e8;
-                border:1px solid #f1d39b;
-                color:#795400;
-                line-height:1.65;
+            .action-row{
+                display:grid;
+                grid-template-columns:1fr 1fr;
+                gap:12px;
+                margin-top:18px;
             }
 
-            .action-row{
-                display:flex;
-                flex-wrap:wrap;
-                gap:12px;
-                margin-top:20px;
+            .action-row.single{
+                grid-template-columns:1fr;
             }
 
             .action-row .btn-tool{
-                min-width:180px;
+                width:100%;
+            }
+
+            .payment-date-box{
+                display:none;
             }
 
             .preview-success{
@@ -2827,19 +3859,22 @@ def monthly_fee_batch(branch):
                 font-weight:700;
             }
 
-            .payment-date-box{
-                display:none;
-            }
-
             .preview-date{
                 white-space:nowrap;
                 font-weight:700;
                 color:#1769aa;
             }
+                                  
+            .preview-warning{
+                color:#b77900;
+                font-weight:700;
+            }
 
             @media(max-width:760px){
-                .finance-form-grid,
-                .batch-guide-grid{
+                .settings-grid,
+                .quick-member-row,
+                .batch-help-grid,
+                .action-row{
                     grid-template-columns:1fr;
                 }
 
@@ -2850,20 +3885,11 @@ def monthly_fee_batch(branch):
                 .receipt-input-row{
                     align-items:stretch;
                 }
-
-                .action-row{
-                    display:grid;
-                }
-
-                .action-row .btn-tool{
-                    width:100%;
-                }
             }
         </style>
     </head>
 
     <body>
-
     <div class="page finance-form-page">
 
         <div class="finance-back-row">
@@ -2876,92 +3902,30 @@ def monthly_fee_batch(branch):
         </div>
 
         <div class="card finance-header-card">
-            <h1 class="page-title">
-                💳 {{ branch }} 批量月费录入
-            </h1>
-
+            <h1 class="page-title">💳 {{ branch }} 月费录入</h1>
             <p class="page-subtitle">
-                可在同一批资料中切换不同收条日期，系统会自动找姓名、计算月份和排列收条。
+                先设定收条资料，再加入会员；单笔与批量共用同一份待录入清单。
             </p>
         </div>
 
         {% if message %}
-            <div class="alert alert-danger">
-                {{ message }}
-            </div>
+            <div class="alert alert-danger">{{ message }}</div>
         {% endif %}
 
         <form method="post">
 
             <div class="card">
-                <h2 class="section-title">
+                <div class="step-title">
                     <span class="step-badge">1</span>
-                    输入会员编号、金额与日期
-                </h2>
-
-                <p class="page-subtitle">
-                    每行一位会员；遇到不同收条日期时，先输入一行
-                    <strong>@YYYY-MM-DD</strong>。
-                </p>
-
-                <textarea
-                    class="form-input batch-textarea"
-                    name="raw_text"
-                    autofocus
-                    placeholder="例如：
-@2026-07-10
-208
-160
-188 100
-
-@2026-07-11
-69
-205 300"
-                    required
-                >{{ raw_text }}</textarea>
-
-                <div class="batch-guide-grid">
-                    <div class="batch-guide-item">
-                        <strong>普通月费</strong>
-                        <code>208</code><br>
-                        使用下方默认金额。
-                    </div>
-
-                    <div class="batch-guide-item">
-                        <strong>特别金额</strong>
-                        <code>188 100</code><br>
-                        会员 188，金额 RM100。
-                    </div>
-
-                    <div class="batch-guide-item">
-                        <strong>切换收条日期</strong>
-                        <code>@2026-07-11</code><br>
-                        之后的会员使用这个日期。
-                    </div>
+                    <h2 class="section-title">收条资料与单笔加入</h2>
                 </div>
 
-                <div class="date-note">
-                    没有写 <strong>@日期</strong> 的会员，会使用下方的“默认开收条日期”。
-                    收条号码仍会按输入顺序连续排列。
-                </div>
-            </div>
-
-            <div class="card">
-                <h2 class="section-title">
-                    <span class="step-badge">2</span>
-                    检查收条与付款资料
-                </h2>
-
-                <div class="finance-form-grid">
+                <div class="settings-grid">
                     <div class="form-group">
-                        <label class="form-label">
-                            收条开始号码
-                        </label>
+                        <label class="form-label">收条开始号码</label>
 
                         <div class="receipt-input-row">
-                            <div class="receipt-prefix">
-                                {{ branch }}
-                            </div>
+                            <div class="receipt-prefix">{{ branch }}</div>
 
                             <input
                                 class="form-input"
@@ -2974,15 +3938,12 @@ def monthly_fee_batch(branch):
                         </div>
 
                         <span class="field-help">
-                            系统建议下一张收条：
-                            <strong>{{ next_receipt_no }}</strong>
+                            系统建议下一张：<strong>{{ next_receipt_no }}</strong>
                         </span>
                     </div>
 
                     <div class="form-group">
-                        <label class="form-label">
-                            默认开收条日期
-                        </label>
+                        <label class="form-label">默认开收条日期</label>
 
                         <input
                             class="form-input"
@@ -2993,14 +3954,124 @@ def monthly_fee_batch(branch):
                         >
 
                         <span class="field-help">
-                            只用于没有写 @日期 的会员。
+                            没有写 @日期 的会员会使用这个日期。
                         </span>
+                    </div>
+                </div>
+
+                <div style="border-top:1px solid #e2e8f0;margin:22px 0 18px;"></div>
+
+                <h3 class="entry-method-title" style="margin-bottom:12px;">
+                    👤 单笔快速加入
+                </h3>
+
+                <div class="quick-member-row">
+                    <div class="form-group">
+                        <label class="form-label">会员编号或姓名</label>
+                        <input
+                            class="form-input"
+                            id="quick_member_keyword"
+                            type="text"
+                            placeholder="例如：108、{{ branch }}-108、张三"
+                            autocomplete="off"
+                        >
                     </div>
 
                     <div class="form-group">
-                        <label class="form-label">
-                            付款方式
-                        </label>
+                        <label class="form-label">本笔金额 RM</label>
+                        <div class="amount-panel">
+                            <button
+                                type="button"
+                                class="amount-step-btn"
+                                onclick="changeQuickAmount(-50)"
+                            >−</button>
+
+                            <input
+                                class="form-input"
+                                id="quick_amount"
+                                type="number"
+                                min="50"
+                                step="50"
+                                value="{{ default_amount }}"
+                            >
+
+                            <button
+                                type="button"
+                                class="amount-step-btn"
+                                onclick="changeQuickAmount(50)"
+                            >＋</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="amount-shortcuts">
+                    {% for amount in [50, 100, 150, 200, 250, 300] %}
+                        <button
+                            type="button"
+                            class="amount-chip"
+                            onclick="setQuickAmount({{ amount }})"
+                        >
+                            RM{{ amount }}
+                        </button>
+                    {% endfor %}
+                </div>
+
+                <button
+                    class="btn-tool btn-success quick-add-btn"
+                    type="button"
+                    onclick="addQuickMember()"
+                >
+                    ➕ 加入待录入清单
+                </button>
+            </div>
+
+            <div class="card">
+                <div class="step-title">
+                    <span class="step-badge">2</span>
+                    <h2 class="section-title">待录入清单与付款资料</h2>
+                </div>
+
+                <p class="page-subtitle" style="margin-top:-6px;">
+                    单笔加入会自动出现在这里，也可以直接贴上多位会员资料。
+                </p>
+
+                <textarea
+                    class="form-input batch-textarea"
+                    id="raw_text"
+                    name="raw_text"
+                    placeholder="例如：
+    @2026-07-10
+    108
+    张三
+    188 100
+
+    @2026-07-11
+    69
+    205 300"
+                >{{ raw_text }}</textarea>
+
+                <div class="batch-help-grid">
+                    <div class="batch-help-item">
+                        <strong>普通月费</strong>
+                        <code>108</code> 或 <code>张三</code>
+                    </div>
+
+                    <div class="batch-help-item">
+                        <strong>指定金额</strong>
+                        <code>188 100</code>
+                    </div>
+
+                    <div class="batch-help-item">
+                        <strong>切换收条日期</strong>
+                        <code>@2026-07-11</code>
+                    </div>
+                </div>
+
+                <div style="border-top:1px solid #e2e8f0;margin:22px 0 18px;"></div>
+
+                <div class="settings-grid">
+                    <div class="form-group">
+                        <label class="form-label">付款方式</label>
 
                         <select
                             class="form-input"
@@ -3011,9 +4082,7 @@ def monthly_fee_batch(branch):
                             {% for method in ['现金', '银行过账', '支票'] %}
                                 <option
                                     value="{{ method }}"
-                                    {% if payment_method == method %}
-                                        selected
-                                    {% endif %}
+                                    {% if payment_method == method %}selected{% endif %}
                                 >
                                     {{ method }}
                                 </option>
@@ -3025,9 +4094,7 @@ def monthly_fee_batch(branch):
                         class="form-group payment-date-box"
                         id="payment_date_box"
                     >
-                        <label class="form-label">
-                            银行付款日期
-                        </label>
+                        <label class="form-label">银行付款日期</label>
 
                         <input
                             class="form-input"
@@ -3035,34 +4102,28 @@ def monthly_fee_batch(branch):
                             type="date"
                             value="{{ bank_payment_date }}"
                         >
-
-                        <span class="field-help">
-                            银行过账时整批共用这个付款日期；每笔收条日期仍按 @日期 分组。
-                        </span>
                     </div>
 
                     <div class="form-group finance-full">
-                        <label class="form-label">
-                            默认月费 RM
-                        </label>
+                        <label class="form-label">批量清单默认月费 RM</label>
 
                         <input
                             class="form-input"
                             name="default_amount"
                             type="number"
                             step="50"
-                            min="1"
+                            min="50"
                             value="{{ default_amount }}"
                             required
                         >
 
                         <span class="field-help">
-                            只输入会员编号时使用这个金额；编号后面有金额时，以该金额为准。
+                            清单只写编号或姓名时使用；行内有金额时，以行内金额为准。
                         </span>
                     </div>
                 </div>
 
-                <div class="action-row">
+                <div class="action-row {% if not (preview_rows and not has_preview_error) %}single{% endif %}">
                     <button
                         class="btn-tool btn-primary"
                         type="submit"
@@ -3088,10 +4149,10 @@ def monthly_fee_batch(branch):
 
             {% if preview_rows %}
                 <div class="card">
-                    <h2 class="section-title">
+                    <div class="step-title">
                         <span class="step-badge">3</span>
-                        月费录入预览
-                    </h2>
+                        <h2 class="section-title">月费录入预览</h2>
+                    </div>
 
                     <div class="table-responsive">
                         <table class="record-table">
@@ -3113,19 +4174,9 @@ def monthly_fee_batch(branch):
                                 {% for r in preview_rows %}
                                     <tr>
                                         <td>{{ r.receipt_no or '-' }}</td>
-
-                                        <td class="preview-date">
-                                            {{ r.receipt_date or '-' }}
-                                        </td>
-
-                                        <td>
-                                            <strong>
-                                                {{ r.member_id or '-' }}
-                                            </strong>
-                                        </td>
-
+                                        <td class="preview-date">{{ r.receipt_date or '-' }}</td>
+                                        <td><strong>{{ r.member_id or '-' }}</strong></td>
                                         <td>{{ r.name or '-' }}</td>
-
                                         <td>
                                             {% if r.amount %}
                                                 RM {{ '%.2f'|format(r.amount) }}
@@ -3133,10 +4184,8 @@ def monthly_fee_batch(branch):
                                                 -
                                             {% endif %}
                                         </td>
-
                                         <td>{{ r.month_from or '-' }}</td>
                                         <td>{{ r.month_to or '-' }}</td>
-
                                         <td>
                                             {% if r.month_count %}
                                                 {{ r.month_count }} 个月
@@ -3144,12 +4193,17 @@ def monthly_fee_batch(branch):
                                                 -
                                             {% endif %}
                                         </td>
-
                                         <td>
                                             {% if r.error %}
                                                 <span class="preview-error">
                                                     ❌ {{ r.error }}
                                                 </span>
+
+                                            {% elif r.warning %}
+                                                <span class="preview-warning">
+                                                    ⚠️ {{ r.warning }}
+                                                </span>
+
                                             {% else %}
                                                 <span class="preview-success">
                                                     ✅ 可以入账
@@ -3165,27 +4219,99 @@ def monthly_fee_batch(branch):
             {% endif %}
 
         </form>
-
     </div>
 
     <script>
-    function togglePaymentDate(){
-        const method = document.getElementById(
-            "payment_method"
-        ).value;
+    function changeQuickAmount(change){
+        const input = document.getElementById("quick_amount");
 
-        const box = document.getElementById(
-            "payment_date_box"
-        );
+        if(!input){
+            return;
+        }
 
-        box.style.display = (
-            method === "银行过账"
-            ? "block"
-            : "none"
-        );
+        let current = Number(input.value);
+
+        if(!Number.isFinite(current)){
+            current = 50;
+        }
+
+        current += change;
+
+        if(current < 50){
+            current = 50;
+        }
+
+        input.value = current;
     }
 
-    togglePaymentDate();
+    function setQuickAmount(amount){
+        const input = document.getElementById("quick_amount");
+
+        if(input){
+            input.value = amount;
+        }
+    }
+
+    function addQuickMember(){
+        const keywordInput = document.getElementById("quick_member_keyword");
+        const amountInput = document.getElementById("quick_amount");
+        const textarea = document.getElementById("raw_text");
+
+        if(!keywordInput || !amountInput || !textarea){
+            return;
+        }
+
+        const keyword = keywordInput.value.trim();
+        const amount = amountInput.value.trim();
+
+        if(!keyword){
+            alert("请输入会员编号或姓名");
+            keywordInput.focus();
+            return;
+        }
+
+        const newLine = amount
+            ? keyword + " " + amount
+            : keyword;
+
+        const current = textarea.value.trim();
+
+        textarea.value = current
+            ? current + "\\n" + newLine
+            : newLine;
+
+        keywordInput.value = "";
+        keywordInput.focus();
+        textarea.scrollTop = textarea.scrollHeight;
+    }
+
+    function togglePaymentDate(){
+        const method = document.getElementById("payment_method");
+        const box = document.getElementById("payment_date_box");
+
+        if(!method || !box){
+            return;
+        }
+
+        box.style.display = method.value === "银行过账"
+            ? "block"
+            : "none";
+    }
+
+    document.addEventListener("DOMContentLoaded", function(){
+        const keywordInput = document.getElementById("quick_member_keyword");
+
+        if(keywordInput){
+            keywordInput.addEventListener("keydown", function(event){
+                if(event.key === "Enter"){
+                    event.preventDefault();
+                    addQuickMember();
+                }
+            });
+        }
+
+        togglePaymentDate();
+    });
     </script>
 
     </body>
@@ -3335,7 +4461,7 @@ def normal_income(category):
 
                 return redirect(url_for("finance.records"))
 
-    return render_template_string(FINANCE_STYLE + """
+    return render_template_string(FINANCE_STYLE + FINANCE_DATE_COMPONENT + """
     <h1>{{ category }}</h1>
 
     {% if message %}
@@ -3634,7 +4760,14 @@ def income_batch(category):
 
             error = ""
 
-            if not name:
+            month_lock_error = require_finance_month_open(
+                current_receipt_date,
+                get_fund_account(category)
+            )
+
+            if month_lock_error:
+                error = month_lock_error
+            elif not name:
                 error = "姓名不能为空"
             elif amount <= 0:
                 error = "金额必须大过 0"
@@ -3688,45 +4821,60 @@ def income_batch(category):
 
             if action == "confirm" and not has_error:
 
+                confirm_lock_error = None
+
                 for r in preview_rows:
+                    confirm_lock_error = require_finance_month_open(
+                        r["receipt_date"],
+                        get_fund_account(category)
+                    )
 
-                    db_query("""
-                        insert into finance_records
-                        (
-                            record_type,
-                            fund_account,
-                            record_date,
-                            receipt_date,
+                    if confirm_lock_error:
+                        break
+
+                if confirm_lock_error:
+                    message = confirm_lock_error
+
+                else:
+                    for r in preview_rows:
+
+                            db_query("""
+                            insert into finance_records
+                            (
+                                record_type,
+                                fund_account,
+                                record_date,
+                                receipt_date,
+                                category,
+                                receipt_no,
+                                name,
+                                phone,
+                                amount,
+                                payment_method,
+                                remarks
+                            )
+                            values
+                            (
+                                %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s
+                            )
+                        """, (
+                            "income",
+                            get_fund_account(category),
+                            r["receipt_date"],
+                            r["receipt_date"],
                             category,
-                            receipt_no,
-                            name,
-                            phone,
-                            amount,
+                            r["receipt_no"],
+                            r["name"],
+                            r["phone"],
+                            r["amount"],
                             payment_method,
-                            remarks
-                        )
-                        values
-                        (
-                            %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s
-                        )
-                    """, (
-                        "income",
-                        get_fund_account(category),
-                        r["receipt_date"],
-                        r["receipt_date"],
-                        category,
-                        r["receipt_no"],
-                        r["name"],
-                        r["phone"],
-                        r["amount"],
-                        payment_method,
-                        remarks or "批量布施录入"
-                    ))
+                            remarks or "批量布施录入"
+                        ))
 
-                return redirect(url_for("finance.records"))
+                    return redirect(url_for("finance.records"))
 
-    return render_template_string("""
+    return render_template_string(FINANCE_DATE_COMPONENT + """
     <!doctype html>
     <html lang="zh">
     <head>
@@ -3891,6 +5039,37 @@ def income_batch(category):
             .alert{
                 margin-bottom:16px;
             }
+                                  
+            .quick-amount-row{
+                display:grid;
+                grid-template-columns:58px 1fr 58px;
+                gap:10px;
+                align-items:stretch;
+            }
+
+            .amount-step-btn{
+                border:0;
+                border-radius:10px;
+                background:#e8eef7;
+                color:#172033;
+                font-size:30px;
+                font-weight:800;
+                cursor:pointer;
+            }
+
+            .amount-step-btn:hover{
+                background:#d8e4f4;
+            }
+
+            .amount-step-btn:active{
+                transform:scale(.96);
+            }
+
+            .quick-amount-row .form-input{
+                text-align:center;
+                font-size:30px;
+                font-weight:800;
+            }
 
             @media(max-width:700px){
                 .finance-form-grid{
@@ -4007,25 +5186,34 @@ def income_batch(category):
 
                     </div>
 
-                    <div class="form-group">
+                    <div class="quick-amount-row">
 
-                        <label class="form-label">
-                            默认金额 RM
-                        </label>
+                        <button
+                            type="button"
+                            class="amount-step-btn"
+                            onclick="changeQuickAmount(-50)"
+                        >
+                            −
+                        </button>
 
                         <input
                             class="form-input"
+                            id="quick_amount"
                             name="default_amount"
                             type="number"
-                            step="1"
-                            min="0"
+                            step="50"
+                            min="50"
                             value="{{ default_amount }}"
-                            required
+                            placeholder="金额"
                         >
 
-                        <span class="field-help">
-                            只输入姓名时，系统会自动使用这个金额。
-                        </span>
+                        <button
+                            type="button"
+                            class="amount-step-btn"
+                            onclick="changeQuickAmount(50)"
+                        >
+                            ＋
+                        </button>
 
                     </div>
 
@@ -4307,28 +5495,54 @@ def income_batch(category):
     </div>
 
     <script>
-    function addDonor(name){
+function changeQuickAmount(change){
 
-        const textarea = document.querySelector(
-            'textarea[name="raw_text"]'
-        );
+    const input = document.getElementById(
+        "quick_amount"
+    );
 
-        if(!textarea){
-            return;
-        }
-
-        const currentText = textarea.value.trim();
-
-        if(currentText === ""){
-            textarea.value = name;
-        }else{
-            textarea.value += "\\n" + name;
-        }
-
-        textarea.focus();
-        textarea.scrollTop = textarea.scrollHeight;
+    if(!input){
+        return;
     }
-    </script>
+
+    let current = Number(input.value);
+
+    if(!Number.isFinite(current)){
+        current = 50;
+    }
+
+    current += change;
+
+    if(current < 50){
+        current = 50;
+    }
+
+    input.value = current;
+}
+
+
+function addDonor(name){
+
+    const textarea = document.querySelector(
+        'textarea[name="raw_text"]'
+    );
+
+    if(!textarea){
+        return;
+    }
+
+    const currentText = textarea.value.trim();
+
+    if(currentText === ""){
+        textarea.value = name;
+    }else{
+        textarea.value += "\\n" + name;
+    }
+
+    textarea.focus();
+    textarea.scrollTop = textarea.scrollHeight;
+}
+</script>
 
     </body>
     </html>
@@ -4599,7 +5813,7 @@ def bank_pending():
         summary["total"] or 0
     )
 
-    return render_template_string("""
+    return render_template_string(FINANCE_DATE_COMPONENT + """
     <!doctype html>
     <html lang="zh">
     <head>
@@ -5521,6 +6735,7 @@ def confirm_bank(pending_id):
             select max(end_month) as paid_until
             from member_payments
             where member_id = %s
+              and coalesce(status, 'active') = 'active'
         """, (p["member_id"],), fetchone=True)
 
         paid_until_date = paid["paid_until"] if paid else None
@@ -5532,6 +6747,22 @@ def confirm_bank(pending_id):
 
         month_from_db = month_from + "-01"
         month_to_db = month_to + "-01"
+
+    pending_fund_account = get_fund_account(
+        p["category"],
+        "income"
+    )
+
+    month_lock_error = require_finance_month_open(
+        receipt_date,
+        pending_fund_account
+    )
+
+    if month_lock_error:
+        flash(month_lock_error, "danger")
+        return redirect(
+            url_for("finance.bank_pending")
+        )
 
     db_query("""
         insert into finance_records
@@ -5561,7 +6792,7 @@ def confirm_bank(pending_id):
         )
     """, (
         "income",
-        get_fund_account(p["category"], "income"),
+        pending_fund_account,
         p["payment_date"],
         receipt_date,
         p["category"],
@@ -5616,106 +6847,316 @@ def confirm_bank(pending_id):
 
     return redirect(url_for("finance.records"))
 
-@finance_bp.route("/records/<int:record_id>/cancel", methods=["POST"])
+@finance_bp.route(
+    "/records/<int:record_id>/cancel",
+    methods=["POST"]
+)
 def cancel_record(record_id):
 
+    # 先读取完整资料
     record = db_query("""
-        select receipt_no, status
+        select
+            id,
+            receipt_no,
+            record_date,
+            fund_account,
+            status
         from finance_records
         where id = %s
-    """, (record_id,), fetchone=True)
+        limit 1
+    """, (
+        record_id,
+    ), fetchone=True)
 
     if not record:
-        return redirect(url_for("finance.records"))
 
-    if record["status"] == "cancelled":
-        return redirect(url_for("finance.records"))
+        flash(
+            "找不到这笔财政记录。",
+            "danger"
+        )
 
-    cancel_reason = request.form.get("cancel_reason", "").strip()
+        return redirect(
+            url_for("finance.records")
+        )
+
+    # 已经作废，不可重复操作
+    if record.get("status") == "cancelled":
+
+        flash(
+            "这笔财政记录已经作废。",
+            "warning"
+        )
+
+        return redirect(
+            url_for("finance.records")
+        )
+
+    # =====================================================
+    # V6：Month Close Lock
+    # 已月结月份禁止作废
+    # =====================================================
+    month_lock_error = require_finance_month_open(
+        record["record_date"],
+        record.get("fund_account")
+    )
+
+    if month_lock_error:
+
+        flash(
+            month_lock_error,
+            "danger"
+        )
+
+        return redirect(
+            url_for("finance.records")
+        )
+
+    cancel_reason = request.form.get(
+        "cancel_reason",
+        ""
+    ).strip()
 
     if not cancel_reason:
-        cancel_reason = "未填写原因"
 
+        flash(
+            "请填写作废原因。",
+            "danger"
+        )
+
+        return redirect(
+            url_for("finance.records")
+        )
+
+    # 暂时使用 session 中的财政用户
+    # 如果没有登录名字，则显示 Finance User
+    cancelled_by = get_current_finance_user()
+
+    # =====================================================
+    # 作废 finance_records
+    # 不再 DELETE
+    # =====================================================
     db_query("""
         update finance_records
         set
             status = 'cancelled',
-            cancel_reason = %s
+            cancel_reason = %s,
+            cancelled_by = %s,
+            cancelled_at = now()
         where id = %s
-    """, (cancel_reason, record_id))
+          and coalesce(status, 'confirmed') != 'cancelled'
+    """, (
+        cancel_reason,
+        cancelled_by,
+        record_id,
+    ))
 
-    if record["receipt_no"]:
+    # =====================================================
+    # 若这笔记录有收条编号，
+    # 同步作废 member_payments
+    # 不再永久删除月费记录
+    # =====================================================
+    if record.get("receipt_no"):
+
         db_query("""
-            delete from member_payments
+            update member_payments
+            set
+                status = 'cancelled',
+                cancel_reason = %s,
+                cancelled_by = %s,
+                cancelled_at = now()
             where receipt_no = %s
-        """, (record["receipt_no"],))
+              and coalesce(status, 'active') != 'cancelled'
+        """, (
+            cancel_reason,
+            cancelled_by,
+            record["receipt_no"],
+        ))
 
-    return redirect(url_for("finance.records"))
+    updated_record = db_query("""
+        select *
+        from finance_records
+        where id = %s
+        limit 1
+    """, (record_id,), fetchone=True)
+
+    write_finance_audit(
+        module="finance_records",
+        action="cancel",
+        record_id=record_id,
+        old_value=dict(record),
+        new_value=dict(updated_record) if updated_record else None,
+        reason=cancel_reason,
+        actor=cancelled_by,
+    )
+
+    flash(
+        "财政记录已成功作废，原始资料仍保留在系统中。",
+        "success"
+    )
+
+    return redirect(
+        url_for("finance.records")
+    )
 
 
 @finance_bp.route("/records")
 def records():
 
     q = request.args.get("q", "").strip()
+    date_from = request.args.get("date_from", "").strip()
+    date_to = request.args.get("date_to", "").strip()
+    record_type = request.args.get("record_type", "").strip()
+    category = request.args.get("category", "").strip()
+    number_type = request.args.get("number_type", "").strip().upper()
+    status_filter = request.args.get("status", "").strip()
+    category = request.args.get("category", "").strip()
+
+    where_parts = []
+    params = []
 
     if q:
         keyword = f"%{q}%"
+        where_parts.append("""
+            (
+                coalesce(receipt_no, '') ilike %s
+                or coalesce(payment_voucher_no, '') ilike %s
+                or coalesce(member_id, '') ilike %s
+                or coalesce(name, '') ilike %s
+                or coalesce(phone, '') ilike %s
+                or coalesce(category, '') ilike %s
+                or coalesce(payment_method, '') ilike %s
+                or coalesce(bank_ref, '') ilike %s
+                or coalesce(remarks, '') ilike %s
+                or coalesce(fund_account, '') ilike %s
+            )
+        """)
+        params.extend([keyword] * 10)
 
-        rows = db_query("""
+    if date_from:
+        where_parts.append("record_date >= %s")
+        params.append(date_from)
+
+    if date_to:
+        where_parts.append("record_date <= %s")
+        params.append(date_to)
+
+    if record_type in ["income", "expense"]:
+        where_parts.append("record_type = %s")
+        params.append(record_type)
+
+    if category:
+        where_parts.append("category = %s")
+        params.append(category)
+
+    if number_type == "CHE":
+        where_parts.append(
+            "coalesce(receipt_no, '') ilike %s"
+        )
+        params.append("CHE%")
+
+    elif number_type == "STW":
+        where_parts.append(
+            "coalesce(receipt_no, '') ilike %s"
+        )
+        params.append("STW%")
+
+    elif number_type == "PV":
+        where_parts.append("""
+            coalesce(payment_voucher_no, '') <> ''
+        """)
+
+    elif number_type == "CDM":
+        where_parts.append("""
+            coalesce(bank_ref, '') ilike %s
+        """)
+        params.append("CDM-%")
+
+    if status_filter == "active":
+        where_parts.append("""
+            coalesce(status, 'confirmed') <> 'cancelled'
+        """)
+
+    elif status_filter == "cancelled":
+        where_parts.append("status = 'cancelled'")
+
+    where_sql = ""
+
+    if where_parts:
+        where_sql = " where " + " and ".join(where_parts)
+
+    rows = db_query(
+        f"""
             select *
             from finance_records
-            where
-                receipt_no ilike %s
-                or member_id ilike %s
-                or name ilike %s
-                or category ilike %s
-                or payment_method ilike %s
-                or bank_ref ilike %s
+            {where_sql}
             order by record_date desc, id desc
-            limit 300
-        """, (
-            keyword,
-            keyword,
-            keyword,
-            keyword,
-            keyword,
-            keyword
-        ), fetchall=True)
+            limit 500
+        """,
+        tuple(params),
+        fetchall=True
+    )
 
-    else:
-        rows = db_query("""
-            select *
+    summary = db_query(
+        f"""
+            select
+                count(*) as shown_count,
+
+                coalesce(sum(
+                    case
+                        when record_type = 'income'
+                         and coalesce(status, 'confirmed') <> 'cancelled'
+                        then amount
+                        else 0
+                    end
+                ), 0) as income_total,
+
+                coalesce(sum(
+                    case
+                        when record_type = 'expense'
+                         and coalesce(status, 'confirmed') <> 'cancelled'
+                        then amount
+                        else 0
+                    end
+                ), 0) as expense_total,
+
+                coalesce(sum(
+                    case
+                        when coalesce(status, 'confirmed') <> 'cancelled'
+                        then 1
+                        else 0
+                    end
+                ), 0) as active_count,
+
+                coalesce(sum(
+                    case
+                        when status = 'cancelled'
+                        then 1
+                        else 0
+                    end
+                ), 0) as cancelled_count
             from finance_records
-            order by record_date desc, id desc
-            limit 300
-        """, fetchall=True)
+            {where_sql}
+        """,
+        tuple(params),
+        fetchone=True
+    )
 
-    summary = db_query("""
-        select
-            sum(
-                case
-                    when coalesce(status, 'confirmed') <> 'cancelled'
-                    then 1
-                    else 0
-                end
-            ) as active_count,
-
-            sum(
-                case
-                    when status = 'cancelled'
-                    then 1
-                    else 0
-                end
-            ) as cancelled_count
+    categories = db_query("""
+        select distinct category
         from finance_records
-    """, fetchone=True)
+        where category is not null
+          and trim(category) <> ''
+        order by category
+    """, fetchall=True)
 
+    shown_count = int(summary["shown_count"] or 0)
     active_count = int(summary["active_count"] or 0)
     cancelled_count = int(summary["cancelled_count"] or 0)
+    income_total = float(summary["income_total"] or 0)
+    expense_total = float(summary["expense_total"] or 0)
+    balance_total = income_total - expense_total
 
-    shown_count = len(rows)
-
-    return render_template_string("""
+    return render_template_string(FINANCE_DATE_COMPONENT + """
     <!doctype html>
     <html lang="zh">
     <head>
@@ -5726,7 +7167,7 @@ def records():
             content="width=device-width, initial-scale=1"
         >
 
-        <title>财政记录</title>
+        <title>财政总账</title>
 
         <link
             rel="stylesheet"
@@ -5734,273 +7175,337 @@ def records():
         >
 
         <style>
-            .records-page {
-                max-width: 1500px;
+            .records-page{
+                max-width:1500px;
             }
 
-            .records-header {
-                background:
-                    linear-gradient(
-                        135deg,
-                        #2563eb,
-                        #1d4ed8
-                    );
-
-                color: white;
-                padding: 28px;
-                border-radius: 22px;
-                margin-bottom: 20px;
-
-                box-shadow:
-                    0 12px 30px
-                    rgba(37, 99, 235, 0.18);
+            .records-header{
+                background:linear-gradient(135deg,#2563eb,#1d4ed8);
+                color:#fff;
+                padding:28px;
+                border-radius:22px;
+                margin-bottom:20px;
+                box-shadow:0 12px 30px rgba(37,99,235,.18);
             }
 
-            .records-header h1 {
-                margin: 0 0 8px;
-                font-size: 30px;
+            .records-header h1{
+                margin:0 0 8px;
+                font-size:32px;
             }
 
-            .records-header p {
-                margin: 0;
-                opacity: 0.92;
-                line-height: 1.6;
+            .records-header p{
+                margin:0;
+                opacity:.92;
+                line-height:1.6;
             }
 
-            .search-grid {
-                display: grid;
-                grid-template-columns: 1fr auto auto;
-                gap: 10px;
-                align-items: center;
+            .quick-filter-row{
+                display:flex;
+                flex-wrap:wrap;
+                gap:10px;
+                margin-top:18px;
             }
 
-            .search-grid .form-input {
-                margin: 0;
+            .quick-filter-btn{
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                min-height:42px;
+                padding:8px 14px;
+                border-radius:999px;
+                background:rgba(255,255,255,.16);
+                color:#fff;
+                text-decoration:none;
+                font-weight:800;
+                border:1px solid rgba(255,255,255,.28);
             }
 
-            .records-summary {
-                display: grid;
-                grid-template-columns:
-                    repeat(3, minmax(0, 1fr));
-                gap: 16px;
-                margin-bottom: 20px;
+            .quick-filter-btn:hover{
+                background:rgba(255,255,255,.25);
             }
 
-            .records-summary .summary-box {
-                text-align: center;
-                min-height: 115px;
-
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
+            .filter-grid{
+                display:grid;
+                grid-template-columns:repeat(4,minmax(0,1fr));
+                gap:14px;
             }
 
-            .summary-icon {
-                font-size: 29px;
-                margin-bottom: 5px;
+            .filter-grid .form-group{
+                margin:0;
             }
 
-            .summary-label {
-                color: #64748b;
-                font-size: 16px;
-                margin-bottom: 6px;
+            .filter-full{
+                grid-column:1 / -1;
             }
 
-            .summary-value {
-                font-size: 27px;
-                font-weight: 800;
-                color: #0f172a;
+            .filter-actions{
+                display:flex;
+                flex-wrap:wrap;
+                gap:10px;
+                margin-top:18px;
             }
 
-            .summary-value.good {
-                color: #15803d;
+            .records-summary{
+                display:grid;
+                grid-template-columns:repeat(5,minmax(0,1fr));
+                gap:14px;
+                margin:20px 0;
             }
 
-            .summary-value.cancelled {
-                color: #b91c1c;
+            .records-summary .summary-box{
+                text-align:center;
+                min-height:112px;
+                display:flex;
+                flex-direction:column;
+                align-items:center;
+                justify-content:center;
             }
 
-            .table-topbar {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                gap: 12px;
-                margin-bottom: 14px;
-                flex-wrap: wrap;
+            .summary-label{
+                color:#64748b;
+                font-size:15px;
+                margin-bottom:7px;
             }
 
-            .result-text {
-                color: #64748b;
-                font-size: 16px;
+            .summary-value{
+                color:#0f172a;
+                font-size:26px;
+                font-weight:900;
             }
 
-            .record-table {
-                min-width: 1450px;
+            .summary-income{
+                color:#15803d;
             }
 
-            .record-table th {
-                white-space: nowrap;
+            .summary-expense{
+                color:#b91c1c;
             }
 
-            .record-table td {
-                vertical-align: middle;
+            .summary-balance{
+                color:#1d4ed8;
             }
 
-            .receipt-no {
-                color: #1d4ed8;
-                font-weight: 700;
-                white-space: nowrap;
+            .table-topbar{
+                display:flex;
+                align-items:center;
+                justify-content:space-between;
+                flex-wrap:wrap;
+                gap:12px;
+                margin-bottom:14px;
             }
 
-            .member-id {
-                font-weight: 700;
-                white-space: nowrap;
+            .result-text{
+                color:#64748b;
+                font-size:16px;
             }
 
-            .record-name {
-                font-weight: 700;
-                color: #1e293b;
-                min-width: 90px;
+            .record-table{
+                min-width:1320px;
             }
 
-            .money {
-                font-weight: 800;
-                color: #15803d;
-                text-align: right;
-                white-space: nowrap;
+            .record-table th{
+                white-space:nowrap;
             }
 
-            .record-date {
-                white-space: nowrap;
+            .record-table td{
+                vertical-align:middle;
             }
 
-            .month-range {
-                white-space: nowrap;
+            .record-link{
+                color:#1d4ed8;
+                font-weight:900;
+                text-decoration:none;
+                white-space:nowrap;
             }
 
-            .remarks-cell {
-                min-width: 150px;
-                max-width: 260px;
-                white-space: normal;
-                line-height: 1.5;
+            .record-link:hover{
+                text-decoration:underline;
             }
 
-            .status-badge {
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                padding: 7px 11px;
-                border-radius: 999px;
-                font-size: 14px;
-                font-weight: 800;
-                white-space: nowrap;
+            .type-badge,
+            .number-badge,
+            .status-badge{
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                padding:7px 11px;
+                border-radius:999px;
+                font-size:14px;
+                font-weight:900;
+                white-space:nowrap;
             }
 
-            .status-confirmed {
-                background: #dcfce7;
-                color: #166534;
+            .type-income{
+                background:#dcfce7;
+                color:#166534;
             }
 
-            .status-pending {
-                background: #fef3c7;
-                color: #92400e;
+            .type-expense{
+                background:#fee2e2;
+                color:#991b1b;
             }
 
-            .status-cancelled {
-                background: #fee2e2;
-                color: #991b1b;
+            .number-che{
+                background:#dbeafe;
+                color:#1d4ed8;
             }
 
-            .cancelled-row {
-                background: #f8fafc;
-                color: #94a3b8;
+            .number-stw{
+                background:#fee2e2;
+                color:#b91c1c;
             }
 
-            .cancelled-row td:not(.action-cell) {
-                text-decoration: line-through;
+            .number-pv{
+                background:#f3e8ff;
+                color:#7e22ce;
             }
 
-            .cancelled-row .status-badge {
-                text-decoration: none;
+            .status-confirmed{
+                background:#dcfce7;
+                color:#166534;
             }
 
-            .cancel-form {
-                display: grid;
-                grid-template-columns: minmax(120px, 1fr) auto;
-                gap: 8px;
-                align-items: center;
-                min-width: 240px;
+            .status-cancelled{
+                background:#fee2e2;
+                color:#991b1b;
             }
 
-            .cancel-form .form-input {
-                margin: 0;
-                min-height: 40px;
-                padding: 8px 10px;
-                font-size: 14px;
+            .status-pending{
+                background:#fef3c7;
+                color:#92400e;
             }
 
-            .cancel-form .btn-tool {
-                min-height: 40px;
-                padding: 8px 12px;
-                font-size: 14px;
-                white-space: nowrap;
+            .member-name{
+                font-weight:800;
+                color:#1e293b;
             }
 
-            .empty-state-custom {
-                text-align: center;
-                padding: 55px 20px;
-                color: #64748b;
+            .member-id{
+                color:#64748b;
+                font-size:14px;
+                margin-top:3px;
             }
 
-            .empty-state-custom .empty-icon {
-                font-size: 48px;
-                margin-bottom: 10px;
+            .money{
+                font-weight:900;
+                white-space:nowrap;
+                text-align:right;
             }
 
-            .empty-state-custom h3 {
-                color: #334155;
-                margin: 0 0 8px;
+            .money-income{
+                color:#15803d;
             }
 
-            .bottom-actions {
-                margin-top: 20px;
+            .money-expense{
+                color:#b91c1c;
             }
 
-            @media (max-width: 800px) {
+            .month-purpose{
+                min-width:180px;
+                line-height:1.5;
+            }
 
-                .records-page {
-                    padding-left: 12px;
-                    padding-right: 12px;
+            .remarks-cell{
+                min-width:150px;
+                max-width:250px;
+                white-space:normal;
+                line-height:1.5;
+            }
+
+            .cancelled-row{
+                background:#f8fafc;
+                color:#94a3b8;
+            }
+
+            .cancelled-row td:not(.action-cell){
+                text-decoration:line-through;
+            }
+
+            .cancelled-row .status-badge,
+            .cancelled-row .record-link,
+            .cancelled-row .type-badge,
+            .cancelled-row .number-badge{
+                text-decoration:none;
+            }
+
+            .row-actions{
+                display:flex;
+                align-items:center;
+                gap:8px;
+                white-space:nowrap;
+            }
+
+            .mini-action{
+                min-height:38px;
+                padding:8px 12px;
+                font-size:14px;
+            }
+
+            .cancel-form{
+                display:flex;
+                gap:8px;
+                align-items:center;
+            }
+
+            .cancel-form .form-input{
+                min-width:150px;
+                min-height:38px;
+                padding:7px 9px;
+                font-size:14px;
+                margin:0;
+            }
+
+            .empty-state-custom{
+                text-align:center;
+                padding:55px 20px;
+                color:#64748b;
+            }
+
+            .bottom-actions{
+                margin-top:20px;
+            }
+
+            @media(max-width:900px){
+                .filter-grid{
+                    grid-template-columns:1fr 1fr;
                 }
 
-                .records-header {
-                    padding: 22px 18px;
-                    border-radius: 18px;
+                .records-summary{
+                    grid-template-columns:1fr 1fr;
+                }
+            }
+
+            @media(max-width:620px){
+                .records-page{
+                    padding-left:12px;
+                    padding-right:12px;
                 }
 
-                .records-header h1 {
-                    font-size: 26px;
+                .records-header{
+                    padding:22px 18px;
+                    border-radius:18px;
                 }
 
-                .search-grid {
-                    grid-template-columns: 1fr;
+                .records-header h1{
+                    font-size:27px;
                 }
 
-                .search-grid .btn-tool {
-                    width: 100%;
+                .filter-grid,
+                .records-summary{
+                    grid-template-columns:1fr;
                 }
 
-                .records-summary {
-                    grid-template-columns: 1fr;
+                .filter-full{
+                    grid-column:auto;
                 }
 
-                .records-summary .summary-box {
-                    min-height: 100px;
+                .filter-actions{
+                    display:grid;
                 }
 
-                .bottom-actions .btn-tool {
-                    width: 100%;
+                .filter-actions .btn-tool,
+                .bottom-actions .btn-tool{
+                    width:100%;
                 }
             }
         </style>
@@ -6011,356 +7516,452 @@ def records():
     <div class="page records-page">
 
         <div class="records-header">
-
-            <h1>📚 财政记录</h1>
+            <h1>📚 财政总账</h1>
 
             <p>
-                查询所有收入、支出、银行过账及已作废记录。
+                收条、Payment Voucher、收入、支出、月费月份和各类布施，都可在这里查询。
             </p>
 
+            <div class="quick-filter-row">
+
+                <a class="quick-filter-btn"
+                href="{{ url_for('finance.records') }}">
+                    全部
+                </a>
+
+                <a class="quick-filter-btn"
+                href="{{ url_for('finance.records', record_type='income') }}">
+                    收入
+                </a>
+
+                <a class="quick-filter-btn"
+                href="{{ url_for('finance.records', record_type='expense') }}">
+                    支出
+                </a>
+
+                <a class="quick-filter-btn"
+                href="{{ url_for('finance.records', category='月费') }}">
+                    月费
+                </a>
+
+                <a class="quick-filter-btn"
+                href="{{ url_for('finance.records', category='财布施') }}">
+                    财布施
+                </a>
+
+                <a class="quick-filter-btn"
+                href="{{ url_for('finance.records', category='观音村') }}">
+                    观音村
+                </a>
+
+                <a class="quick-filter-btn"
+                href="{{ url_for('finance.records', category='膳食结缘') }}">
+                    初一十五
+                </a>
+
+                <a class="quick-filter-btn"
+                href="{{ url_for('finance.records', number_type='PV') }}">
+                    PV
+                </a>
+
+                <a class="quick-filter-btn"
+                href="{{ url_for('finance.records', number_type='CDM') }}">
+                    CDM
+                </a>
+
+            </div>
         </div>
 
         <div class="card">
-
             <div class="section-title">
-                🔍 搜索财政记录
+                🔎 查询条件
             </div>
 
             <form method="get">
+                <div class="filter-grid">
 
-                <div class="search-grid">
+                    <div class="form-group">
+                        <label class="form-label">开始日期</label>
 
-                    <input
-                        class="form-input"
-                        name="q"
-                        value="{{ q }}"
-                        placeholder="搜索收条、编号、姓名、项目、付款方式或 Reference"
-                        autocomplete="off"
-                    >
+                        <input
+                            class="form-input"
+                            type="date"
+                            name="date_from"
+                            value="{{ date_from }}"
+                        >
+                    </div>
 
+                    <div class="form-group">
+                        <label class="form-label">结束日期</label>
+
+                        <input
+                            class="form-input"
+                            type="date"
+                            name="date_to"
+                            value="{{ date_to }}"
+                        >
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">记录类型</label>
+
+                        <select class="form-input" name="record_type">
+                            <option value="">全部</option>
+                            <option value="income"
+                                {% if record_type == 'income' %}selected{% endif %}>
+                                收入
+                            </option>
+                            <option value="expense"
+                                {% if record_type == 'expense' %}selected{% endif %}>
+                                支出
+                            </option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">编号类型</label>
+
+                        <select class="form-input" name="number_type">
+                            <option value="">全部</option>
+                            <option value="CHE"
+                                {% if number_type == 'CHE' %}selected{% endif %}>
+                                CHE 收条
+                            </option>
+                            <option value="STW"
+                                {% if number_type == 'STW' %}selected{% endif %}>
+                                STW 收条
+                            </option>
+                            <option value="PV"
+                                {% if number_type == 'PV' %}selected{% endif %}>
+                                Payment Voucher
+                            </option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">类别</label>
+
+                        <select class="form-input" name="category">
+                            <option value="">全部类别</option>
+
+                            {% for c in categories %}
+                                <option
+                                    value="{{ c.category }}"
+                                    {% if category == c.category %}selected{% endif %}
+                                >
+                                    {{ c.category }}
+                                </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">状态</label>
+
+                        <select class="form-input" name="status">
+                            <option value="">全部状态</option>
+                            <option value="active"
+                                {% if status_filter == 'active' %}selected{% endif %}>
+                                正常记录
+                            </option>
+                            <option value="cancelled"
+                                {% if status_filter == 'cancelled' %}selected{% endif %}>
+                                已作废
+                            </option>
+                        </select>
+                    </div>
+
+                    <div class="form-group filter-full">
+                        <label class="form-label">关键字</label>
+
+                        <input
+                            class="form-input"
+                            name="q"
+                            value="{{ q }}"
+                            placeholder="收条、PV、会员编号、姓名、电话、类别、付款方式、Reference、备注"
+                            autocomplete="off"
+                        >
+                    </div>
+                </div>
+
+                <div class="filter-actions">
                     <button
                         class="btn-tool btn-primary"
                         type="submit"
                     >
-                        🔍 搜索
+                        🔍 查询记录
                     </button>
-
-                    {% if q %}
 
                     <a
                         class="btn-tool btn-secondary"
                         href="{{ url_for('finance.records') }}"
                     >
-                        ✕ 清除
+                        ✕ 清除条件
                     </a>
-
-                    {% endif %}
-
                 </div>
-
             </form>
-
         </div>
 
         <div class="records-summary">
+            <div class="summary-box">
+                <div class="summary-label">筛选后收入</div>
+                <div class="summary-value summary-income">
+                    RM {{ "%.2f"|format(income_total) }}
+                </div>
+            </div>
 
             <div class="summary-box">
-
-                <div class="summary-icon">
-                    ✅
+                <div class="summary-label">筛选后支出</div>
+                <div class="summary-value summary-expense">
+                    RM {{ "%.2f"|format(expense_total) }}
                 </div>
+            </div>
 
-                <div class="summary-label">
-                    正常记录
+            <div class="summary-box">
+                <div class="summary-label">筛选后结余</div>
+                <div class="summary-value summary-balance">
+                    RM {{ "%.2f"|format(balance_total) }}
                 </div>
+            </div>
 
-                <div class="summary-value good">
+            <div class="summary-box">
+                <div class="summary-label">正常记录</div>
+                <div class="summary-value">
                     {{ active_count }}
                 </div>
-
             </div>
 
             <div class="summary-box">
-
-                <div class="summary-icon">
-                    ❌
-                </div>
-
-                <div class="summary-label">
-                    作废记录
-                </div>
-
-                <div class="summary-value cancelled">
+                <div class="summary-label">已作废</div>
+                <div class="summary-value">
                     {{ cancelled_count }}
                 </div>
-
             </div>
-
-            <div class="summary-box">
-
-                <div class="summary-icon">
-                    📋
-                </div>
-
-                <div class="summary-label">
-                    当前显示
-                </div>
-
-                <div class="summary-value">
-                    {{ shown_count }}
-                </div>
-
-            </div>
-
         </div>
 
         <div class="card">
-
             <div class="table-topbar">
-
                 <div class="section-title" style="margin-bottom:0;">
                     🧾 记录明细
                 </div>
 
                 <div class="result-text">
-
-                    {% if q %}
-                        搜索：
-                        <strong>{{ q }}</strong>
-                        ，找到
-                        <strong>{{ shown_count }}</strong>
-                        笔记录
-                    {% else %}
-                        显示最近
-                        <strong>{{ shown_count }}</strong>
-                        笔记录
-                    {% endif %}
-
+                    当前找到
+                    <strong>{{ shown_count }}</strong>
+                    笔记录
                 </div>
-
             </div>
 
             {% if rows %}
+                <div class="table-responsive">
+                    <table class="record-table">
+                        <thead>
+                            <tr>
+                                <th>日期</th>
+                                <th>编号</th>
+                                <th>类型</th>
+                                <th>类别</th>
+                                <th>会员／对象</th>
+                                <th>月份／用途</th>
+                                <th>金额</th>
+                                <th>方式</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
 
-            <div class="table-responsive">
-
-                <table class="record-table">
-
-                    <thead>
-                        <tr>
-                            <th>付款日期</th>
-                            <th>开收条日期</th>
-                            <th>项目</th>
-                            <th>收条</th>
-                            <th>编号</th>
-                            <th>姓名</th>
-                            <th>金额</th>
-                            <th>方式</th>
-                            <th>Reference</th>
-                            <th>月份</th>
-                            <th>备注</th>
-                            <th>状态</th>
-                            <th>操作</th>
-                        </tr>
-                    </thead>
-
-                    <tbody>
-
-                        {% for r in rows %}
-
-                        <tr
-                            {% if r.status == 'cancelled' %}
-                                class="cancelled-row"
-                            {% endif %}
-                        >
-
-                            <td class="record-date">
-                                {{ r.record_date }}
-                            </td>
-
-                            <td class="record-date">
-                                {{ r.receipt_date or "-" }}
-                            </td>
-
-                            <td>
-                                {{ r.category or "-" }}
-                            </td>
-
-                            <td>
-                                <span class="receipt-no">
-                                    {{ r.receipt_no or "-" }}
-                                </span>
-                            </td>
-
-                            <td>
-                                <span class="member-id">
-                                    {{ r.member_id or "-" }}
-                                </span>
-                            </td>
-
-                            <td>
-                                <span class="record-name">
-                                    {{ r.name or "-" }}
-                                </span>
-                            </td>
-
-                            <td class="money">
-                                RM {{ "%.2f"|format(r.amount or 0) }}
-                            </td>
-
-                            <td>
-                                {{ r.payment_method or "-" }}
-                            </td>
-
-                            <td>
-                                {{ r.bank_ref or "-" }}
-                            </td>
-
-                            <td class="month-range">
-
-                                {% if r.month_from or r.month_to %}
-
-                                    {{ r.month_from or "-" }}
-                                    至
-                                    {{ r.month_to or "-" }}
-
+                        <tbody>
+                            {% for r in rows %}
+                                {% if r.record_type == 'expense' %}
+                                    {% set display_no =
+                                        r.payment_voucher_no
+                                        or '-'
+                                    %}
                                 {% else %}
-
-                                    -
-
+                                    {% set display_no =
+                                        r.receipt_no
+                                        or '-'
+                                    %}
                                 {% endif %}
 
-                            </td>
+                                <tr
+                                    {% if r.status == 'cancelled' %}
+                                        class="cancelled-row"
+                                    {% endif %}
+                                >
+                                    <td style="white-space:nowrap;">
+                                        {{ r.record_date }}
+                                    </td>
 
-                            <td class="remarks-cell">
-                                {{ r.remarks or "-" }}
-                            </td>
-
-                            <td>
-
-                                {% if r.status == 'cancelled' %}
-
-                                    <span
-                                        class="
-                                            status-badge
-                                            status-cancelled
-                                        "
-                                    >
-                                        ❌ 已作废
-                                    </span>
-
-                                {% elif r.status == 'confirmed'
-                                    or not r.status %}
-
-                                    <span
-                                        class="
-                                            status-badge
-                                            status-confirmed
-                                        "
-                                    >
-                                        ✅ 已入账
-                                    </span>
-
-                                {% else %}
-
-                                    <span
-                                        class="
-                                            status-badge
-                                            status-pending
-                                        "
-                                    >
-                                        ⏳ 待确认
-                                    </span>
-
-                                {% endif %}
-
-                            </td>
-
-                            <td class="action-cell">
-
-                                {% if r.status != 'cancelled' %}
-
-                                    <form
-                                        class="cancel-form"
-                                        method="post"
-                                        action="{{ url_for(
-                                            'finance.cancel_record',
-                                            record_id=r.id
-                                        ) }}"
-                                        onsubmit="
-                                            return confirm(
-                                                '确定要作废这笔记录吗？作废后不会计入财政统计。'
-                                            );
-                                        "
-                                    >
-
-                                        <input
-                                            class="form-input"
-                                            name="cancel_reason"
-                                            placeholder="填写作废原因"
-                                            autocomplete="off"
-                                            required
+                                    <td>
+                                        <a
+                                            class="record-link"
+                                            href="{{ url_for(
+                                                'finance.record_detail',
+                                                record_id=r.id
+                                            ) }}"
                                         >
+                                            {{ display_no }}
+                                        </a>
 
-                                        <button
-                                            class="btn-tool btn-warning"
-                                            type="submit"
-                                        >
-                                            作废
-                                        </button>
+                                        <div style="margin-top:5px;">
+                                            {% if r.payment_voucher_no %}
+                                                <span class="number-badge number-pv">
+                                                    PV
+                                                </span>
+                                            {% elif r.receipt_no and r.receipt_no.startswith('STW') %}
+                                                <span class="number-badge number-stw">
+                                                    STW
+                                                </span>
+                                            {% elif r.receipt_no and r.receipt_no.startswith('CHE') %}
+                                                <span class="number-badge number-che">
+                                                    CHE
+                                                </span>
+                                            {% endif %}
+                                        </div>
+                                    </td>
 
-                                    </form>
+                                    <td>
+                                        {% if r.record_type == 'expense' %}
+                                            <span class="type-badge type-expense">
+                                                支出
+                                            </span>
+                                        {% else %}
+                                            <span class="type-badge type-income">
+                                                收入
+                                            </span>
+                                        {% endif %}
+                                    </td>
 
-                                {% else %}
+                                    <td>
+                                        {{ r.category or '-' }}
+                                    </td>
 
-                                    <span style="color:#94a3b8;">
-                                        已作废
-                                    </span>
+                                    <td>
+                                        <div class="member-name">
+                                            {{ r.name or '-' }}
+                                        </div>
 
-                                {% endif %}
+                                        {% if r.member_id %}
+                                            <div class="member-id">
+                                                {{ r.member_id }}
+                                            </div>
+                                        {% endif %}
+                                    </td>
 
-                            </td>
+                                    <td class="month-purpose">
+                                        {% if r.month_from or r.month_to %}
+                                            {{ r.month_from or '-' }}
+                                            至
+                                            {{ r.month_to or '-' }}
+                                        {% else %}
+                                            {{ r.remarks or '-' }}
+                                        {% endif %}
+                                    </td>
 
-                        </tr>
+                                    <td class="
+                                        money
+                                        {% if r.record_type == 'expense' %}
+                                            money-expense
+                                        {% else %}
+                                            money-income
+                                        {% endif %}
+                                    ">
+                                        {% if r.record_type == 'expense' %}
+                                            −
+                                        {% endif %}
+                                        RM {{ "%.2f"|format(r.amount or 0) }}
+                                    </td>
 
-                        {% endfor %}
+                                    <td>
+                                        {{ r.payment_method or '-' }}
+                                    </td>
 
-                    </tbody>
+                                    <td>
+                                        {% if r.status == 'cancelled' %}
+                                            <span class="status-badge status-cancelled">
+                                                已作废
+                                            </span>
+                                        {% elif r.status == 'confirmed' or not r.status %}
+                                            <span class="status-badge status-confirmed">
+                                                已入账
+                                            </span>
+                                        {% else %}
+                                            <span class="status-badge status-pending">
+                                                待确认
+                                            </span>
+                                        {% endif %}
+                                    </td>
 
-                </table>
+                                    <td class="action-cell">
+                                        <div class="row-actions">
+                                            <a
+                                                class="btn-tool btn-secondary mini-action"
+                                                href="{{ url_for(
+                                                    'finance.record_detail',
+                                                    record_id=r.id
+                                                ) }}"
+                                            >
+                                                查看
+                                            </a>
 
-            </div>
+                                            {% if r.status != 'cancelled' %}
+                                                <form
+                                                    class="cancel-form"
+                                                    method="post"
+                                                    action="{{ url_for(
+                                                        'finance.cancel_record',
+                                                        record_id=r.id
+                                                    ) }}"
+                                                    onsubmit="return confirm(
+                                                        '确定要作废这笔记录吗？作废后不会计入财政统计。'
+                                                    );"
+                                                >
+                                                    <input
+                                                        class="form-input"
+                                                        name="cancel_reason"
+                                                        placeholder="作废原因"
+                                                        required
+                                                    >
 
-            {% else %}
-
-            <div class="empty-state-custom">
-
-                <div class="empty-icon">
-                    🔎
+                                                    <button
+                                                        class="btn-tool btn-warning mini-action"
+                                                        type="submit"
+                                                    >
+                                                        作废
+                                                    </button>
+                                                </form>
+                                            {% endif %}
+                                        </div>
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
                 </div>
 
-                <h3>没有找到财政记录</h3>
+            {% else %}
+                <div class="empty-state-custom">
+                    <div style="font-size:48px;margin-bottom:10px;">
+                        🔎
+                    </div>
 
-                <p>
-                    请检查收条编号、会员编号、姓名、项目或
-                    Reference 是否正确。
-                </p>
+                    <h3>没有找到财政记录</h3>
 
-            </div>
-
+                    <p>
+                        请调整日期、类型、类别、编号或关键字。
+                    </p>
+                </div>
             {% endif %}
-
         </div>
 
         <div class="bottom-actions">
-
             <a
                 class="btn-tool btn-secondary"
                 href="{{ url_for('finance.finance_home') }}"
             >
                 ← 返回财政首页
             </a>
-
         </div>
 
     </div>
@@ -6369,10 +7970,595 @@ def records():
     </html>
     """,
         rows=rows,
+        categories=categories,
+        q=q,
+        date_from=date_from,
+        date_to=date_to,
+        record_type=record_type,
+        category=category,
+        number_type=number_type,
+        status_filter=status_filter,
+        shown_count=shown_count,
         active_count=active_count,
         cancelled_count=cancelled_count,
-        shown_count=shown_count,
-        q=q
+        income_total=income_total,
+        expense_total=expense_total,
+        balance_total=balance_total
+    )
+
+
+@finance_bp.route("/records/<int:record_id>")
+def record_detail(record_id):
+
+    record = db_query("""
+        select *
+        from finance_records
+        where id = %s
+        limit 1
+    """, (
+        record_id,
+    ), fetchone=True)
+
+    if not record:
+        return "找不到这笔财政记录", 404
+
+    if record["record_type"] == "expense":
+        display_no = (
+            record.get("payment_voucher_no")
+            or "-"
+        )
+        document_label = "Payment Voucher No."
+        person_label = "付款对象"
+    else:
+        display_no = (
+            record.get("receipt_no")
+            or "-"
+        )
+        document_label = "Receipt No."
+        person_label = "姓名"
+
+    return render_template_string(FINANCE_DATE_COMPONENT + """
+    <!doctype html>
+    <html lang="zh">
+    <head>
+        <meta charset="utf-8">
+
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1"
+        >
+
+        <title>财政记录详情</title>
+
+        <link
+            rel="stylesheet"
+            href="{{ url_for(
+                'static',
+                filename='css/toolbox.css'
+            ) }}"
+        >
+
+        <style>
+            .detail-page{
+                max-width:900px;
+            }
+
+            .detail-header{
+                background:linear-gradient(
+                    135deg,
+                    #1d4ed8,
+                    #2563eb
+                );
+                color:#fff;
+                padding:28px;
+                border-radius:22px;
+                margin-bottom:20px;
+                box-shadow:0 12px 30px rgba(37,99,235,.18);
+            }
+
+            .detail-document-label{
+                font-size:14px;
+                font-weight:800;
+                opacity:.86;
+                margin-bottom:6px;
+                text-transform:uppercase;
+                letter-spacing:.5px;
+            }
+
+            .detail-number{
+                font-size:34px;
+                font-weight:900;
+                margin:0 0 10px;
+                overflow-wrap:anywhere;
+            }
+
+            .detail-header-money{
+                font-size:36px;
+                font-weight:900;
+                margin:4px 0 10px;
+                line-height:1.2;
+            }
+
+            .detail-header-income{
+                color:#bbf7d0;
+            }
+
+            .detail-header-expense{
+                color:#fecaca;
+            }
+
+            .detail-subtitle{
+                margin:0;
+                opacity:.92;
+                line-height:1.6;
+            }
+
+            .detail-grid{
+                display:grid;
+                grid-template-columns:repeat(2,minmax(0,1fr));
+                gap:14px;
+            }
+
+            .detail-item{
+                background:#f8fafc;
+                border:1px solid #e2e8f0;
+                border-radius:14px;
+                padding:16px;
+            }
+
+            .detail-full{
+                grid-column:1 / -1;
+            }
+
+            .detail-label{
+                color:#64748b;
+                font-size:14px;
+                margin-bottom:6px;
+            }
+
+            .detail-value{
+                color:#0f172a;
+                font-size:19px;
+                font-weight:800;
+                line-height:1.5;
+                overflow-wrap:anywhere;
+            }
+
+            .detail-money{
+                color:#15803d;
+                font-size:30px;
+            }
+
+            .detail-money.expense{
+                color:#b91c1c;
+            }
+
+            .status-badge{
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                padding:8px 13px;
+                border-radius:999px;
+                font-size:15px;
+                font-weight:900;
+                white-space:nowrap;
+            }
+
+            .status-confirmed{
+                background:#dcfce7;
+                color:#166534;
+            }
+
+            .status-cancelled{
+                background:#fee2e2;
+                color:#991b1b;
+            }
+
+            .status-pending{
+                background:#fef3c7;
+                color:#92400e;
+            }
+
+            .cancel-box{
+                background:#fef2f2;
+                border-color:#fecaca;
+            }
+
+            .detail-actions{
+                display:flex;
+                flex-wrap:wrap;
+                gap:10px;
+                margin-top:20px;
+            }
+
+            @media print{
+
+                body{
+                    background:#fff;
+                }
+
+                .detail-actions{
+                    display:none;
+                }
+
+                .detail-page{
+                    max-width:none;
+                    padding:0;
+                }
+
+                .detail-header,
+                .card{
+                    box-shadow:none;
+                }
+            }
+
+            @media(max-width:650px){
+
+                .detail-page{
+                    padding-left:12px;
+                    padding-right:12px;
+                }
+
+                .detail-header{
+                    padding:22px 18px;
+                    border-radius:18px;
+                }
+
+                .detail-number{
+                    font-size:28px;
+                }
+
+                .detail-header-money{
+                    font-size:30px;
+                }
+
+                .detail-grid{
+                    grid-template-columns:1fr;
+                }
+
+                .detail-full{
+                    grid-column:auto;
+                }
+
+                .detail-actions{
+                    display:grid;
+                }
+
+                .detail-actions .btn-tool{
+                    width:100%;
+                }
+            }
+        </style>
+    </head>
+
+    <body>
+
+    <div class="page detail-page">
+
+        <div class="detail-header">
+
+            <div class="detail-document-label">
+                {{ document_label }}
+            </div>
+
+            <div class="detail-number">
+                {{ display_no }}
+            </div>
+
+            <div class="
+                detail-header-money
+                {% if record.record_type == 'expense' %}
+                    detail-header-expense
+                {% else %}
+                    detail-header-income
+                {% endif %}
+            ">
+                {% if record.record_type == "expense" %}
+                    −
+                {% endif %}
+                RM {{ "%.2f"|format(record.amount or 0) }}
+            </div>
+
+            <p class="detail-subtitle">
+                {{ "支出记录" if record.record_type == "expense" else "收入记录" }}
+                ·
+                {{ record.category or "未分类" }}
+            </p>
+
+        </div>
+
+        <div class="card">
+
+            <h2 class="section-title">
+                📄 完整记录
+            </h2>
+
+            <div class="detail-grid">
+
+                <div class="detail-item">
+                    <div class="detail-label">
+                        记录类型
+                    </div>
+
+                    <div class="detail-value">
+                        {{ "支出" if record.record_type == "expense" else "收入" }}
+                    </div>
+                </div>
+
+                <div class="detail-item">
+                    <div class="detail-label">
+                        类别
+                    </div>
+
+                    <div class="detail-value">
+                        {{ record.category or "-" }}
+                    </div>
+                </div>
+
+                <div class="detail-item">
+                    <div class="detail-label">
+                        {{ "支出日期" if record.record_type == "expense" else "付款日期" }}
+                    </div>
+
+                    <div class="detail-value">
+                        {{ record.record_date or "-" }}
+                    </div>
+                </div>
+
+                {% if record.record_type != "expense" %}
+
+                    <div class="detail-item">
+                        <div class="detail-label">
+                            开收条日期
+                        </div>
+
+                        <div class="detail-value">
+                            {{ record.receipt_date or "-" }}
+                        </div>
+                    </div>
+
+                {% endif %}
+
+                <div class="detail-item">
+                    <div class="detail-label">
+                        {{ document_label }}
+                    </div>
+
+                    <div class="detail-value">
+                        {{ display_no }}
+                    </div>
+                </div>
+
+                {% if record.member_id %}
+
+                    <div class="detail-item">
+                        <div class="detail-label">
+                            会员编号
+                        </div>
+
+                        <div class="detail-value">
+                            {{ record.member_id }}
+                        </div>
+                    </div>
+
+                {% endif %}
+
+                <div class="detail-item">
+                    <div class="detail-label">
+                        {{ person_label }}
+                    </div>
+
+                    <div class="detail-value">
+                        {{ record.name or "-" }}
+                    </div>
+                </div>
+
+                {% if record.phone %}
+
+                    <div class="detail-item">
+                        <div class="detail-label">
+                            电话号码
+                        </div>
+
+                        <div class="detail-value">
+                            {{ record.phone }}
+                        </div>
+                    </div>
+
+                {% endif %}
+
+                <div class="detail-item">
+                    <div class="detail-label">
+                        付款方式
+                    </div>
+
+                    <div class="detail-value">
+                        {{ record.payment_method or "-" }}
+                    </div>
+                </div>
+
+                {% if record.bank_ref %}
+
+                    <div class="detail-item">
+                        <div class="detail-label">
+                            银行 Reference
+                        </div>
+
+                        <div class="detail-value">
+                            {{ record.bank_ref }}
+                        </div>
+                    </div>
+
+                {% endif %}
+
+                <div class="detail-item">
+                    <div class="detail-label">
+                        基金户口
+                    </div>
+
+                    <div class="detail-value">
+                        {{ record.fund_account or "-" }}
+                    </div>
+                </div>
+
+                {% if record.month_from or record.month_to %}
+
+                    <div class="detail-item">
+                        <div class="detail-label">
+                            开始月份
+                        </div>
+
+                        <div class="detail-value">
+                            {{ record.month_from or "-" }}
+                        </div>
+                    </div>
+
+                    <div class="detail-item">
+                        <div class="detail-label">
+                            缴费至
+                        </div>
+
+                        <div class="detail-value">
+                            {{ record.month_to or "-" }}
+                        </div>
+                    </div>
+
+                {% endif %}
+
+                <div class="detail-item detail-full">
+                    <div class="detail-label">
+                        金额
+                    </div>
+
+                    <div class="
+                        detail-value
+                        detail-money
+                        {% if record.record_type == 'expense' %}
+                            expense
+                        {% endif %}
+                    ">
+                        {% if record.record_type == "expense" %}
+                            −
+                        {% endif %}
+                        RM {{ "%.2f"|format(record.amount or 0) }}
+                    </div>
+                </div>
+
+                <div class="detail-item detail-full">
+                    <div class="detail-label">
+                        备注／用途
+                    </div>
+
+                    <div class="detail-value">
+                        {{ record.remarks or "-" }}
+                    </div>
+                </div>
+
+                <div class="detail-item detail-full">
+                    <div class="detail-label">
+                        状态
+                    </div>
+
+                    <div class="detail-value">
+
+                        {% if record.status == "cancelled" %}
+
+                            <span class="status-badge status-cancelled">
+                                ❌ 已作废
+                            </span>
+
+                        {% elif record.status == "confirmed"
+                            or not record.status %}
+
+                            <span class="status-badge status-confirmed">
+                                ✅ 已入账
+                            </span>
+
+                        {% else %}
+
+                            <span class="status-badge status-pending">
+                                ⏳ {{ record.status }}
+                            </span>
+
+                        {% endif %}
+
+                    </div>
+                </div>
+
+                {% if record.cancel_reason %}
+
+                    <div class="
+                        detail-item
+                        detail-full
+                        cancel-box
+                    ">
+                        <div class="detail-label">
+                            作废原因
+                        </div>
+
+                        <div class="detail-value">
+                            {{ record.cancel_reason }}
+                        </div>
+                    </div>
+
+                {% endif %}
+
+                {% if record.created_at %}
+
+                    <div class="detail-item detail-full">
+                        <div class="detail-label">
+                            建立时间
+                        </div>
+
+                        <div class="detail-value">
+                            {{ record.created_at }}
+                        </div>
+                    </div>
+
+                {% endif %}
+
+            </div>
+
+        </div>
+
+        <div class="detail-actions">
+
+            <a
+                class="btn-tool btn-secondary"
+                href="{{ url_for('finance.records') }}"
+            >
+                ← 返回财政总账
+            </a>
+
+            <a
+                class="btn-tool btn-primary"
+                href="{{ url_for(
+                    'finance.records',
+                    q=display_no
+                ) }}"
+            >
+                🔍 查询相同编号
+            </a>
+
+            <button
+                class="btn-tool btn-success"
+                type="button"
+                onclick="window.print()"
+            >
+                🖨️ 打印
+            </button>
+
+        </div>
+
+    </div>
+
+    </body>
+    </html>
+    """,
+        record=record,
+        display_no=display_no,
+        document_label=document_label,
+        person_label=person_label
     )
 
 @finance_bp.route("/dashboard")
@@ -6479,7 +8665,7 @@ def dashboard():
         - daily_expense_value
     )
 
-    return render_template_string("""
+    return render_template_string(FINANCE_DATE_COMPONENT + """
     <!doctype html>
     <html lang="zh">
     <head>
@@ -7152,10 +9338,2154 @@ def dashboard():
     )
 
 
+@finance_bp.route("/export_monthly_report")
+def export_monthly_report():
+
+    ym = request.args.get(
+        "ym",
+        date.today().strftime("%Y-%m")
+    )
+
+    rows = db_query("""
+        select
+            record_date,
+            receipt_date,
+            receipt_no,
+            payment_voucher_no,
+            category,
+            record_type,
+            fund_account,
+            member_id,
+            name,
+            phone,
+            amount,
+            payment_method,
+            bank_ref,
+            month_from,
+            month_to,
+            remarks as note
+        from finance_records
+        where to_char(record_date, 'YYYY-MM') = %s
+          and coalesce(status, 'confirmed') <> 'cancelled'
+        order by
+            record_date,
+            case
+                when record_type = 'expense'
+                then payment_voucher_no
+                else receipt_no
+            end,
+            id
+    """, (
+        ym,
+    ), fetchall=True)
+
+    wb = Workbook()
+
+    ws = wb.active
+    ws.title = "财政摘要"
+
+    ws_income = wb.create_sheet(
+        "收入明细"
+    )
+
+    ws_expense = wb.create_sheet(
+        "支出明细"
+    )
+
+    # =========================
+    # 样式
+    # =========================
+    green = "1F5E20"
+    light_green = "EAF4E4"
+
+    blue = "0B3A78"
+    light_blue = "EAF2FF"
+
+    gold = "F8E7B8"
+    light_gold = "FFF8E8"
+
+    dark_text = "1F2937"
+    red = "D00000"
+    gray = "64748B"
+
+    thin_green = Side(
+        style="thin",
+        color="8DBA7C"
+    )
+
+    thin_blue = Side(
+        style="thin",
+        color="7FA6D9"
+    )
+
+    thin_gold = Side(
+        style="thin",
+        color="C9962C"
+    )
+
+    thin_gray = Side(
+        style="thin",
+        color="CCCCCC"
+    )
+
+    border_green = Border(
+        left=thin_green,
+        right=thin_green,
+        top=thin_green,
+        bottom=thin_green
+    )
+
+    border_blue = Border(
+        left=thin_blue,
+        right=thin_blue,
+        top=thin_blue,
+        bottom=thin_blue
+    )
+
+    border_gold = Border(
+        left=thin_gold,
+        right=thin_gold,
+        top=thin_gold,
+        bottom=thin_gold
+    )
+
+    border_gray = Border(
+        left=thin_gray,
+        right=thin_gray,
+        top=thin_gray,
+        bottom=thin_gray
+    )
+
+    money_fmt = '"RM"#,##0.00'
+
+    def money(value):
+        return float(value or 0)
+
+    def set_range_border(
+        sheet,
+        cell_range,
+        border
+    ):
+        for row in sheet[cell_range]:
+            for cell in row:
+                cell.border = border
+
+    def fill_range(
+        sheet,
+        cell_range,
+        fill
+    ):
+        for row in sheet[cell_range]:
+            for cell in row:
+                cell.fill = fill
+
+    def auto_width(
+        sheet,
+        max_width=32
+    ):
+        for column_cells in sheet.columns:
+
+            max_length = 0
+
+            column_letter = get_column_letter(
+                column_cells[0].column
+            )
+
+            for cell in column_cells:
+
+                if cell.value is None:
+                    continue
+
+                cell_text = str(cell.value)
+
+                for line in cell_text.splitlines():
+                    max_length = max(
+                        max_length,
+                        len(line)
+                    )
+
+            sheet.column_dimensions[
+                column_letter
+            ].width = min(
+                max_length + 4,
+                max_width
+            )
+
+    def set_print_layout(
+        sheet,
+        orientation="landscape"
+    ):
+        sheet.page_setup.orientation = orientation
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 0
+
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+
+        sheet.page_margins.left = 0.25
+        sheet.page_margins.right = 0.25
+        sheet.page_margins.top = 0.4
+        sheet.page_margins.bottom = 0.4
+        sheet.page_margins.header = 0.2
+        sheet.page_margins.footer = 0.2
+
+    # =========================
+    # 数据整理
+    # =========================
+    summary = {
+        "观音堂日常户口": {
+            "income": 0,
+            "expense": 0
+        },
+        "总会户口": {
+            "income": 0,
+            "expense": 0
+        },
+    }
+
+    income_rows = []
+    expense_rows = []
+
+    income_by_category = {}
+    expense_by_category = {}
+
+    for row in rows:
+
+        fund_account = (
+            row["fund_account"]
+            or "未分类"
+        )
+
+        record_type = (
+            row["record_type"]
+            or "income"
+        )
+
+        amount = money(
+            row["amount"]
+        )
+
+        if fund_account not in summary:
+
+            summary[fund_account] = {
+                "income": 0,
+                "expense": 0
+            }
+
+        summary[fund_account][
+            record_type
+        ] += amount
+
+        category_name = (
+            row["category"]
+            or "未分类"
+        )
+
+        if record_type == "income":
+
+            income_rows.append(row)
+
+            income_by_category[
+                category_name
+            ] = (
+                income_by_category.get(
+                    category_name,
+                    0
+                )
+                + amount
+            )
+
+        else:
+
+            expense_rows.append(row)
+
+            expense_by_category[
+                category_name
+            ] = (
+                expense_by_category.get(
+                    category_name,
+                    0
+                )
+                + amount
+            )
+
+    daily_income = summary.get(
+        "观音堂日常户口",
+        {}
+    ).get(
+        "income",
+        0
+    )
+
+    daily_expense = summary.get(
+        "观音堂日常户口",
+        {}
+    ).get(
+        "expense",
+        0
+    )
+
+    daily_balance = (
+        daily_income
+        - daily_expense
+    )
+
+    hq_income = summary.get(
+        "总会户口",
+        {}
+    ).get(
+        "income",
+        0
+    )
+
+    hq_expense = summary.get(
+        "总会户口",
+        {}
+    ).get(
+        "expense",
+        0
+    )
+
+    hq_balance = (
+        hq_income
+        - hq_expense
+    )
+
+    total_income = sum(
+        item["income"]
+        for item in summary.values()
+    )
+
+    total_expense = sum(
+        item["expense"]
+        for item in summary.values()
+    )
+
+    total_balance = (
+        total_income
+        - total_expense
+    )
+
+    # =========================
+    # Sheet 1：财政摘要
+    # =========================
+    ws.sheet_view.showGridLines = False
+
+    for column in range(1, 16):
+        ws.column_dimensions[
+            get_column_letter(column)
+        ].width = 14
+
+    for row_no in range(1, 40):
+        ws.row_dimensions[row_no].height = 24
+
+    ws.row_dimensions[1].height = 14
+    ws.row_dimensions[2].height = 34
+    ws.row_dimensions[3].height = 26
+    ws.row_dimensions[4].height = 12
+
+    ws.merge_cells("A1:O4")
+
+    ws["A1"] = (
+        "观音堂财政月报\n"
+        f"{ym}"
+    )
+
+    ws["A1"].font = Font(
+        bold=True,
+        size=24,
+        color=dark_text
+    )
+
+    ws["A1"].alignment = Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=True
+    )
+
+    ws["A1"].fill = PatternFill(
+        "solid",
+        fgColor=light_gold
+    )
+
+    set_range_border(
+        ws,
+        "A1:O4",
+        border_gold
+    )
+
+    # 观音堂日常户口
+    ws.merge_cells("A5:G5")
+
+    ws["A5"] = "观音堂日常户口"
+
+    ws["A5"].fill = PatternFill(
+        "solid",
+        fgColor=green
+    )
+
+    ws["A5"].font = Font(
+        bold=True,
+        size=14,
+        color="FFFFFF"
+    )
+
+    ws["A5"].alignment = Alignment(
+        horizontal="center",
+        vertical="center"
+    )
+
+    daily_table = [
+        [
+            "项目",
+            "收入（RM）",
+            "支出（RM）",
+            "本月结余（RM）"
+        ],
+        [
+            "收入",
+            daily_income,
+            "-",
+            daily_income
+        ],
+        [
+            "支出",
+            "-",
+            daily_expense,
+            -daily_expense
+        ],
+        [
+            "本月结余",
+            "-",
+            "-",
+            daily_balance
+        ],
+    ]
+
+    start_row = 6
+
+    for row_no, row_data in enumerate(
+        daily_table,
+        start_row
+    ):
+
+        ws.merge_cells(
+            start_row=row_no,
+            start_column=1,
+            end_row=row_no,
+            end_column=2
+        )
+
+        ws.merge_cells(
+            start_row=row_no,
+            start_column=3,
+            end_row=row_no,
+            end_column=4
+        )
+
+        ws.merge_cells(
+            start_row=row_no,
+            start_column=5,
+            end_row=row_no,
+            end_column=5
+        )
+
+        ws.merge_cells(
+            start_row=row_no,
+            start_column=6,
+            end_row=row_no,
+            end_column=7
+        )
+
+        ws.cell(
+            row_no,
+            1
+        ).value = row_data[0]
+
+        ws.cell(
+            row_no,
+            3
+        ).value = row_data[1]
+
+        ws.cell(
+            row_no,
+            5
+        ).value = row_data[2]
+
+        ws.cell(
+            row_no,
+            6
+        ).value = row_data[3]
+
+        for column in [
+            1,
+            3,
+            5,
+            6
+        ]:
+
+            cell = ws.cell(
+                row_no,
+                column
+            )
+
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center"
+            )
+
+            cell.border = border_green
+
+        if row_no == 6:
+
+            fill_range(
+                ws,
+                f"A{row_no}:G{row_no}",
+                PatternFill(
+                    "solid",
+                    fgColor=light_green
+                )
+            )
+
+            for column in [
+                1,
+                3,
+                5,
+                6
+            ]:
+
+                ws.cell(
+                    row_no,
+                    column
+                ).font = Font(
+                    bold=True
+                )
+
+        elif row_no == 9:
+
+            fill_range(
+                ws,
+                f"A{row_no}:G{row_no}",
+                PatternFill(
+                    "solid",
+                    fgColor="DDEED2"
+                )
+            )
+
+            ws.cell(
+                row_no,
+                6
+            ).font = Font(
+                bold=True,
+                size=14,
+                color=green
+            )
+
+    for cell_ref in [
+        "C7",
+        "E8",
+        "F7",
+        "F8",
+        "F9"
+    ]:
+        ws[cell_ref].number_format = money_fmt
+
+    # 总会户口
+    ws.merge_cells("I5:O5")
+
+    ws["I5"] = "总会户口"
+
+    ws["I5"].fill = PatternFill(
+        "solid",
+        fgColor=blue
+    )
+
+    ws["I5"].font = Font(
+        bold=True,
+        size=14,
+        color="FFFFFF"
+    )
+
+    ws["I5"].alignment = Alignment(
+        horizontal="center",
+        vertical="center"
+    )
+
+    hq_table = [
+        [
+            "项目",
+            "收入（RM）",
+            "支出（RM）",
+            "本月结余（RM）"
+        ],
+        [
+            "收入",
+            hq_income,
+            "-",
+            hq_income
+        ],
+        [
+            "支出",
+            "-",
+            hq_expense,
+            -hq_expense
+        ],
+        [
+            "本月结余",
+            "-",
+            "-",
+            hq_balance
+        ],
+    ]
+
+    for row_no, row_data in enumerate(
+        hq_table,
+        start_row
+    ):
+
+        ws.merge_cells(
+            start_row=row_no,
+            start_column=9,
+            end_row=row_no,
+            end_column=10
+        )
+
+        ws.merge_cells(
+            start_row=row_no,
+            start_column=11,
+            end_row=row_no,
+            end_column=12
+        )
+
+        ws.merge_cells(
+            start_row=row_no,
+            start_column=13,
+            end_row=row_no,
+            end_column=13
+        )
+
+        ws.merge_cells(
+            start_row=row_no,
+            start_column=14,
+            end_row=row_no,
+            end_column=15
+        )
+
+        ws.cell(
+            row_no,
+            9
+        ).value = row_data[0]
+
+        ws.cell(
+            row_no,
+            11
+        ).value = row_data[1]
+
+        ws.cell(
+            row_no,
+            13
+        ).value = row_data[2]
+
+        ws.cell(
+            row_no,
+            14
+        ).value = row_data[3]
+
+        for column in [
+            9,
+            11,
+            13,
+            14
+        ]:
+
+            cell = ws.cell(
+                row_no,
+                column
+            )
+
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center"
+            )
+
+            cell.border = border_blue
+
+        if row_no == 6:
+
+            fill_range(
+                ws,
+                f"I{row_no}:O{row_no}",
+                PatternFill(
+                    "solid",
+                    fgColor=light_blue
+                )
+            )
+
+            for column in [
+                9,
+                11,
+                13,
+                14
+            ]:
+
+                ws.cell(
+                    row_no,
+                    column
+                ).font = Font(
+                    bold=True,
+                    color=blue
+                )
+
+        elif row_no == 9:
+
+            fill_range(
+                ws,
+                f"I{row_no}:O{row_no}",
+                PatternFill(
+                    "solid",
+                    fgColor="DCEAFF"
+                )
+            )
+
+            ws.cell(
+                row_no,
+                14
+            ).font = Font(
+                bold=True,
+                size=14,
+                color=blue
+            )
+
+    for cell_ref in [
+        "K7",
+        "M8",
+        "N7",
+        "N8",
+        "N9"
+    ]:
+        ws[cell_ref].number_format = money_fmt
+
+    # 总计横条
+    ws.merge_cells("A11:C12")
+
+    ws["A11"] = "总计"
+
+    ws["A11"].font = Font(
+        bold=True,
+        size=16,
+        color="7A5200"
+    )
+
+    ws["A11"].alignment = Alignment(
+        horizontal="center",
+        vertical="center"
+    )
+
+    ws["A11"].fill = PatternFill(
+        "solid",
+        fgColor="FFF2CC"
+    )
+
+    ws.merge_cells("D11:F12")
+
+    ws["D11"] = (
+        "总收入（RM）\n"
+        f"{total_income:,.2f}"
+    )
+
+    ws["D11"].font = Font(
+        bold=True,
+        size=12,
+        color=green
+    )
+
+    ws["D11"].alignment = Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=True
+    )
+
+    ws["D11"].fill = PatternFill(
+        "solid",
+        fgColor=light_gold
+    )
+
+    ws.merge_cells("G11:I12")
+
+    ws["G11"] = (
+        "总支出（RM）\n"
+        f"{total_expense:,.2f}"
+    )
+
+    ws["G11"].font = Font(
+        bold=True,
+        size=12,
+        color=red
+    )
+
+    ws["G11"].alignment = Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=True
+    )
+
+    ws["G11"].fill = PatternFill(
+        "solid",
+        fgColor=light_gold
+    )
+
+    ws.merge_cells("J11:O12")
+
+    ws["J11"] = (
+        "总体结余（RM）\n"
+        f"{total_balance:,.2f}"
+    )
+
+    ws["J11"].font = Font(
+        bold=True,
+        size=12,
+        color=blue
+    )
+
+    ws["J11"].alignment = Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=True
+    )
+
+    ws["J11"].fill = PatternFill(
+        "solid",
+        fgColor=light_gold
+    )
+
+    set_range_border(
+        ws,
+        "A11:O12",
+        border_gold
+    )
+
+    # 收入分类汇总
+    ws.merge_cells("A14:G14")
+
+    ws["A14"] = "收入分类汇总"
+
+    ws["A14"].fill = PatternFill(
+        "solid",
+        fgColor=green
+    )
+
+    ws["A14"].font = Font(
+        bold=True,
+        size=14,
+        color="FFFFFF"
+    )
+
+    ws["A14"].alignment = Alignment(
+        horizontal="center"
+    )
+
+    ws.merge_cells("A15:E15")
+    ws.merge_cells("F15:G15")
+
+    ws["A15"] = "收入项目"
+    ws["F15"] = "金额（RM）"
+
+    for cell_ref in [
+        "A15",
+        "F15"
+    ]:
+
+        ws[cell_ref].fill = PatternFill(
+            "solid",
+            fgColor=light_green
+        )
+
+        ws[cell_ref].font = Font(
+            bold=True
+        )
+
+        ws[cell_ref].alignment = Alignment(
+            horizontal="center"
+        )
+
+    income_summary_start = 16
+    income_summary_row = income_summary_start
+
+    for category_name, amount in sorted(
+        income_by_category.items(),
+        key=lambda item: item[1],
+        reverse=True
+    ):
+
+        ws.merge_cells(
+            start_row=income_summary_row,
+            start_column=1,
+            end_row=income_summary_row,
+            end_column=5
+        )
+
+        ws.merge_cells(
+            start_row=income_summary_row,
+            start_column=6,
+            end_row=income_summary_row,
+            end_column=7
+        )
+
+        ws.cell(
+            income_summary_row,
+            1
+        ).value = category_name
+
+        ws.cell(
+            income_summary_row,
+            6
+        ).value = amount
+
+        ws.cell(
+            income_summary_row,
+            6
+        ).number_format = money_fmt
+
+        ws.cell(
+            income_summary_row,
+            1
+        ).alignment = Alignment(
+            horizontal="left",
+            vertical="center"
+        )
+
+        ws.cell(
+            income_summary_row,
+            6
+        ).alignment = Alignment(
+            horizontal="center",
+            vertical="center"
+        )
+
+        income_summary_row += 1
+
+    if not income_by_category:
+
+        ws.merge_cells("A16:G16")
+
+        ws["A16"] = "本月没有收入记录"
+
+        ws["A16"].alignment = Alignment(
+            horizontal="center"
+        )
+
+        income_summary_row = 17
+
+    income_total_row = income_summary_row
+
+    ws.merge_cells(
+        start_row=income_total_row,
+        start_column=1,
+        end_row=income_total_row,
+        end_column=5
+    )
+
+    ws.merge_cells(
+        start_row=income_total_row,
+        start_column=6,
+        end_row=income_total_row,
+        end_column=7
+    )
+
+    ws.cell(
+        income_total_row,
+        1
+    ).value = "收入总计"
+
+    ws.cell(
+        income_total_row,
+        6
+    ).value = total_income
+
+    ws.cell(
+        income_total_row,
+        6
+    ).number_format = money_fmt
+
+    fill_range(
+        ws,
+        f"A{income_total_row}:G{income_total_row}",
+        PatternFill(
+            "solid",
+            fgColor="DDEED2"
+        )
+    )
+
+    ws.cell(
+        income_total_row,
+        1
+    ).font = Font(
+        bold=True,
+        color=green
+    )
+
+    ws.cell(
+        income_total_row,
+        6
+    ).font = Font(
+        bold=True,
+        color=green
+    )
+
+    ws.cell(
+        income_total_row,
+        1
+    ).alignment = Alignment(
+        horizontal="right"
+    )
+
+    ws.cell(
+        income_total_row,
+        6
+    ).alignment = Alignment(
+        horizontal="center"
+    )
+
+    set_range_border(
+        ws,
+        f"A15:G{income_total_row}",
+        border_green
+    )
+
+    # 支出分类汇总
+    ws.merge_cells("I14:O14")
+
+    ws["I14"] = "支出分类汇总"
+
+    ws["I14"].fill = PatternFill(
+        "solid",
+        fgColor=blue
+    )
+
+    ws["I14"].font = Font(
+        bold=True,
+        size=14,
+        color="FFFFFF"
+    )
+
+    ws["I14"].alignment = Alignment(
+        horizontal="center"
+    )
+
+    ws.merge_cells("I15:M15")
+    ws.merge_cells("N15:O15")
+
+    ws["I15"] = "支出项目"
+    ws["N15"] = "金额（RM）"
+
+    for cell_ref in [
+        "I15",
+        "N15"
+    ]:
+
+        ws[cell_ref].fill = PatternFill(
+            "solid",
+            fgColor=light_blue
+        )
+
+        ws[cell_ref].font = Font(
+            bold=True,
+            color=blue
+        )
+
+        ws[cell_ref].alignment = Alignment(
+            horizontal="center"
+        )
+
+    expense_summary_start = 16
+    expense_summary_row = expense_summary_start
+
+    for category_name, amount in sorted(
+        expense_by_category.items(),
+        key=lambda item: item[1],
+        reverse=True
+    ):
+
+        ws.merge_cells(
+            start_row=expense_summary_row,
+            start_column=9,
+            end_row=expense_summary_row,
+            end_column=13
+        )
+
+        ws.merge_cells(
+            start_row=expense_summary_row,
+            start_column=14,
+            end_row=expense_summary_row,
+            end_column=15
+        )
+
+        ws.cell(
+            expense_summary_row,
+            9
+        ).value = category_name
+
+        ws.cell(
+            expense_summary_row,
+            14
+        ).value = amount
+
+        ws.cell(
+            expense_summary_row,
+            14
+        ).number_format = money_fmt
+
+        ws.cell(
+            expense_summary_row,
+            9
+        ).alignment = Alignment(
+            horizontal="left",
+            vertical="center"
+        )
+
+        ws.cell(
+            expense_summary_row,
+            14
+        ).alignment = Alignment(
+            horizontal="center",
+            vertical="center"
+        )
+
+        expense_summary_row += 1
+
+    if not expense_by_category:
+
+        ws.merge_cells("I16:O16")
+
+        ws["I16"] = "本月没有支出记录"
+
+        ws["I16"].alignment = Alignment(
+            horizontal="center"
+        )
+
+        expense_summary_row = 17
+
+    expense_total_row = expense_summary_row
+
+    ws.merge_cells(
+        start_row=expense_total_row,
+        start_column=9,
+        end_row=expense_total_row,
+        end_column=13
+    )
+
+    ws.merge_cells(
+        start_row=expense_total_row,
+        start_column=14,
+        end_row=expense_total_row,
+        end_column=15
+    )
+
+    ws.cell(
+        expense_total_row,
+        9
+    ).value = "支出总计"
+
+    ws.cell(
+        expense_total_row,
+        14
+    ).value = total_expense
+
+    ws.cell(
+        expense_total_row,
+        14
+    ).number_format = money_fmt
+
+    fill_range(
+        ws,
+        f"I{expense_total_row}:O{expense_total_row}",
+        PatternFill(
+            "solid",
+            fgColor="DCEAFF"
+        )
+    )
+
+    ws.cell(
+        expense_total_row,
+        9
+    ).font = Font(
+        bold=True,
+        color=blue
+    )
+
+    ws.cell(
+        expense_total_row,
+        14
+    ).font = Font(
+        bold=True,
+        color=red
+    )
+
+    ws.cell(
+        expense_total_row,
+        9
+    ).alignment = Alignment(
+        horizontal="right"
+    )
+
+    ws.cell(
+        expense_total_row,
+        14
+    ).alignment = Alignment(
+        horizontal="center"
+    )
+
+    set_range_border(
+        ws,
+        f"I15:O{expense_total_row}",
+        border_blue
+    )
+
+    max_summary_row = max(
+        income_total_row,
+        expense_total_row
+    )
+
+    ws.freeze_panes = "A14"
+
+    ws.print_area = (
+        f"A1:O{max_summary_row}"
+    )
+
+    set_print_layout(
+        ws,
+        orientation="landscape"
+    )
+
+    # =========================
+    # Sheet 2：收入明细
+    # =========================
+    def write_income_sheet(
+        sheet,
+        data_rows
+    ):
+
+        sheet.sheet_view.showGridLines = False
+
+        sheet.merge_cells("A1:N2")
+
+        sheet["A1"] = (
+            f"收入明细 - {ym}"
+        )
+
+        sheet["A1"].font = Font(
+            bold=True,
+            size=18,
+            color="FFFFFF"
+        )
+
+        sheet["A1"].alignment = Alignment(
+            horizontal="center",
+            vertical="center"
+        )
+
+        sheet["A1"].fill = PatternFill(
+            "solid",
+            fgColor=green
+        )
+
+        headers = [
+            "付款日期",
+            "开收条日期",
+            "Receipt No.",
+            "类别",
+            "基金户口",
+            "会员编号",
+            "姓名",
+            "电话",
+            "金额（RM）",
+            "付款方式",
+            "银行 Reference",
+            "开始月份",
+            "缴费至",
+            "备注",
+        ]
+
+        for column, header in enumerate(
+            headers,
+            1
+        ):
+
+            cell = sheet.cell(
+                4,
+                column
+            )
+
+            cell.value = header
+
+            cell.fill = PatternFill(
+                "solid",
+                fgColor=light_green
+            )
+
+            cell.font = Font(
+                bold=True,
+                color=dark_text
+            )
+
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True
+            )
+
+            cell.border = border_gray
+
+        row_no = 5
+
+        for row in data_rows:
+
+            values = [
+                row["record_date"],
+                row["receipt_date"],
+                row["receipt_no"],
+                row["category"],
+                row["fund_account"],
+                row["member_id"],
+                row["name"],
+                row["phone"],
+                money(row["amount"]),
+                row["payment_method"],
+                row["bank_ref"],
+                row["month_from"],
+                row["month_to"],
+                row["note"],
+            ]
+
+            for column, value in enumerate(
+                values,
+                1
+            ):
+
+                cell = sheet.cell(
+                    row_no,
+                    column
+                )
+
+                cell.value = value
+
+                cell.border = border_gray
+
+                cell.alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                    wrap_text=(
+                        column in [
+                            7,
+                            14
+                        ]
+                    )
+                )
+
+                if column == 9:
+                    cell.number_format = money_fmt
+
+            row_no += 1
+
+        if not data_rows:
+
+            sheet.merge_cells(
+                start_row=5,
+                start_column=1,
+                end_row=5,
+                end_column=14
+            )
+
+            sheet.cell(
+                5,
+                1
+            ).value = "本月没有收入记录"
+
+            sheet.cell(
+                5,
+                1
+            ).alignment = Alignment(
+                horizontal="center"
+            )
+
+            row_no = 6
+
+        total_row = row_no + 1
+
+        sheet.merge_cells(
+            start_row=total_row,
+            start_column=1,
+            end_row=total_row,
+            end_column=8
+        )
+
+        sheet.cell(
+            total_row,
+            1
+        ).value = "收入总计"
+
+        sheet.cell(
+            total_row,
+            1
+        ).font = Font(
+            bold=True
+        )
+
+        sheet.cell(
+            total_row,
+            1
+        ).alignment = Alignment(
+            horizontal="right"
+        )
+
+        sheet.cell(
+            total_row,
+            9
+        ).value = sum(
+            money(row["amount"])
+            for row in data_rows
+        )
+
+        sheet.cell(
+            total_row,
+            9
+        ).number_format = money_fmt
+
+        sheet.cell(
+            total_row,
+            9
+        ).font = Font(
+            bold=True,
+            color=green
+        )
+
+        fill_range(
+            sheet,
+            f"A{total_row}:N{total_row}",
+            PatternFill(
+                "solid",
+                fgColor=light_green
+            )
+        )
+
+        set_range_border(
+            sheet,
+            f"A{total_row}:N{total_row}",
+            border_gray
+        )
+
+        sheet.freeze_panes = "A5"
+        sheet.auto_filter.ref = (
+            f"A4:N{max(4, row_no - 1)}"
+        )
+
+        sheet.print_title_rows = "1:4"
+        sheet.print_area = (
+            f"A1:N{total_row}"
+        )
+
+        auto_width(
+            sheet,
+            max_width=30
+        )
+
+        sheet.column_dimensions["N"].width = 34
+        sheet.column_dimensions["G"].width = 18
+
+        set_print_layout(
+            sheet,
+            orientation="landscape"
+        )
+
+    # =========================
+    # Sheet 3：支出明细
+    # =========================
+    def write_expense_sheet(
+        sheet,
+        data_rows
+    ):
+
+        sheet.sheet_view.showGridLines = False
+
+        sheet.merge_cells("A1:I2")
+
+        sheet["A1"] = (
+            f"支出明细 - {ym}"
+        )
+
+        sheet["A1"].font = Font(
+            bold=True,
+            size=18,
+            color="FFFFFF"
+        )
+
+        sheet["A1"].alignment = Alignment(
+            horizontal="center",
+            vertical="center"
+        )
+
+        sheet["A1"].fill = PatternFill(
+            "solid",
+            fgColor=blue
+        )
+
+        headers = [
+            "支出日期",
+            "Payment Voucher No.",
+            "类别",
+            "基金户口",
+            "付款对象",
+            "金额（RM）",
+            "付款方式",
+            "银行 Reference",
+            "用途／备注",
+        ]
+
+        for column, header in enumerate(
+            headers,
+            1
+        ):
+
+            cell = sheet.cell(
+                4,
+                column
+            )
+
+            cell.value = header
+
+            cell.fill = PatternFill(
+                "solid",
+                fgColor=light_blue
+            )
+
+            cell.font = Font(
+                bold=True,
+                color=dark_text
+            )
+
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True
+            )
+
+            cell.border = border_gray
+
+        row_no = 5
+
+        for row in data_rows:
+
+            values = [
+                row["record_date"],
+                row["payment_voucher_no"],
+                row["category"],
+                row["fund_account"],
+                row["name"],
+                money(row["amount"]),
+                row["payment_method"],
+                row["bank_ref"],
+                row["note"],
+            ]
+
+            for column, value in enumerate(
+                values,
+                1
+            ):
+
+                cell = sheet.cell(
+                    row_no,
+                    column
+                )
+
+                cell.value = value
+
+                cell.border = border_gray
+
+                cell.alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                    wrap_text=(
+                        column in [
+                            5,
+                            9
+                        ]
+                    )
+                )
+
+                if column == 6:
+                    cell.number_format = money_fmt
+
+            row_no += 1
+
+        if not data_rows:
+
+            sheet.merge_cells(
+                start_row=5,
+                start_column=1,
+                end_row=5,
+                end_column=9
+            )
+
+            sheet.cell(
+                5,
+                1
+            ).value = "本月没有支出记录"
+
+            sheet.cell(
+                5,
+                1
+            ).alignment = Alignment(
+                horizontal="center"
+            )
+
+            row_no = 6
+
+        total_row = row_no + 1
+
+        sheet.merge_cells(
+            start_row=total_row,
+            start_column=1,
+            end_row=total_row,
+            end_column=5
+        )
+
+        sheet.cell(
+            total_row,
+            1
+        ).value = "支出总计"
+
+        sheet.cell(
+            total_row,
+            1
+        ).font = Font(
+            bold=True
+        )
+
+        sheet.cell(
+            total_row,
+            1
+        ).alignment = Alignment(
+            horizontal="right"
+        )
+
+        sheet.cell(
+            total_row,
+            6
+        ).value = sum(
+            money(row["amount"])
+            for row in data_rows
+        )
+
+        sheet.cell(
+            total_row,
+            6
+        ).number_format = money_fmt
+
+        sheet.cell(
+            total_row,
+            6
+        ).font = Font(
+            bold=True,
+            color=red
+        )
+
+        fill_range(
+            sheet,
+            f"A{total_row}:I{total_row}",
+            PatternFill(
+                "solid",
+                fgColor=light_blue
+            )
+        )
+
+        set_range_border(
+            sheet,
+            f"A{total_row}:I{total_row}",
+            border_gray
+        )
+
+        sheet.freeze_panes = "A5"
+        sheet.auto_filter.ref = (
+            f"A4:I{max(4, row_no - 1)}"
+        )
+
+        sheet.print_title_rows = "1:4"
+        sheet.print_area = (
+            f"A1:I{total_row}"
+        )
+
+        auto_width(
+            sheet,
+            max_width=32
+        )
+
+        sheet.column_dimensions["I"].width = 36
+        sheet.column_dimensions["E"].width = 22
+
+        set_print_layout(
+            sheet,
+            orientation="landscape"
+        )
+
+    write_income_sheet(
+        ws_income,
+        income_rows
+    )
+
+    write_expense_sheet(
+        ws_expense,
+        expense_rows
+    )
+
+    # =========================
+    # 输出
+    # =========================
+    output = BytesIO()
+
+    wb.save(output)
+
+    output.seek(0)
+
+    filename = (
+        f"观音堂财政月报_{ym}.xlsx"
+    )
+
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype=(
+            "application/vnd.openxmlformats-"
+            "officedocument.spreadsheetml.sheet"
+        )
+    )
+
+def get_next_payment_voucher():
+
+    row = db_query("""
+        select payment_voucher_no
+        from finance_records
+        where payment_voucher_no is not null
+          and payment_voucher_no <> ''
+        order by payment_voucher_no desc
+        limit 1
+    """, fetchone=True)
+
+    if not row:
+        return "PV000001"
+
+    m = re.search(r"(\d+)$", row["payment_voucher_no"])
+
+    if not m:
+        return "PV000001"
+
+    return f"PV{int(m.group(1))+1:06d}"
+
 @finance_bp.route(
-    "/expense/<category>",
+    "/vendors",
     methods=["GET", "POST"]
 )
+def finance_vendors():
+
+    message = ""
+
+    if request.method == "POST":
+
+        vendor_name = request.form.get(
+            "vendor_name",
+            ""
+        ).strip()
+
+        sort_order_raw = request.form.get(
+            "sort_order",
+            "0"
+        ).strip()
+
+        try:
+            sort_order = int(
+                sort_order_raw or 0
+            )
+        except ValueError:
+            sort_order = 0
+
+        if not vendor_name:
+
+            message = "请填写付款对象名称。"
+
+        else:
+
+            existing = db_query("""
+                select id
+                from finance_vendors
+                where lower(vendor_name) = lower(%s)
+                limit 1
+            """, (
+                vendor_name,
+            ), fetchone=True)
+
+            if existing:
+
+                message = "这个付款对象已经存在。"
+
+            else:
+
+                db_query("""
+                    insert into finance_vendors
+                    (
+                        vendor_name,
+                        is_active,
+                        sort_order
+                    )
+                    values
+                    (
+                        %s,
+                        true,
+                        %s
+                    )
+                """, (
+                    vendor_name,
+                    sort_order
+                ))
+
+                return redirect(
+                    url_for(
+                        "finance.finance_vendors"
+                    )
+                )
+
+    rows = db_query("""
+        select
+            id,
+            vendor_name,
+            is_active,
+            sort_order,
+            created_at
+        from finance_vendors
+        order by
+            is_active desc,
+            sort_order,
+            vendor_name
+    """, fetchall=True)
+
+    return render_template_string("""
+    <!doctype html>
+    <html lang="zh">
+    <head>
+
+        <meta charset="utf-8">
+
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1"
+        >
+
+        <title>付款对象管理</title>
+
+        <link
+            rel="stylesheet"
+            href="{{ url_for(
+                'static',
+                filename='css/toolbox.css'
+            ) }}"
+        >
+
+        <style>
+
+            .vendor-page{
+                max-width:980px;
+            }
+
+            .vendor-header{
+                background:linear-gradient(
+                    135deg,
+                    #7c3aed,
+                    #5b21b6
+                );
+                color:#fff;
+                padding:28px;
+                border-radius:22px;
+                margin-bottom:20px;
+            }
+
+            .vendor-header h1{
+                margin:0 0 8px;
+            }
+
+            .vendor-header p{
+                margin:0;
+                opacity:.92;
+            }
+
+            .vendor-form-grid{
+                display:grid;
+                grid-template-columns:1fr 180px auto;
+                gap:12px;
+                align-items:end;
+            }
+
+            .vendor-status{
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                padding:7px 11px;
+                border-radius:999px;
+                font-weight:800;
+                font-size:14px;
+            }
+
+            .vendor-active{
+                background:#dcfce7;
+                color:#166534;
+            }
+
+            .vendor-inactive{
+                background:#fee2e2;
+                color:#991b1b;
+            }
+
+            @media(max-width:700px){
+
+                .vendor-form-grid{
+                    grid-template-columns:1fr;
+                }
+
+                .vendor-form-grid .btn-tool{
+                    width:100%;
+                }
+            }
+
+        </style>
+
+    </head>
+
+    <body>
+
+    <div class="page vendor-page">
+
+        <div class="vendor-header">
+
+            <h1>🏢 付款对象管理</h1>
+
+            <p>
+                统一维护常用 Vendor，避免同一个对象出现不同写法。
+            </p>
+
+        </div>
+
+        {% if message %}
+
+            <div class="alert alert-danger">
+                ⚠️ {{ message }}
+            </div>
+
+        {% endif %}
+
+        <div class="card">
+
+            <div class="section-title">
+                ➕ 新增付款对象
+            </div>
+
+            <form method="post">
+
+                <div class="vendor-form-grid">
+
+                    <div class="form-group">
+
+                        <label class="form-label">
+                            付款对象名称
+                        </label>
+
+                        <input
+                            class="form-input"
+                            name="vendor_name"
+                            placeholder="例如 TM Unifi"
+                            required
+                        >
+
+                    </div>
+
+                    <div class="form-group">
+
+                        <label class="form-label">
+                            排序
+                        </label>
+
+                        <input
+                            class="form-input"
+                            name="sort_order"
+                            type="number"
+                            value="0"
+                        >
+
+                    </div>
+
+                    <button
+                        class="btn-tool btn-primary"
+                        type="submit"
+                    >
+                        保存
+                    </button>
+
+                </div>
+
+            </form>
+
+        </div>
+
+        <div class="card">
+
+            <div class="section-title">
+                📋 付款对象名单
+            </div>
+
+            <div class="table-responsive">
+
+                <table class="record-table">
+
+                    <thead>
+                        <tr>
+                            <th>付款对象</th>
+                            <th>排序</th>
+                            <th>状态</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+
+                    <tbody>
+
+                        {% for r in rows %}
+
+                            <tr>
+
+                                <td>
+                                    <strong>
+                                        {{ r.vendor_name }}
+                                    </strong>
+                                </td>
+
+                                <td>
+                                    {{ r.sort_order }}
+                                </td>
+
+                                <td>
+
+                                    {% if r.is_active %}
+
+                                        <span class="
+                                            vendor-status
+                                            vendor-active
+                                        ">
+                                            启用
+                                        </span>
+
+                                    {% else %}
+
+                                        <span class="
+                                            vendor-status
+                                            vendor-inactive
+                                        ">
+                                            停用
+                                        </span>
+
+                                    {% endif %}
+
+                                </td>
+
+                                <td>
+
+                                    <form
+                                        method="post"
+                                        action="{{ url_for(
+                                            'finance.toggle_finance_vendor',
+                                            vendor_id=r.id
+                                        ) }}"
+                                    >
+
+                                        <button
+                                            class="
+                                                btn-tool
+                                                btn-secondary
+                                            "
+                                            type="submit"
+                                        >
+                                            {% if r.is_active %}
+                                                停用
+                                            {% else %}
+                                                恢复
+                                            {% endif %}
+                                        </button>
+
+                                    </form>
+
+                                </td>
+
+                            </tr>
+
+                        {% else %}
+
+                            <tr>
+                                <td
+                                    colspan="4"
+                                    style="text-align:center;"
+                                >
+                                    还没有付款对象
+                                </td>
+                            </tr>
+
+                        {% endfor %}
+
+                    </tbody>
+
+                </table>
+
+            </div>
+
+        </div>
+
+        <div class="btn-row">
+
+            <a
+                class="btn-tool btn-secondary"
+                href="{{ url_for(
+                    'finance.finance_expense_menu'
+                ) }}"
+            >
+                ← 返回支出项目
+            </a>
+
+        </div>
+
+    </div>
+
+    </body>
+    </html>
+    """,
+        rows=rows,
+        message=message
+    )
+
+
+@finance_bp.route(
+    "/vendors/<int:vendor_id>/toggle",
+    methods=["POST"]
+)
+def toggle_finance_vendor(vendor_id):
+
+    db_query("""
+        update finance_vendors
+        set is_active = not is_active
+        where id = %s
+    """, (
+        vendor_id,
+    ))
+
+    return redirect(
+        url_for(
+            "finance.finance_vendors"
+        )
+    )
+
+
 @finance_bp.route(
     "/expense/<category>",
     methods=["GET", "POST"]
@@ -7164,13 +11494,28 @@ def expense(category):
 
     message = ""
 
+    fund_account = "观音堂日常户口"
+
     suggested_payment_voucher_no = (
         get_next_payment_voucher()
+    )
+
+    vendors = get_active_finance_vendors()
+
+    sub_category_options = (
+        EXPENSE_SUB_CATEGORY_OPTIONS.get(
+            category,
+            ["其它"]
+        )
     )
 
     form_data = {
         "payment_voucher_no": suggested_payment_voucher_no,
         "record_date": date.today().isoformat(),
+        "sub_category": "",
+        "sub_category_custom": "",
+        "vendor": "",
+        "vendor_custom": "",
         "amount": "",
         "payment_method": "现金",
         "remarks": "",
@@ -7187,6 +11532,53 @@ def expense(category):
             request.form.get("record_date")
             or date.today().isoformat()
         )
+
+        sub_category_selected = request.form.get(
+            "sub_category",
+            ""
+        ).strip()
+
+        sub_category_custom = request.form.get(
+            "sub_category_custom",
+            ""
+        ).strip()
+
+        if sub_category_selected == "__custom__":
+            sub_category = sub_category_custom
+        else:
+            sub_category = sub_category_selected
+
+        vendor_selected = request.form.get(
+            "vendor",
+            ""
+        ).strip()
+
+        vendor_custom = request.form.get(
+            "vendor_custom",
+            ""
+        ).strip()
+
+        # 电费、水费、电话网络费：
+        # 根据费用明细自动决定付款对象
+        if category in AUTO_VENDOR_CATEGORIES:
+
+            vendor = EXPENSE_VENDOR_BY_SUB_CATEGORY.get(
+                sub_category,
+                ""
+            )
+
+            # “其它”明细仍允许手动填写付款对象
+            if not vendor:
+                vendor = vendor_custom
+
+        # 其它类别才读取付款对象
+        elif vendor_selected == "__custom__":
+
+            vendor = vendor_custom
+
+        else:
+
+            vendor = vendor_selected
 
         amount_raw = request.form.get(
             "amount",
@@ -7208,10 +11600,22 @@ def expense(category):
         form_data = {
             "payment_voucher_no": payment_voucher_no,
             "record_date": str(record_date),
+            "sub_category": sub_category_selected,
+            "sub_category_custom": sub_category_custom,
+            "vendor": vendor_selected,
+            "vendor_custom": vendor_custom,
             "amount": amount_raw,
             "payment_method": payment_method,
             "remarks": remarks,
         }
+
+        # =================================================
+        # V6：检查该财政月份是否已经月结
+        # =================================================
+        month_lock_error = require_finance_month_open(
+            record_date,
+            fund_account
+        )
 
         existing_voucher = None
 
@@ -7226,7 +11630,12 @@ def expense(category):
                 payment_voucher_no,
             ), fetchone=True)
 
-        if not payment_voucher_no:
+        # 月结锁定必须放在所有验证的最前面
+        if month_lock_error:
+
+            message = month_lock_error
+
+        elif not payment_voucher_no:
 
             message = "请填写 Payment Voucher 编号。"
 
@@ -7247,6 +11656,18 @@ def expense(category):
                 "请检查是否重复。"
             )
 
+        elif not sub_category:
+
+            message = "请选择或填写费用明细／单位。"
+
+        elif category in AUTO_VENDOR_CATEGORIES and not vendor:
+
+            message = "系统无法根据费用明细判断付款对象，请检查选项。"
+
+        elif category not in AUTO_VENDOR_CATEGORIES and not vendor:
+
+            message = "请选择或填写付款对象。"
+
         elif amount <= 0:
 
             message = "请输入正确的支出金额。"
@@ -7257,36 +11678,57 @@ def expense(category):
 
         else:
 
-            db_query("""
-                insert into finance_records
-                (
-                    record_type,
+            # 保存前再次检查，防止页面打开后才进行月结
+            month_lock_error = require_finance_month_open(
+                record_date,
+                fund_account
+            )
+
+            if month_lock_error:
+
+                message = month_lock_error
+
+            else:
+
+                db_query("""
+                    insert into finance_records
+                    (
+                        record_type,
+                        payment_voucher_no,
+                        record_date,
+                        category,
+                        sub_category,
+                        vendor,
+                        name,
+                        amount,
+                        payment_method,
+                        fund_account,
+                        remarks
+                    )
+                    values
+                    (
+                        'expense',
+                        %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s
+                    )
+                """, (
                     payment_voucher_no,
                     record_date,
                     category,
+                    sub_category,
+                    vendor,
+                    vendor,
                     amount,
                     payment_method,
                     fund_account,
                     remarks
-                )
-                values
-                (
-                    'expense',
-                    %s, %s, %s, %s, %s, %s, %s
-                )
-            """, (
-                payment_voucher_no,
-                record_date,
-                category,
-                amount,
-                payment_method,
-                "观音堂日常户口",
-                remarks
-            ))
+                ))
 
-            return redirect(
-                url_for("finance.records")
-            )
+                return redirect(
+                    url_for(
+                        "finance.records"
+                    )
+                )
 
     return render_template_string("""
     <!doctype html>
@@ -7312,163 +11754,85 @@ def expense(category):
 
         <style>
 
-            .expense-page {
-                max-width: 820px;
+            .expense-page{
+                max-width:820px;
             }
 
-            .expense-header {
-                background:
-                    linear-gradient(
-                        135deg,
-                        #dc2626,
-                        #b91c1c
-                    );
-
-                color: white;
-                padding: 28px;
-                border-radius: 22px;
-                margin-bottom: 20px;
-
-                box-shadow:
-                    0 12px 30px
-                    rgba(185, 28, 28, 0.18);
+            .expense-header{
+                background:linear-gradient(
+                    135deg,
+                    #dc2626,
+                    #b91c1c
+                );
+                color:white;
+                padding:28px;
+                border-radius:22px;
+                margin-bottom:20px;
             }
 
-            .expense-header h1 {
-                margin: 0 0 8px;
-                font-size: 30px;
+            .expense-header h1{
+                margin:0 0 8px;
             }
 
-            .expense-header p {
-                margin: 0;
-                opacity: 0.92;
-                line-height: 1.6;
+            .expense-header p{
+                margin:0;
+                opacity:.92;
             }
 
-            .account-note {
-                display: flex;
-                align-items: flex-start;
-                gap: 12px;
-                background: #fff7ed;
-                border: 1px solid #fed7aa;
-                color: #9a3412;
-                border-radius: 14px;
-                padding: 14px 16px;
-                margin-bottom: 20px;
-                line-height: 1.6;
-            }
-
-            .account-note-icon {
-                font-size: 24px;
-                line-height: 1;
-            }
-
-            .expense-form-grid {
-                display: grid;
+            .expense-form-grid{
+                display:grid;
                 grid-template-columns:
-                    repeat(2, minmax(0, 1fr));
-                gap: 16px;
+                    repeat(2,minmax(0,1fr));
+                gap:16px;
             }
 
-            .expense-form-grid .full-width {
-                grid-column: 1 / -1;
+            .full-width{
+                grid-column:1 / -1;
             }
 
-            .voucher-box {
-                background: #eff6ff;
-                border: 1px solid #bfdbfe;
-                border-radius: 14px;
-                padding: 16px;
-                margin-bottom: 18px;
+            .custom-box{
+                display:none;
+                margin-top:10px;
             }
 
-            .voucher-input {
-                font-weight: 800;
-                letter-spacing: 1px;
-                color: #1d4ed8;
+            .voucher-box{
+                background:#eff6ff;
+                border:1px solid #bfdbfe;
+                border-radius:14px;
+                padding:16px;
+                margin-bottom:18px;
             }
 
-            .amount-input-wrap {
-                position: relative;
+            .voucher-input{
+                font-weight:800;
+                color:#1d4ed8;
             }
 
-            .amount-prefix {
-                position: absolute;
-                left: 14px;
-                top: 50%;
-                transform: translateY(-50%);
-                color: #64748b;
-                font-weight: 700;
-                pointer-events: none;
+            .expense-actions{
+                display:flex;
+                justify-content:space-between;
+                gap:12px;
+                flex-wrap:wrap;
+                margin-top:22px;
             }
 
-            .amount-input-wrap .form-input {
-                padding-left: 48px;
-            }
+            @media(max-width:700px){
 
-            .expense-actions {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                gap: 12px;
-                flex-wrap: wrap;
-                margin-top: 22px;
-            }
-
-            .expense-actions-right {
-                display: flex;
-                gap: 10px;
-                flex-wrap: wrap;
-            }
-
-            .required-mark {
-                color: #dc2626;
-            }
-
-            .form-help {
-                color: #64748b;
-                font-size: 14px;
-                line-height: 1.5;
-                margin-top: 6px;
-            }
-
-            @media (max-width: 700px) {
-
-                .expense-page {
-                    padding-left: 12px;
-                    padding-right: 12px;
+                .expense-form-grid{
+                    grid-template-columns:1fr;
                 }
 
-                .expense-header {
-                    padding: 22px 18px;
-                    border-radius: 18px;
+                .full-width{
+                    grid-column:auto;
                 }
 
-                .expense-header h1 {
-                    font-size: 26px;
+                .expense-actions{
+                    display:grid;
                 }
 
-                .expense-form-grid {
-                    grid-template-columns: 1fr;
+                .expense-actions .btn-tool{
+                    width:100%;
                 }
-
-                .expense-form-grid .full-width {
-                    grid-column: auto;
-                }
-
-                .expense-actions {
-                    flex-direction: column-reverse;
-                    align-items: stretch;
-                }
-
-                .expense-actions-right {
-                    flex-direction: column;
-                }
-
-                .expense-actions .btn-tool {
-                    width: 100%;
-                }
-
             }
 
         </style>
@@ -7484,7 +11848,7 @@ def expense(category):
             <h1>💸 {{ category }}</h1>
 
             <p>
-                填写本次支出资料，保存后将自动列入财政记录与月报。
+                填写支出资料并保存 Payment Voucher。
             </p>
 
         </div>
@@ -7496,23 +11860,6 @@ def expense(category):
             </div>
 
         {% endif %}
-
-        <div class="account-note">
-
-            <div class="account-note-icon">
-                🏦
-            </div>
-
-            <div>
-                <strong>支出户口：</strong>
-                观音堂日常户口
-
-                <br>
-
-                所有支出记录统一归入观音堂日常户口。
-            </div>
-
-        </div>
 
         <div class="card">
 
@@ -7528,25 +11875,21 @@ def expense(category):
 
                         <label class="form-label">
                             Payment Voucher No.
-                            <span class="required-mark">*</span>
                         </label>
 
                         <input
-                            class="form-input voucher-input"
+                            class="
+                                form-input
+                                voucher-input
+                            "
                             name="payment_voucher_no"
                             value="{{ form_data.payment_voucher_no }}"
-                            placeholder="例如 PV000001"
-                            autocomplete="off"
                             required
                         >
 
                         <div class="form-help">
-                            系统建议下一张：
-                            <strong>
-                                {{ suggested_payment_voucher_no }}
-                            </strong>
-                            。如实体 Payment Voucher 编号不同，
-                            财政可以直接修改。
+                            系统建议：
+                            {{ suggested_payment_voucher_no }}
                         </div>
 
                     </div>
@@ -7559,7 +11902,6 @@ def expense(category):
 
                         <label class="form-label">
                             支出日期
-                            <span class="required-mark">*</span>
                         </label>
 
                         <input
@@ -7576,7 +11918,6 @@ def expense(category):
 
                         <label class="form-label">
                             付款方式
-                            <span class="required-mark">*</span>
                         </label>
 
                         <select
@@ -7609,53 +11950,199 @@ def expense(category):
 
                     </div>
 
-                    <div class="form-group full-width">
+                    <div class="
+                        form-group
+                        full-width
+                    ">
 
                         <label class="form-label">
-                            支出金额
-                            <span class="required-mark">*</span>
+                            费用明细／单位
                         </label>
 
-                        <div class="amount-input-wrap">
+                        <select
+                            class="form-input"
+                            name="sub_category"
+                            id="sub_category"
+                            onchange="toggleCustomSubCategory()"
+                            required
+                        >
 
-                            <span class="amount-prefix">
-                                RM
-                            </span>
+                            <option value="">
+                                请选择费用明细
+                            </option>
+
+                            {% for item in sub_category_options %}
+
+                                <option
+                                    value="{{ item }}"
+                                    {% if form_data.sub_category == item %}
+                                        selected
+                                    {% endif %}
+                                >
+                                    {{ item }}
+                                </option>
+
+                            {% endfor %}
+
+                            <option
+                                value="__custom__"
+                                {% if form_data.sub_category == '__custom__' %}
+                                    selected
+                                {% endif %}
+                            >
+                                其它／手动输入
+                            </option>
+
+                        </select>
+
+                        <div
+                            class="custom-box"
+                            id="custom_sub_category_box"
+                        >
 
                             <input
                                 class="form-input"
-                                name="amount"
-                                type="number"
-                                step="0.01"
-                                min="0.01"
-                                value="{{ form_data.amount }}"
-                                placeholder="0.00"
-                                inputmode="decimal"
-                                required
+                                name="sub_category_custom"
+                                value="{{ form_data.sub_category_custom }}"
+                                placeholder="填写费用明细／单位"
                             >
 
                         </div>
 
+                        <div class="form-help">
+                            例如：TNB 20-1、Air Selangor 20-2、
+                            Celcom Reload 或佛具。
+                        </div>
+
                     </div>
+                                  
+                    {% if category not in auto_vendor_categories %}
+
+                    <div class="
+                        form-group
+                        full-width
+                    ">
+
+                        <label class="form-label">
+                            付款对象
+                        </label>
+
+                        <select
+                            class="form-input"
+                            name="vendor"
+                            id="vendor"
+                            onchange="toggleCustomVendor()"
+                            required
+                        >
+
+                            <option value="">
+                                请选择付款对象
+                            </option>
+
+                            {% for vendor in vendors %}
+
+                                <option
+                                    value="{{ vendor.vendor_name }}"
+                                    {% if
+                                        form_data.vendor
+                                        == vendor.vendor_name
+                                    %}
+                                        selected
+                                    {% endif %}
+                                >
+                                    {{ vendor.vendor_name }}
+                                </option>
+
+                            {% endfor %}
+
+                            <option
+                                value="__custom__"
+                                {% if
+                                    form_data.vendor
+                                    == '__custom__'
+                                %}
+                                    selected
+                                {% endif %}
+                            >
+                                其它／手动输入
+                            </option>
+
+                        </select>
+
+                        <div
+                            class="custom-box"
+                            id="custom_vendor_box"
+                        >
+
+                            <input
+                                class="form-input"
+                                name="vendor_custom"
+                                value="{{ form_data.vendor_custom }}"
+                                placeholder="填写其它付款对象"
+                            >
+
+                        </div>
+                                  
+                    </div>
+                                  
+                    {% else %}
 
                     <div class="form-group full-width">
 
                         <label class="form-label">
+                            付款对象
+                        </label>
+
+                        <div class="alert alert-info">
+                            系统会根据费用明细自动填写付款对象。
+                        </div>
+
+                    </div>
+
+                    {% endif %}
+
+                        <div class="form-help">
+                            没有合适选项时，可选择“其它／手动输入”。
+                        </div>
+
+                    </div>
+
+                    <div class="
+                        form-group
+                        full-width
+                    ">
+
+                        <label class="form-label">
+                            支出金额 RM
+                        </label>
+
+                        <input
+                            class="form-input"
+                            name="amount"
+                            type="number"
+                            step="0.01"
+                            min="0.01"
+                            value="{{ form_data.amount }}"
+                            required
+                        >
+
+                    </div>
+
+                    <div class="
+                        form-group
+                        full-width
+                    ">
+
+                        <label class="form-label">
                             支出用途／备注
-                            <span class="required-mark">*</span>
                         </label>
 
                         <textarea
                             class="form-input"
                             name="remarks"
                             rows="5"
-                            placeholder="例如：购买清洁用品、维修冷气、支付水电费"
                             required
                         >{{ form_data.remarks }}</textarea>
-
-                        <div class="form-help">
-                            请清楚填写支出用途，方便日后查询及核对月报。
-                        </div>
 
                     </div>
 
@@ -7672,30 +12159,17 @@ def expense(category):
                         ← 返回支出项目
                     </a>
 
-                    <div class="expense-actions-right">
-
-                        <a
-                            class="btn-tool btn-secondary"
-                            href="{{ url_for(
-                                'finance.records'
-                            ) }}"
-                        >
-                            📚 查看财政记录
-                        </a>
-
-                        <button
-                            class="btn-tool btn-danger"
-                            type="submit"
-                            onclick="
-                                return confirm(
-                                    '确定保存这笔支出记录？'
-                                );
-                            "
-                        >
-                            💾 保存支出
-                        </button>
-
-                    </div>
+                    <button
+                        class="btn-tool btn-danger"
+                        type="submit"
+                        onclick="
+                            return confirm(
+                                '确定保存这笔支出？'
+                            );
+                        "
+                    >
+                        💾 保存支出
+                    </button>
 
                 </div>
 
@@ -7703,7 +12177,61 @@ def expense(category):
 
         </div>
 
+        <div class="btn-row">
+
+            <a
+                class="btn-tool btn-primary"
+                href="{{ url_for(
+                    'finance.finance_vendors'
+                ) }}"
+            >
+                🏢 管理付款对象
+            </a>
+
+        </div>
+
     </div>
+
+    <script>
+
+    function toggleCustomVendor(){
+
+        const select = document.getElementById(
+            "vendor"
+        );
+
+        const box = document.getElementById(
+            "custom_vendor_box"
+        );
+
+        if(select.value === "__custom__"){
+            box.style.display = "block";
+        }else{
+            box.style.display = "none";
+        }
+    }
+
+    function toggleCustomSubCategory(){
+
+        const select = document.getElementById(
+            "sub_category"
+        );
+
+        const box = document.getElementById(
+            "custom_sub_category_box"
+        );
+
+        if(select.value === "__custom__"){
+            box.style.display = "block";
+        }else{
+            box.style.display = "none";
+        }
+    }
+
+    toggleCustomVendor();
+    toggleCustomSubCategory();
+
+    </script>
 
     </body>
     </html>
@@ -7711,493 +12239,11 @@ def expense(category):
         category=category,
         message=message,
         form_data=form_data,
+        vendors=vendors,
+        sub_category_options=sub_category_options,
+        auto_vendor_categories=AUTO_VENDOR_CATEGORIES,
         suggested_payment_voucher_no=(
             suggested_payment_voucher_no
         )
     )
-
-@finance_bp.route("/export_monthly_report")
-def export_monthly_report():
-    ym = request.args.get("ym", date.today().strftime("%Y-%m"))
-
-    rows = db_query("""
-        select
-            record_date,
-            receipt_date,
-            receipt_no,
-            category,
-            record_type,
-            fund_account,
-            name,
-            phone,
-            amount,
-            remarks as note
-        from finance_records
-        where to_char(record_date, 'YYYY-MM') = %s
-        and coalesce(status,'confirmed') <> 'cancelled'
-        order by record_date, id
-    """, (ym,), fetchall=True)
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "财政摘要"
-    ws_income = wb.create_sheet("收入明细")
-    ws_expense = wb.create_sheet("支出明细")
-
-    # =========================
-    # 样式
-    # =========================
-    green = "1F5E20"
-    light_green = "EAF4E4"
-    blue = "0B3A78"
-    light_blue = "EAF2FF"
-    gold = "F8E7B8"
-    dark_text = "1F2937"
-    red = "D00000"
-
-    thin_green = Side(style="thin", color="8DBA7C")
-    thin_blue = Side(style="thin", color="7FA6D9")
-    thin_gold = Side(style="thin", color="C9962C")
-    thin_gray = Side(style="thin", color="CCCCCC")
-
-    border_green = Border(left=thin_green, right=thin_green, top=thin_green, bottom=thin_green)
-    border_blue = Border(left=thin_blue, right=thin_blue, top=thin_blue, bottom=thin_blue)
-    border_gold = Border(left=thin_gold, right=thin_gold, top=thin_gold, bottom=thin_gold)
-    border_gray = Border(left=thin_gray, right=thin_gray, top=thin_gray, bottom=thin_gray)
-
-    money_fmt = '"RM"#,##0.00'
-
-    def money(v):
-        return float(v or 0)
-
-    def set_range_border(ws, cell_range, border):
-        for row in ws[cell_range]:
-            for cell in row:
-                cell.border = border
-
-    def fill_range(ws, cell_range, fill):
-        for row in ws[cell_range]:
-            for cell in row:
-                cell.fill = fill
-
-    def center_range(ws, cell_range):
-        for row in ws[cell_range]:
-            for cell in row:
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    def format_money_cell(cell):
-        cell.number_format = money_fmt
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    def auto_width(ws):
-        for col in ws.columns:
-            max_len = 0
-            col_letter = get_column_letter(col[0].column)
-            for cell in col:
-                if cell.value is not None:
-                    max_len = max(max_len, len(str(cell.value)))
-            ws.column_dimensions[col_letter].width = min(max_len + 4, 22)
-
-    # =========================
-    # 数据整理
-    # =========================
-    summary = {
-        "观音堂日常户口": {"income": 0, "expense": 0},
-        "总会户口": {"income": 0, "expense": 0},
-    }
-
-    income_rows = []
-    expense_rows = []
-
-    for r in rows:
-        fund = r["fund_account"] or "未分类"
-        record_type = r["record_type"] or "income"
-        amount = money(r["amount"])
-
-        if fund not in summary:
-            summary[fund] = {"income": 0, "expense": 0}
-
-        summary[fund][record_type] += amount
-
-        if record_type == "income":
-            income_rows.append(r)
-        else:
-            expense_rows.append(r)
-
-    daily_income = summary.get("观音堂日常户口", {}).get("income", 0)
-    daily_expense = summary.get("观音堂日常户口", {}).get("expense", 0)
-    daily_balance = daily_income - daily_expense
-
-    hq_income = summary.get("总会户口", {}).get("income", 0)
-    hq_expense = summary.get("总会户口", {}).get("expense", 0)
-    hq_balance = hq_income - hq_expense
-
-    total_income = sum(v["income"] for v in summary.values())
-    total_expense = sum(v["expense"] for v in summary.values())
-    total_balance = total_income - total_expense
-
-    # =========================
-    # Sheet 1 财政摘要：图片同款
-    # =========================
-    ws.sheet_view.showGridLines = False
-
-    for col in range(1, 16):
-        ws.column_dimensions[get_column_letter(col)].width = 14
-
-    ws.row_dimensions[1].height = 14
-    ws.row_dimensions[2].height = 34
-    ws.row_dimensions[3].height = 26
-    ws.row_dimensions[4].height = 12
-
-    ws.merge_cells("A1:O4")
-    ws["A1"] = f"观音堂财政月报\n{ym}"
-    ws["A1"].font = Font(bold=True, size=24, color=dark_text)
-    ws["A1"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws["A1"].fill = PatternFill("solid", fgColor="FFF8E8")
-    set_range_border(ws, "A1:O4", border_gold)
-
-    # 左表：观音堂日常户口
-    ws.merge_cells("A5:G5")
-    ws["A5"] = "观音堂日常户口"
-    ws["A5"].fill = PatternFill("solid", fgColor=green)
-    ws["A5"].font = Font(bold=True, size=14, color="FFFFFF")
-    ws["A5"].alignment = Alignment(horizontal="center")
-
-    daily_table = [
-        ["项目", "收入（RM）", "支出（RM）", "本月结余（RM）"],
-        ["收入", daily_income, "-", daily_income],
-        ["支出", "-", daily_expense, -daily_expense],
-        ["本月结余", "-", "-", daily_balance],
-    ]
-
-    start_row = 6
-    for i, row in enumerate(daily_table, start_row):
-        ws.merge_cells(start_row=i, start_column=1, end_row=i, end_column=2)
-        ws.merge_cells(start_row=i, start_column=3, end_row=i, end_column=4)
-        ws.merge_cells(start_row=i, start_column=5, end_row=i, end_column=5)
-        ws.merge_cells(start_row=i, start_column=6, end_row=i, end_column=7)
-
-        ws.cell(i, 1).value = row[0]
-        ws.cell(i, 3).value = row[1]
-        ws.cell(i, 5).value = row[2]
-        ws.cell(i, 6).value = row[3]
-
-        for c in [1, 3, 5, 6]:
-            ws.cell(i, c).alignment = Alignment(horizontal="center", vertical="center")
-            ws.cell(i, c).border = border_green
-
-        if i == 6:
-            fill_range(ws, f"A{i}:G{i}", PatternFill("solid", fgColor=light_green))
-            for c in [1, 3, 5, 6]:
-                ws.cell(i, c).font = Font(bold=True)
-        elif i == 9:
-            fill_range(ws, f"A{i}:G{i}", PatternFill("solid", fgColor="DDEED2"))
-            ws.cell(i, 6).font = Font(bold=True, size=14, color=green)
-
-    for cell_ref in ["C7", "E8", "F7", "F8", "F9"]:
-        ws[cell_ref].number_format = money_fmt
-
-    # 右表：总会户口
-    ws.merge_cells("I5:O5")
-    ws["I5"] = "总会户口"
-    ws["I5"].fill = PatternFill("solid", fgColor=blue)
-    ws["I5"].font = Font(bold=True, size=14, color="FFFFFF")
-    ws["I5"].alignment = Alignment(horizontal="center")
-
-    hq_table = [
-        ["项目", "收入（RM）", "支出（RM）", "本月结余（RM）"],
-        ["收入", hq_income, "-", hq_income],
-        ["支出", "-", hq_expense, -hq_expense],
-        ["本月结余", "-", "-", hq_balance],
-    ]
-
-    for i, row in enumerate(hq_table, start_row):
-        ws.merge_cells(start_row=i, start_column=9, end_row=i, end_column=10)
-        ws.merge_cells(start_row=i, start_column=11, end_row=i, end_column=12)
-        ws.merge_cells(start_row=i, start_column=13, end_row=i, end_column=13)
-        ws.merge_cells(start_row=i, start_column=14, end_row=i, end_column=15)
-
-        ws.cell(i, 9).value = row[0]
-        ws.cell(i, 11).value = row[1]
-        ws.cell(i, 13).value = row[2]
-        ws.cell(i, 14).value = row[3]
-
-        for c in [9, 11, 13, 14]:
-            ws.cell(i, c).alignment = Alignment(horizontal="center", vertical="center")
-            ws.cell(i, c).border = border_blue
-
-        if i == 6:
-            fill_range(ws, f"I{i}:O{i}", PatternFill("solid", fgColor=light_blue))
-            for c in [9, 11, 13, 14]:
-                ws.cell(i, c).font = Font(bold=True, color=blue)
-        elif i == 9:
-            fill_range(ws, f"I{i}:O{i}", PatternFill("solid", fgColor="DCEAFF"))
-            ws.cell(i, 14).font = Font(bold=True, size=14, color=blue)
-
-    for cell_ref in ["K7", "M8", "N7", "N8", "N9"]:
-        ws[cell_ref].number_format = money_fmt
-
-    # 总计横条
-    ws.merge_cells("A11:C12")
-    ws["A11"] = "总计"
-    ws["A11"].font = Font(bold=True, size=16, color="7A5200")
-    ws["A11"].alignment = Alignment(horizontal="center", vertical="center")
-    ws["A11"].fill = PatternFill("solid", fgColor="FFF2CC")
-
-    ws.merge_cells("D11:F12")
-    ws["D11"] = f"总收入（RM）\n{total_income}"
-    ws["D11"].font = Font(bold=True, size=12, color=green)
-    ws["D11"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws["D11"].fill = PatternFill("solid", fgColor="FFF8E8")
-
-    ws.merge_cells("G11:I12")
-    ws["G11"] = f"总支出（RM）\n{total_expense}"
-    ws["G11"].font = Font(bold=True, size=12, color=red)
-    ws["G11"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws["G11"].fill = PatternFill("solid", fgColor="FFF8E8")
-
-    ws.merge_cells("J11:O12")
-    ws["J11"] = f"总体结余（RM）\n{total_balance}"
-    ws["J11"].font = Font(bold=True, size=12, color=blue)
-    ws["J11"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws["J11"].fill = PatternFill("solid", fgColor="FFF8E8")
-
-    set_range_border(ws, "A11:O12", border_gold)
-
-    # 收入明细表
-    ws.merge_cells("A14:G14")
-    ws["A14"] = "收入明细"
-    ws["A14"].fill = PatternFill("solid", fgColor=green)
-    ws["A14"].font = Font(bold=True, size=14, color="FFFFFF")
-    ws["A14"].alignment = Alignment(horizontal="center")
-
-    income_headers = [
-        "付款日期",
-        "开收条日期",
-        "收条号码",
-        "分类",
-        "户口",
-        "姓名",
-        "金额（RM）"
-    ]
-    for col, h in enumerate(income_headers, 1):
-        c = ws.cell(15, col)
-        c.value = h
-        c.fill = PatternFill("solid", fgColor=light_green)
-        c.font = Font(bold=True)
-        c.alignment = Alignment(horizontal="center")
-        c.border = border_green
-
-    rno = 16
-    for r in income_rows[:8]:
-        vals = [
-            r["record_date"],
-            r["receipt_date"],
-            r["receipt_no"],
-            r["category"],
-            r["fund_account"],
-            r["name"],
-            money(r["amount"]),
-        ]
-        for col, v in enumerate(vals, 1):
-            c = ws.cell(rno, col)
-            c.value = v
-            c.border = border_green
-            c.alignment = Alignment(horizontal="center")
-            if col == 7:
-                c.number_format = money_fmt
-        rno += 1
-
-    while rno <= 23:
-        for col in range(1, 8):
-            ws.cell(rno, col).border = border_green
-            ws.cell(rno, col).fill = PatternFill("solid", fgColor="FAFCF7")
-        rno += 1
-
-    ws.merge_cells("A24:F24")
-    ws["A24"] = "收入总计"
-    ws["A24"].fill = PatternFill("solid", fgColor="DDEED2")
-    ws["A24"].font = Font(bold=True, color=green)
-    ws["A24"].alignment = Alignment(horizontal="right")
-    ws["G24"] = total_income
-    ws["G24"].number_format = money_fmt
-    ws["G24"].fill = PatternFill("solid", fgColor="DDEED2")
-    ws["G24"].font = Font(bold=True, color=green)
-    ws["G24"].alignment = Alignment(horizontal="center")
-    set_range_border(ws, "A24:G24", border_green)
-
-    # 支出明细表
-    ws.merge_cells("I14:O14")
-    ws["I14"] = "支出明细"
-    ws["I14"].fill = PatternFill("solid", fgColor=blue)
-    ws["I14"].font = Font(bold=True, size=14, color="FFFFFF")
-    ws["I14"].alignment = Alignment(horizontal="center")
-
-    expense_headers = [
-        "付款日期",
-        "开收条日期",
-        "收条号码",
-        "分类",
-        "户口",
-        "姓名",
-        "金额（RM）"
-    ]
-    for col, h in enumerate(expense_headers, 9):
-        c = ws.cell(15, col)
-        c.value = h
-        c.fill = PatternFill("solid", fgColor=light_blue)
-        c.font = Font(bold=True, color=blue)
-        c.alignment = Alignment(horizontal="center")
-        c.border = border_blue
-
-    rno = 16
-    for r in expense_rows[:8]:
-        vals = [
-            r["record_date"],
-            r["receipt_date"],
-            r["receipt_no"],
-            r["category"],
-            r["fund_account"],
-            r["name"],
-            money(r["amount"]),
-        ]
-        for col, v in enumerate(vals, 9):
-            c = ws.cell(rno, col)
-            c.value = v
-            c.border = border_blue
-            c.alignment = Alignment(horizontal="center")
-            if col == 15:
-                c.number_format = money_fmt
-        rno += 1
-
-    while rno <= 23:
-        for col in range(9, 16):
-            ws.cell(rno, col).border = border_blue
-            ws.cell(rno, col).fill = PatternFill("solid", fgColor="F8FBFF")
-        rno += 1
-
-    ws.merge_cells("I24:N24")
-    ws["I24"] = "支出总计"
-    ws["I24"].fill = PatternFill("solid", fgColor="DCEAFF")
-    ws["I24"].font = Font(bold=True, color=blue)
-    ws["I24"].alignment = Alignment(horizontal="right")
-    ws["O24"] = total_expense
-    ws["O24"].number_format = money_fmt
-    ws["O24"].fill = PatternFill("solid", fgColor="DCEAFF")
-    ws["O24"].font = Font(bold=True, color=red)
-    ws["O24"].alignment = Alignment(horizontal="center")
-    set_range_border(ws, "I24:O24", border_blue)
-
-    ws.freeze_panes = "A14"
-
-    # =========================
-    # Sheet 2 / Sheet 3 明细
-    # =========================
-    def write_detail_sheet(ws2, title, data_rows, main_color, light_color):
-        ws2.sheet_view.showGridLines = False
-
-        ws2.merge_cells("A1:I2")
-        ws2["A1"] = f"{title} - {ym}"
-        ws2["A1"].font = Font(bold=True, size=18, color="FFFFFF")
-        ws2["A1"].alignment = Alignment(horizontal="center", vertical="center")
-        ws2["A1"].fill = PatternFill("solid", fgColor=main_color)
-
-        headers = [
-            "付款日期",
-            "开收条日期",
-            "收条号码",
-            "分类",
-            "户口",
-            "姓名",
-            "金额（RM）",
-            "备注",
-            "类型"
-        ]
-
-        for col, h in enumerate(headers, 1):
-            c = ws2.cell(4, col)
-            c.value = h
-            c.fill = PatternFill("solid", fgColor=light_color)
-            c.font = Font(bold=True, color=dark_text)
-            c.alignment = Alignment(horizontal="center")
-            c.border = border_gray
-
-        row_no = 5
-        for r in data_rows:
-            vals = [
-                r["record_date"],
-                r["receipt_date"],
-                r["receipt_no"],
-                r["category"],
-                r["fund_account"],
-                r["name"],
-                money(r["amount"]),
-                r["note"],
-                ...
-            ]
-
-            for col, v in enumerate(vals, 1):
-                c = ws2.cell(row_no, col)
-                c.value = v
-                c.border = border_gray
-                c.alignment = Alignment(horizontal="center")
-                if col == 7:
-                    c.number_format = money_fmt
-
-            row_no += 1
-
-        total_row = row_no + 1
-        ws2.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=6)
-        ws2.cell(total_row, 1).value = "总计"
-        ws2.cell(total_row, 1).font = Font(bold=True)
-        ws2.cell(total_row, 1).alignment = Alignment(horizontal="right")
-        ws2.cell(total_row, 7).value = sum(money(r["amount"]) for r in data_rows)
-        ws2.cell(total_row, 7).number_format = money_fmt
-        ws2.cell(total_row, 7).font = Font(bold=True, color=main_color)
-
-        fill_range(ws2, f"A{total_row}:I{total_row}", PatternFill("solid", fgColor=light_color))
-        set_range_border(ws2, f"A{total_row}:I{total_row}", border_gray)
-
-        ws2.freeze_panes = "A5"
-        auto_width(ws2)
-
-    write_detail_sheet(ws_income, "收入明细", income_rows, green, light_green)
-    write_detail_sheet(ws_expense, "支出明细", expense_rows, blue, light_blue)
-
-    # =========================
-    # 输出
-    # =========================
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-
-    filename = f"观音堂财政月报_{ym}.xlsx"
-
-    return send_file(
-        output,
-        as_attachment=True,
-        download_name=filename,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-def get_next_payment_voucher():
-
-    row = db_query("""
-        select payment_voucher_no
-        from finance_records
-        where payment_voucher_no is not null
-          and payment_voucher_no <> ''
-        order by payment_voucher_no desc
-        limit 1
-    """, fetchone=True)
-
-    if not row:
-        return "PV000001"
-
-    m = re.search(r"(\d+)$", row["payment_voucher_no"])
-
-    if not m:
-        return "PV000001"
-
-    return f"PV{int(m.group(1))+1:06d}"
 
