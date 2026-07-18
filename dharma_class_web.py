@@ -1318,14 +1318,21 @@ def class_attendance():
                         }
 
                         cur.execute("""
-                            select student_id, status
+                            select
+                                student_id,
+                                status,
+                                absence_reason
                             from dharma_attendance
                             where branch = 'CHE'
-                              and class_date = %s
-                              and student_id = any(%s)
-                        """, (selected_date, sid_list))
+                            and class_date = %s
+                            and student_id = any(%s)
+                        """, (
+                            selected_date,
+                            sid_list
+                        ))
+
                         old_attendance_map = {
-                            row["student_id"]: row["status"]
+                            row["student_id"]: row
                             for row in cur.fetchall()
                         }
 
@@ -1431,6 +1438,19 @@ def class_attendance():
                             "present"
                         ).strip()
 
+                        absence_reason = request.form.get(
+                            f"absence_reason_{sid}",
+                            ""
+                        ).strip()
+
+                        absence_other = request.form.get(
+                            f"absence_other_{sid}",
+                            ""
+                        ).strip()
+
+                        if absence_reason == "其它":
+                            absence_reason = absence_other
+
                         # 防止异常状态写入
                         if attendance_status not in (
                             "present",
@@ -1484,12 +1504,14 @@ def class_attendance():
                                 student_id,
                                 group_id,
                                 status,
+                                absence_reason,
                                 remark,
                                 marked_by
                             )
                             values
                             (
                                 'CHE',
+                                %s,
                                 %s,
                                 %s,
                                 %s,
@@ -1505,6 +1527,7 @@ def class_attendance():
                             do update set
                                 group_id = excluded.group_id,
                                 status = excluded.status,
+                                absence_reason = excluded.absence_reason,
                                 marked_by = excluded.marked_by,
                                 marked_at = now()
                         """, (
@@ -1512,11 +1535,17 @@ def class_attendance():
                             sid,
                             selected_group_id,
                             attendance_status,
+                            absence_reason or None,
                             marked_by
                         ))
 
                         sid_int = int(sid)
                         student_name = student_name_map.get(sid_int, "")
+
+                        old_attendance = old_attendance_map.get(
+                            sid_int,
+                            {}
+                        )
 
                         write_dharma_audit_log(
                             cur,
@@ -1532,8 +1561,26 @@ def class_attendance():
                             record_date=selected_date,
                             group_id=selected_group_id,
                             field_name="status",
-                            old_value=old_attendance_map.get(sid_int),
+                            old_value=old_attendance.get("status"),
                             new_value=attendance_status,
+                        )
+
+                        write_dharma_audit_log(
+                            cur,
+                            actor_name=marked_by,
+                            action_type=(
+                                "update"
+                                if sid_int in old_attendance_map
+                                else "create"
+                            ),
+                            entity_type="attendance",
+                            student_id=sid_int,
+                            student_name=student_name,
+                            record_date=selected_date,
+                            group_id=selected_group_id,
+                            field_name="absence_reason",
+                            old_value=old_attendance.get("absence_reason"),
+                            new_value=absence_reason or None,
                         )
 
                         # ---------------------------------------------
@@ -1684,7 +1731,12 @@ def class_attendance():
                     coalesce(
                         a.status,
                         'present'
-                    ) as attendance_status
+                    ) as attendance_status,
+
+                    coalesce(
+                        a.absence_reason,
+                        ''
+                    ) as absence_reason
 
                 from dharma_students s
 
@@ -1744,6 +1796,33 @@ def class_attendance():
             }
 
             for student in students:
+
+                common_absence_reasons = {
+                    "生病",
+                    "学校活动",
+                    "考试",
+                    "旅游",
+                    "家里有事",
+                    "未通知",
+                    "待确认"
+                }
+
+                saved_reason = (
+                    student.get("absence_reason")
+                    or ""
+                ).strip()
+
+                if saved_reason in common_absence_reasons:
+                    student["absence_reason_choice"] = saved_reason
+                    student["absence_reason_other"] = ""
+
+                elif saved_reason:
+                    student["absence_reason_choice"] = "其它"
+                    student["absence_reason_other"] = saved_reason
+
+                else:
+                    student["absence_reason_choice"] = ""
+                    student["absence_reason_other"] = ""
 
                 homework = homework_map.get(
                     student["id"]
@@ -2090,6 +2169,20 @@ def class_attendance():
     margin-bottom:16px;
 
 }
+                                  
+.absence-reason-box{
+
+    margin-top:15px;
+
+    padding:15px;
+
+    border-radius:14px;
+
+    background:#FFF8E8;
+
+    border:1px solid #F2D38A;
+
+}
 
 @media (max-width:700px){
 
@@ -2128,6 +2221,75 @@ def class_attendance():
 
     .choice-option {
         font-size: 16px;
+    }
+}
+                                  
+/* =========================================================
+   缺席原因
+   ========================================================= */
+
+.absence-reason-box {
+    margin-top: 15px;
+    padding: 16px;
+    border: 1px solid #f0c8c8;
+    border-radius: 16px;
+    background: #fff4f4;
+}
+
+.absence-reason-title {
+    margin-bottom: 12px;
+    font-size: 19px;
+    font-weight: 900;
+    color: #991b1b;
+}
+
+.absence-reason-optional {
+    color: #777;
+    font-size: 15px;
+    font-weight: 500;
+}
+
+.absence-reason-options {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 9px;
+}
+
+.absence-reason-option {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 48px;
+    padding: 8px 6px;
+    border: 1px solid #e1caca;
+    border-radius: 13px;
+    background: #ffffff;
+    cursor: pointer;
+    text-align: center;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.absence-reason-option input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.absence-reason-option:has(input:checked) {
+    border: 2px solid #dc2626;
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.absence-other-box {
+    margin-top: 14px;
+}
+
+@media (max-width: 700px) {
+    .absence-reason-options {
+        grid-template-columns: repeat(2, 1fr);
     }
 }
 
@@ -2430,6 +2592,82 @@ def class_attendance():
 
                         </div>
 
+                        <div
+                            class="absence-reason-box"
+                            id="absence_box_{{ s.id }}"
+                            {% if s.attendance_status != "absent" %}
+                                style="display:none;"
+                            {% endif %}
+                        >
+
+                            <div class="absence-reason-title">
+                                📝 缺席原因
+                                <span class="absence-reason-optional">
+                                    （选填）
+                                </span>
+                            </div>
+
+                            <div class="absence-reason-options">
+
+                                {% set absence_reasons = [
+                                    ("生病", "🤒 生病"),
+                                    ("学校活动", "🏫 学校活动"),
+                                    ("考试", "📝 考试"),
+                                    ("旅游", "✈️ 旅游"),
+                                    ("家里有事", "🏠 家里有事"),
+                                    ("未通知", "❓ 未通知"),
+                                    ("待确认", "⏳ 待确认"),
+                                    ("其它", "✏️ 其它")
+                                ] %}
+
+                                {% for reason_value, reason_label in absence_reasons %}
+
+                                    <label class="absence-reason-option">
+
+                                        <input
+                                            type="radio"
+                                            name="absence_reason_{{ s.id }}"
+                                            value="{{ reason_value }}"
+                                            {% if
+                                                s.absence_reason_choice
+                                                == reason_value
+                                            %}
+                                                checked
+                                            {% endif %}
+                                        >
+
+                                        {{ reason_label }}
+
+                                    </label>
+
+                                {% endfor %}
+
+                            </div>
+
+                            <div
+                                class="absence-other-box"
+                                id="absence_other_box_{{ s.id }}"
+                                {% if s.absence_reason_choice != "其它" %}
+                                    style="display:none;"
+                                {% endif %}
+                            >
+
+                                <label class="form-label">
+                                    其它原因
+                                </label>
+
+                                <input
+                                    class="form-input"
+                                    type="text"
+                                    name="absence_reason_other_{{ s.id }}"
+                                    value="{{ s.absence_reason_other or '' }}"
+                                    placeholder="例如：参加比赛、回乡、交通问题"
+                                >
+
+                            </div>
+
+                        </div>
+
                         <!-- 白话佛法 -->
 
                         <div class="student-section">
@@ -2609,19 +2847,56 @@ function markStudentPresentIfNeeded(studentId) {
     }
 }
 
-function markStudentHomeworkAbsent(studentId) {
-    const baihuaAbsent = document.querySelector(
-        'input[name="baihua_' + studentId + '"][value="absent"]'
+function updateAbsenceReasonBox(studentId) {
+
+    const selectedStatus = document.querySelector(
+        'input[name="status_' + studentId + '"]:checked'
     );
 
-    const scriptureAbsent = document.querySelector(
-        'input[name="scripture_' + studentId + '"][value="absent"]'
+    const reasonBox = document.getElementById(
+        "absence_box_" + studentId
     );
 
-    if (baihuaAbsent) baihuaAbsent.checked = true;
-    if (scriptureAbsent) scriptureAbsent.checked = true;
+    if (!reasonBox) {
+        return;
+    }
+
+    if (
+        selectedStatus
+        && selectedStatus.value === "absent"
+    ) {
+        reasonBox.style.display = "block";
+    } else {
+        reasonBox.style.display = "none";
+    }
 }
 
+function updateAbsenceOtherBox(studentId) {
+
+    const selectedReason = document.querySelector(
+        'input[name="absence_reason_' +
+        studentId +
+        '"]:checked'
+    );
+
+    const otherBox = document.getElementById(
+        "absence_other_box_" + studentId
+    );
+
+    if (!otherBox) {
+        return;
+    }
+
+    if (
+        selectedReason
+        && selectedReason.value === "其它"
+    ) {
+        otherBox.style.display = "block";
+    } else {
+        otherBox.style.display = "none";
+    }
+}
+                                  
 function markStudentHomeworkAbsent(studentId) {
 
     // 页面已经取消功课“缺席”按钮，
@@ -2660,6 +2935,27 @@ function goTop(){
     });
 
 }
+                                  
+function toggleOtherReason(studentId){
+
+    const select=document.querySelector(
+        'select[name="absence_reason_'+studentId+'"]'
+    );
+
+    const other=document.getElementById(
+        "absence_other_"+studentId
+    );
+
+    if(!select || !other){
+        return;
+    }
+
+    other.style.display=
+        select.value==="其它"
+            ? "block"
+            : "none";
+
+}
 
 
 /* =========================================================
@@ -2691,31 +2987,51 @@ document.addEventListener(
         document
             .querySelectorAll('input[name^="status_"]')
             .forEach(function(radio) {
-                radio.addEventListener("change", function() {
-                    if (!this.checked) return;
 
-                    const studentId = this.name.replace("status_", "");
+                radio.addEventListener(
+                    "change",
+                    function() {
 
-                    if (this.value === "absent") {
-                        markStudentHomeworkAbsent(studentId);
-                    } else {
-                        const baihuaSelected = document.querySelector(
-                            'input[name="baihua_' + studentId + '"]:checked'
+                        if (!this.checked) {
+                            return;
+                        }
+
+                        const studentId = this.name.replace(
+                            "status_",
+                            ""
                         );
-                        const scriptureSelected = document.querySelector(
-                            'input[name="scripture_' + studentId + '"]:checked'
-                        );
 
-                        if (
-                            !baihuaSelected
-                            || baihuaSelected.value === "absent"
-                            || !scriptureSelected
-                            || scriptureSelected.value === "absent"
-                        ) {
-                            markStudentHomeworkDefault(studentId);
+                        updateAbsenceReasonBox(studentId);
+
+                        if (this.value === "absent") {
+                            markStudentHomeworkAbsent(studentId);
                         }
                     }
-                });
+                );
+            });
+                                  
+        document
+            .querySelectorAll(
+                'input[name^="absence_reason_"]'
+            )
+            .forEach(function(radio) {
+
+                radio.addEventListener(
+                    "change",
+                    function() {
+
+                        if (!this.checked) {
+                            return;
+                        }
+
+                        const studentId = this.name.replace(
+                            "absence_reason_",
+                            ""
+                        );
+
+                        updateAbsenceOtherBox(studentId);
+                    }
+                );
             });
     }
 );

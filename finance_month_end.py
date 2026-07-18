@@ -8,7 +8,7 @@ from datetime import date
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from finance_web import (
+from finance_web_old import (
     FINANCE_V5_STYLE,
     FINANCE_DATE_COMPONENT,
 )

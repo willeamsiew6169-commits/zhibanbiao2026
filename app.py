@@ -26,7 +26,7 @@ from db import db_query, get_conn
 from library_web import library_bp
 from reading_web import reading_bp
 
-from finance_web import finance_bp
+from finance_web_old import finance_bp
 import finance_export
 
 from psycopg2.extras import RealDictCursor

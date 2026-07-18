@@ -118,36 +118,6 @@ def add_months_ym(ym, months):
     return f"{y:04d}-{m:02d}"
 
 
-def normalize_phone(phone):
-    """统一电话号码格式，方便历史资料和新资料互相搜索。"""
-    digits = re.sub(r"\D", "", str(phone or ""))
-
-    if digits.startswith("0060"):
-        digits = digits[4:]
-    elif digits.startswith("60"):
-        digits = digits[2:]
-
-    if digits and not digits.startswith("0"):
-        digits = "0" + digits
-
-    return digits
-
-
-def phone_search_variants(phone):
-    local_phone = normalize_phone(phone)
-
-    if not local_phone:
-        return "", ""
-
-    international_phone = (
-        "60" + local_phone[1:]
-        if local_phone.startswith("0")
-        else local_phone
-    )
-
-    return local_phone, international_phone
-
-
 def next_month_ym(d):
     if not d:
         return date.today().strftime("%Y-%m")
@@ -1965,15 +1935,6 @@ def finance_home():
                 </div>
             </a>
 
-            <a class="v5-menu-btn v5-member"
-               href="{{ url_for('finance.donor_management') }}">
-                <div class="v5-icon">📇</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">布施人管理</div>
-                    <div class="v5-menu-desc">补充历史布施人的电话号码</div>
-                </div>
-            </a>
-
             <a class="v5-menu-btn v5-report"
                href="{{ url_for('finance.finance_report_menu') }}">
                 <div class="v5-icon">📊</div>
@@ -3318,8 +3279,6 @@ def monthly_fee_batch(branch):
                                 )
                             )
                                 = lower(trim(%s))
-                         or regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g')
-                                in (%s, %s)
                       )
                     order by member_id
                     limit 2
@@ -3327,8 +3286,6 @@ def monthly_fee_batch(branch):
                     branch,
                     raw_member_keyword,
                     raw_member_keyword,
-                    phone_search_variants(raw_member_keyword)[0],
-                    phone_search_variants(raw_member_keyword)[1],
                 ), fetchall=True) or []
 
                 if len(name_matches) == 1:
@@ -3613,17 +3570,6 @@ def monthly_fee_batch(branch):
                             month_to_db,
                             "批量月费录入",
                         ))
-
-                        if row.get("phone"):
-                            db_query("""
-                                update members
-                                set phone = %s
-                                where member_id = %s
-                                  and coalesce(trim(phone), '') = ''
-                            """, (
-                                normalize_phone(row["phone"]),
-                                row["member_id"],
-                            ))
 
                         db_query("""
                             insert into member_payments
@@ -4243,7 +4189,6 @@ def monthly_fee_batch(branch):
                                     <th>收条日期</th>
                                     <th>会员编号</th>
                                     <th>姓名</th>
-                                    <th>电话</th>
                                     <th>金额</th>
                                     <th>开始月份</th>
                                     <th>缴费至</th>
@@ -4259,7 +4204,6 @@ def monthly_fee_batch(branch):
                                         <td class="preview-date">{{ r.receipt_date or '-' }}</td>
                                         <td><strong>{{ r.member_id or '-' }}</strong></td>
                                         <td>{{ r.name or '-' }}</td>
-                                        <td>{{ r.phone or '-' }}</td>
                                         <td>
                                             {% if r.amount %}
                                                 RM {{ '%.2f'|format(r.amount) }}
@@ -4662,9 +4606,7 @@ def search_finance_donors(keyword: str, branch: str = "CHE", limit_per_source: i
 
     like_keyword = f"%{keyword}%"
     compact_keyword = "".join(keyword.split())
-    phone_local, phone_international = phone_search_variants(keyword)
-    phone_search = phone_local or compact_keyword
-    like_compact = f"%{phone_search}%"
+    like_compact = f"%{compact_keyword}%"
 
     results = []
     seen = set()
@@ -6122,177 +6064,6 @@ function addDonor(name){
         preview_rows=preview_rows,
         recent_donors=recent_donors
         )
-
-@finance_bp.route("/donors")
-def donor_management():
-
-    q = request.args.get("q", "").strip()
-    missing_only = request.args.get("missing", "") == "1"
-
-    where_parts = [
-        "record_type = 'income'",
-        "category <> '月费'",
-        "coalesce(status, 'confirmed') <> 'cancelled'",
-        "coalesce(trim(name), '') <> ''",
-    ]
-    params = []
-
-    if q:
-        where_parts.append(
-            "(name ilike %s or regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') ilike %s)"
-        )
-        params.extend([
-            f"%{q}%",
-            f"%{normalize_phone(q) or q}%",
-        ])
-
-    if missing_only:
-        where_parts.append("coalesce(trim(phone), '') = ''")
-
-    rows = db_query(f"""
-        select
-            name,
-            (array_agg(nullif(trim(phone), '') order by record_date desc, id desc)
-                filter (where coalesce(trim(phone), '') <> ''))[1] as phone,
-            count(*) as times,
-            min(record_date) as first_date,
-            max(record_date) as last_date,
-            coalesce(sum(amount), 0) as total_amount
-        from finance_records
-        where {' and '.join(where_parts)}
-        group by name
-        order by
-            case
-                when (
-                    array_agg(nullif(trim(phone), '') order by record_date desc, id desc)
-                    filter (where coalesce(trim(phone), '') <> '')
-                )[1] is null then 0
-                else 1
-            end,
-            max(record_date) desc,
-            name
-        limit 500
-    """, tuple(params), fetchall=True) or []
-
-    return render_template_string(FINANCE_DATE_COMPONENT + """
-    <!doctype html>
-    <html lang="zh">
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>布施人管理</title>
-        <link rel="stylesheet" href="{{ url_for('static', filename='css/toolbox.css') }}">
-        <style>
-            .donor-page{max-width:1250px}
-            .donor-header{background:linear-gradient(135deg,#7c3aed,#5b21b6);color:#fff;padding:28px;border-radius:22px;margin-bottom:20px}
-            .donor-header h1{margin:0 0 8px}
-            .donor-filter{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:end}
-            .donor-table{min-width:1050px}
-            .phone-form{display:flex;gap:8px;align-items:center}
-            .phone-form .form-input{min-width:180px;margin:0}
-            .missing-phone{background:#fff7ed}
-            @media(max-width:700px){.donor-filter{grid-template-columns:1fr}.donor-filter .btn-tool{width:100%}}
-        </style>
-    </head>
-    <body>
-    <div class="page donor-page">
-        <div class="donor-header">
-            <h1>👥 布施人管理</h1>
-            <p>补充电话号码后，系统会更新这个姓名的全部历史布施记录。</p>
-        </div>
-
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% for category_name, text in messages %}
-                <div class="alert alert-{{ 'danger' if category_name == 'danger' else 'success' }}">{{ text }}</div>
-            {% endfor %}
-        {% endwith %}
-
-        <div class="card">
-            <form method="get" class="donor-filter">
-                <div class="form-group">
-                    <label class="form-label">搜索姓名或电话</label>
-                    <input class="form-input" name="q" value="{{ q }}" placeholder="输入姓名或电话号码">
-                </div>
-                <label style="display:flex;align-items:center;gap:8px;min-height:50px">
-                    <input type="checkbox" name="missing" value="1" {% if missing_only %}checked{% endif %}>
-                    只看缺电话
-                </label>
-                <button class="btn-tool btn-primary" type="submit">🔍 查询</button>
-            </form>
-        </div>
-
-        <div class="card">
-            <div class="section-title">📋 布施人名单（{{ rows|length }} 位）</div>
-            <div class="table-responsive">
-                <table class="record-table donor-table">
-                    <thead>
-                        <tr><th>姓名</th><th>电话</th><th>次数</th><th>累计</th><th>第一次</th><th>最后一次</th><th>保存</th></tr>
-                    </thead>
-                    <tbody>
-                    {% for r in rows %}
-                        <tr {% if not r.phone %}class="missing-phone"{% endif %}>
-                            <td><strong>{{ r.name }}</strong></td>
-                            <td>{{ r.phone or '-' }}</td>
-                            <td>{{ r.times }}</td>
-                            <td>RM {{ '%.2f'|format(r.total_amount or 0) }}</td>
-                            <td>{{ r.first_date or '-' }}</td>
-                            <td>{{ r.last_date or '-' }}</td>
-                            <td>
-                                <form class="phone-form" method="post" action="{{ url_for('finance.update_donor_phone') }}">
-                                    <input type="hidden" name="name" value="{{ r.name }}">
-                                    <input class="form-input" name="phone" value="{{ r.phone or '' }}" inputmode="tel" placeholder="0123456789" required>
-                                    <button class="btn-tool btn-success" type="submit">💾 保存</button>
-                                </form>
-                            </td>
-                        </tr>
-                    {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <a class="btn-tool btn-secondary" href="{{ url_for('finance.finance_home') }}">← 返回财政首页</a>
-    </div>
-    </body>
-    </html>
-    """, rows=rows, q=q, missing_only=missing_only)
-
-
-@finance_bp.route("/donors/update-phone", methods=["POST"])
-def update_donor_phone():
-
-    name = request.form.get("name", "").strip()
-    phone = normalize_phone(request.form.get("phone", ""))
-
-    if not name or not phone:
-        flash("姓名和电话号码不能为空。", "danger")
-        return redirect(url_for("finance.donor_management"))
-
-    db_query("""
-        update finance_records
-        set phone = %s
-        where record_type = 'income'
-          and trim(name) = trim(%s)
-          and coalesce(status, 'confirmed') <> 'cancelled'
-    """, (phone, name))
-
-    db_query("""
-        update members
-        set phone = %s
-        where trim(name) = trim(%s)
-          and coalesce(trim(phone), '') = ''
-    """, (phone, name))
-
-    db_query("""
-        update volunteers
-        set phone = %s
-        where trim(name) = trim(%s)
-          and coalesce(trim(phone), '') = ''
-    """, (phone, name))
-
-    flash(f"已更新 {name} 的电话号码。", "success")
-    return redirect(url_for("finance.donor_management", q=name))
-
 
 @finance_bp.route("/bank_pending/<int:pending_id>/delete", methods=["POST"])
 def delete_bank_pending(pending_id):
