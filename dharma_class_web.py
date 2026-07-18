@@ -2899,28 +2899,27 @@ function updateAbsenceOtherBox(studentId) {
                                   
 function markStudentHomeworkAbsent(studentId) {
 
-    // 页面已经取消功课“缺席”按钮，
-    // 所以学生缺席时，画面自动选中“没交”。
+    // 学生缺席时，画面上的两项功课自动选择“没交”。
+    // 不触发 change，避免又把出席状态改回“出席”。
+
     const baihuaMissing = document.querySelector(
-        'input[name="baihua_' + studentId + '"][value="missing"]'
+        'input[name="baihua_' +
+        studentId +
+        '"][value="missing"]'
     );
 
     const scriptureMissing = document.querySelector(
-        'input[name="scripture_' + studentId + '"][value="missing"]'
+        'input[name="scripture_' +
+        studentId +
+        '"][value="missing"]'
     );
 
     if (baihuaMissing) {
         baihuaMissing.checked = true;
-        baihuaMissing.dispatchEvent(
-            new Event("change", { bubbles: true })
-        );
     }
 
     if (scriptureMissing) {
         scriptureMissing.checked = true;
-        scriptureMissing.dispatchEvent(
-            new Event("change", { bubbles: true })
-        );
     }
 }
 
@@ -2966,26 +2965,58 @@ document.addEventListener(
     "DOMContentLoaded",
     function() {
 
-        // 功课选择任何非缺席状态时，若学生不是迟到或农舍，自动设为出席。
+        // 功课被老师手动修改时，
+        // 只有学生不是缺席、迟到或农舍，才自动设为出席。
         document
             .querySelectorAll(
-                'input[name^="baihua_"], input[name^="scripture_"]'
+                'input[name^="baihua_"], ' +
+                'input[name^="scripture_"]'
             )
             .forEach(function(radio) {
-                radio.addEventListener("change", function() {
-                    if (!this.checked || this.value === "absent") return;
 
-                    const studentId = this.name
-                        .replace("baihua_", "")
-                        .replace("scripture_", "");
+                radio.addEventListener(
+                    "change",
+                    function() {
 
-                    markStudentPresentIfNeeded(studentId);
-                });
+                        if (!this.checked) {
+                            return;
+                        }
+
+                        const studentId = this.name
+                            .replace("baihua_", "")
+                            .replace("scripture_", "");
+
+                        const attendanceSelected =
+                            document.querySelector(
+                                'input[name="status_' +
+                                studentId +
+                                '"]:checked'
+                            );
+
+                        // 学生已经明确是缺席、迟到或农舍，
+                        // 功课选择不能把状态改回出席。
+                        if (
+                            attendanceSelected
+                            && (
+                                attendanceSelected.value === "absent"
+                                || attendanceSelected.value === "late"
+                                || attendanceSelected.value === "farm"
+                            )
+                        ) {
+                            return;
+                        }
+
+                        markStudentPresentIfNeeded(studentId);
+                    }
+                );
             });
 
-        // 点缺席时，两项功课自动改成缺席。
+
+        // 出席状态联动
         document
-            .querySelectorAll('input[name^="status_"]')
+            .querySelectorAll(
+                'input[name^="status_"]'
+            )
             .forEach(function(radio) {
 
                 radio.addEventListener(
@@ -3001,15 +3032,19 @@ document.addEventListener(
                             ""
                         );
 
+                        // 显示或隐藏缺席原因
                         updateAbsenceReasonBox(studentId);
 
+                        // 点缺席时，两项功课自动改成没交
                         if (this.value === "absent") {
                             markStudentHomeworkAbsent(studentId);
                         }
                     }
                 );
             });
-                                  
+
+
+        // 选择“其它”缺席原因时显示输入框
         document
             .querySelectorAll(
                 'input[name^="absence_reason_"]'
@@ -3033,6 +3068,38 @@ document.addEventListener(
                     }
                 );
             });
+
+
+        // 页面重新打开时，根据已保存状态初始化显示
+        document
+            .querySelectorAll(
+                'input[name^="status_"]:checked'
+            )
+            .forEach(function(radio) {
+
+                const studentId = radio.name.replace(
+                    "status_",
+                    ""
+                );
+
+                updateAbsenceReasonBox(studentId);
+            });
+
+
+        document
+            .querySelectorAll(
+                'input[name^="absence_reason_"]:checked'
+            )
+            .forEach(function(radio) {
+
+                const studentId = radio.name.replace(
+                    "absence_reason_",
+                    ""
+                );
+
+                updateAbsenceOtherBox(studentId);
+            });
+
     }
 );
 

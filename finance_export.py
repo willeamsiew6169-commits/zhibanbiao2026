@@ -252,6 +252,28 @@ def _reference_text(row: Any) -> str | date | None:
     )
 
 
+def _monthly_phone_reference_text(row: Any) -> str | date | None:
+    """
+    月费旧模板没有独立电话号码栏。
+    为了不破坏原模板列位，把电话与原 REF. 资料合并写入 G 栏。
+
+    例：
+        0123456789 | ABC123
+    """
+    phone = str(_first_value(row, "phone", default="") or "").strip()
+    reference = _reference_text(row)
+
+    parts = []
+
+    if phone:
+        parts.append(phone)
+
+    if reference not in (None, ""):
+        parts.append(str(reference))
+
+    return " | ".join(parts) or None
+
+
 def _month_unit_amount(row: Any) -> float:
     """
     原模板 I 栏为每月 RM50。
@@ -418,7 +440,7 @@ def _write_monthly_fee_row(ws, row_no: int, record: Any, is_cash_section: bool) 
     ws.cell(row_no, 4).value = name
     ws.cell(row_no, 5).value = month_from
     ws.cell(row_no, 6).value = month_to
-    ws.cell(row_no, 7).value = _reference_text(record)
+    ws.cell(row_no, 7).value = _monthly_phone_reference_text(record)
     ws.cell(row_no, 9).value = _month_unit_amount(record)
 
     payment_column = 10 if is_cash_section else (11 if _is_cheque(record) else 12)
@@ -608,6 +630,7 @@ def export_monthly_fee_excel():
             fr.receipt_no,
             fr.member_id,
             fr.name,
+            fr.phone,
             fr.amount,
             fr.payment_method,
             fr.bank_name,
@@ -1904,6 +1927,7 @@ def _query_monthly_records(ym: str, branch: str):
             fr.receipt_no,
             fr.member_id,
             fr.name,
+            fr.phone,
             fr.amount,
             fr.payment_method,
             fr.bank_name,
