@@ -1258,7 +1258,9 @@ def class_attendance():
             lesson = {
                 "teacher_name": "",
                 "topic": "",
-                "content": ""
+                "content": "",
+                "class_status": "normal",
+                "class_status_reason": ""
             }
 
             # =========================================================
@@ -1285,10 +1287,40 @@ def class_attendance():
                     "student_id"
                 )
 
+                class_status = request.form.get(
+                    "class_status",
+                    "normal"
+                ).strip()
+
+                class_status_reason = request.form.get(
+                    "class_status_reason",
+                    ""
+                ).strip()
+
+                if class_status not in ("normal", "holiday"):
+                    class_status = "normal"
+
+                # 正常上课不保留旧的休课原因
+                if class_status == "normal":
+                    class_status_reason = ""
+
+                # 休课时必须填写原因
+                if class_status == "holiday" and not class_status_reason:
+                    flash("请填写佛学班休课原因。", "bad")
+                    return redirect(
+                        url_for(
+                            "dharma_class.class_attendance",
+                            class_date=selected_date,
+                            group_id=selected_group_id
+                        )
+                    )
+
                 lesson = {
                     "teacher_name": teacher_name,
                     "topic": topic,
-                    "content": content
+                    "content": content,
+                    "class_status": class_status,
+                    "class_status_reason": class_status_reason
                 }
 
                 if not selected_group_id:
@@ -1348,81 +1380,101 @@ def class_attendance():
                             for row in cur.fetchall()
                         }
 
-                    has_lesson_data = any([
-                        teacher_name,
-                        topic,
-                        content
-                    ])
-
                     # -------------------------------------------------
-                    # 有填写课程资料才保存课程
-                    # 补录旧点名时可以全部留空
+                    # 保存当天课程资料与课程状态
+                    # 即使课程资料留空，也要保存 normal / holiday 状态，
+                    # 才能让休课后再改回正常上课。
                     # -------------------------------------------------
-                    if has_lesson_data:
+                    cur.execute("""
+                        select
+                            id,
+                            teacher_name,
+                            topic,
+                            content,
+                            coalesce(class_status, 'normal') as class_status,
+                            coalesce(class_status_reason, '') as class_status_reason
+                        from dharma_class_lessons
+                        where branch = 'CHE'
+                          and lesson_date = %s
+                          and group_id = %s
+                        limit 1
+                    """, (
+                        selected_date,
+                        selected_group_id
+                    ))
+                    old_lesson = cur.fetchone() or {}
 
-                        cur.execute("""
-                            select id, teacher_name, topic, content
-                            from dharma_class_lessons
-                            where branch = 'CHE'
-                              and lesson_date = %s
-                              and group_id = %s
-                            limit 1
-                        """, (selected_date, selected_group_id))
-                        old_lesson = cur.fetchone() or {}
+                    cur.execute("""
+                        insert into dharma_class_lessons
+                        (
+                            branch,
+                            lesson_date,
+                            group_id,
+                            teacher_name,
+                            topic,
+                            content,
+                            class_status,
+                            class_status_reason
+                        )
+                        values
+                        (
+                            'CHE',
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s
+                        )
+                        on conflict
+                        (
+                            branch,
+                            lesson_date,
+                            group_id
+                        )
+                        do update set
+                            teacher_name = excluded.teacher_name,
+                            topic = excluded.topic,
+                            content = excluded.content,
+                            class_status = excluded.class_status,
+                            class_status_reason = excluded.class_status_reason
+                    """, (
+                        selected_date,
+                        selected_group_id,
+                        teacher_name or None,
+                        topic or None,
+                        content or None,
+                        class_status,
+                        class_status_reason or None
+                    ))
 
-                        cur.execute("""
-                            insert into dharma_class_lessons
-                            (
-                                branch,
-                                lesson_date,
-                                group_id,
-                                teacher_name,
-                                topic,
-                                content
-                            )
-                            values
-                            (
-                                'CHE',
-                                %s,
-                                %s,
-                                %s,
-                                %s,
-                                %s
-                            )
-                            on conflict
-                            (
-                                branch,
-                                lesson_date,
-                                group_id
-                            )
-                            do update set
-                                teacher_name = excluded.teacher_name,
-                                topic = excluded.topic,
-                                content = excluded.content
-                        """, (
-                            selected_date,
-                            selected_group_id,
-                            teacher_name or None,
-                            topic or None,
-                            content or None
-                        ))
+                    lesson_changes = {
+                        "teacher_name": teacher_name or None,
+                        "topic": topic or None,
+                        "content": content or None,
+                        "class_status": class_status,
+                        "class_status_reason": class_status_reason or None,
+                    }
 
-                        lesson_changes = {
-                            "teacher_name": teacher_name or None,
-                            "topic": topic or None,
-                            "content": content or None,
-                        }
+                    for field_name, new_value in lesson_changes.items():
+                        old_value = old_lesson.get(field_name)
 
-                        for field_name, new_value in lesson_changes.items():
+                        if old_value != new_value:
                             write_dharma_audit_log(
                                 cur,
-                                action_type="update" if old_lesson else "create",
+                                actor_name=teacher_name or "老师",
+                                action_type=(
+                                    "update"
+                                    if old_lesson
+                                    else "create"
+                                ),
                                 entity_type="lesson",
                                 entity_id=old_lesson.get("id"),
                                 record_date=selected_date,
                                 group_id=selected_group_id,
                                 field_name=field_name,
-                                old_value=old_lesson.get(field_name),
+                                old_value=old_value,
                                 new_value=new_value,
                             )
 
@@ -1444,7 +1496,7 @@ def class_attendance():
                         ).strip()
 
                         absence_other = request.form.get(
-                            f"absence_other_{sid}",
+                            f"absence_reason_other_{sid}",
                             ""
                         ).strip()
 
@@ -1493,96 +1545,98 @@ def class_attendance():
                         ):
                             scripture_status = ""
 
-                        # ---------------------------------------------
-                        # 保存出席：present / absent / late / farm
-                        # ---------------------------------------------
-                        cur.execute("""
-                            insert into dharma_attendance
-                            (
-                                branch,
-                                class_date,
-                                student_id,
-                                group_id,
-                                status,
-                                absence_reason,
-                                remark,
+                        # 佛学班休课不是学生缺席。
+                        # 休课日只保存功课，不新增或覆盖学生出席记录。
+                        if class_status != "holiday":
+                            # ---------------------------------------------
+                            # 保存出席：present / absent / late / farm
+                            # ---------------------------------------------
+                            cur.execute("""
+                                insert into dharma_attendance
+                                (
+                                    branch,
+                                    class_date,
+                                    student_id,
+                                    group_id,
+                                    status,
+                                    absence_reason,
+                                    remark,
+                                    marked_by
+                                )
+                                values
+                                (
+                                    'CHE',
+                                    %s,
+                                    %s,
+                                    %s,
+                                    %s,
+                                    %s,
+                                    null,
+                                    %s
+                                )
+                                on conflict
+                                (
+                                    class_date,
+                                    student_id
+                                )
+                                do update set
+                                    group_id = excluded.group_id,
+                                    status = excluded.status,
+                                    absence_reason = excluded.absence_reason,
+                                    marked_by = excluded.marked_by,
+                                    marked_at = now()
+                            """, (
+                                selected_date,
+                                sid,
+                                selected_group_id,
+                                attendance_status,
+                                absence_reason or None,
                                 marked_by
+                            ))
+
+                            sid_int = int(sid)
+                            student_name = student_name_map.get(sid_int, "")
+
+                            old_attendance = old_attendance_map.get(
+                                sid_int,
+                                {}
                             )
-                            values
-                            (
-                                'CHE',
-                                %s,
-                                %s,
-                                %s,
-                                %s,
-                                %s,
-                                null,
-                                %s
+
+                            write_dharma_audit_log(
+                                cur,
+                                actor_name=marked_by,
+                                action_type=(
+                                    "update"
+                                    if sid_int in old_attendance_map
+                                    else "create"
+                                ),
+                                entity_type="attendance",
+                                student_id=sid_int,
+                                student_name=student_name,
+                                record_date=selected_date,
+                                group_id=selected_group_id,
+                                field_name="status",
+                                old_value=old_attendance.get("status"),
+                                new_value=attendance_status,
                             )
-                            on conflict
-                            (
-                                class_date,
-                                student_id
+
+                            write_dharma_audit_log(
+                                cur,
+                                actor_name=marked_by,
+                                action_type=(
+                                    "update"
+                                    if sid_int in old_attendance_map
+                                    else "create"
+                                ),
+                                entity_type="attendance",
+                                student_id=sid_int,
+                                student_name=student_name,
+                                record_date=selected_date,
+                                group_id=selected_group_id,
+                                field_name="absence_reason",
+                                old_value=old_attendance.get("absence_reason"),
+                                new_value=absence_reason or None,
                             )
-                            do update set
-                                group_id = excluded.group_id,
-                                status = excluded.status,
-                                absence_reason = excluded.absence_reason,
-                                marked_by = excluded.marked_by,
-                                marked_at = now()
-                        """, (
-                            selected_date,
-                            sid,
-                            selected_group_id,
-                            attendance_status,
-                            absence_reason or None,
-                            marked_by
-                        ))
-
-                        sid_int = int(sid)
-                        student_name = student_name_map.get(sid_int, "")
-
-                        old_attendance = old_attendance_map.get(
-                            sid_int,
-                            {}
-                        )
-
-                        write_dharma_audit_log(
-                            cur,
-                            actor_name=marked_by,
-                            action_type=(
-                                "update"
-                                if sid_int in old_attendance_map
-                                else "create"
-                            ),
-                            entity_type="attendance",
-                            student_id=sid_int,
-                            student_name=student_name,
-                            record_date=selected_date,
-                            group_id=selected_group_id,
-                            field_name="status",
-                            old_value=old_attendance.get("status"),
-                            new_value=attendance_status,
-                        )
-
-                        write_dharma_audit_log(
-                            cur,
-                            actor_name=marked_by,
-                            action_type=(
-                                "update"
-                                if sid_int in old_attendance_map
-                                else "create"
-                            ),
-                            entity_type="attendance",
-                            student_id=sid_int,
-                            student_name=student_name,
-                            record_date=selected_date,
-                            group_id=selected_group_id,
-                            field_name="absence_reason",
-                            old_value=old_attendance.get("absence_reason"),
-                            new_value=absence_reason or None,
-                        )
-
                         # ---------------------------------------------
                         # 至少记录了一项功课，才写入功课表
                         # ---------------------------------------------
@@ -1675,14 +1729,14 @@ def class_attendance():
 
                     conn.commit()
 
-                    if has_lesson_data:
+                    if class_status == "holiday":
                         flash(
-                            "课程、点名和学生功课已保存。",
+                            "佛学班休课状态、休课原因及学生功课已保存。",
                             "good"
                         )
                     else:
                         flash(
-                            "学生点名和功课已保存。",
+                            "课程、点名和学生功课已保存。",
                             "good"
                         )
 
@@ -1701,7 +1755,9 @@ def class_attendance():
                 select
                     teacher_name,
                     topic,
-                    content
+                    content,
+                    coalesce(class_status, 'normal') as class_status,
+                    coalesce(class_status_reason, '') as class_status_reason
                 from dharma_class_lessons
                 where branch = 'CHE'
                   and lesson_date = %s
@@ -1803,8 +1859,8 @@ def class_attendance():
                     "考试",
                     "旅游",
                     "家里有事",
-                    "未通知",
-                    "待确认"
+                    "回家乡",
+                    "未通知"
                 }
 
                 saved_reason = (
@@ -1899,6 +1955,85 @@ def class_attendance():
     padding: 14px 16px;
     margin-bottom: 18px;
     line-height: 1.6;
+}
+
+/* =========================================================
+   今日课程状态
+   ========================================================= */
+
+.class-status-box {
+    margin-top: 18px;
+    padding: 16px;
+    border: 1px solid #d9dde3;
+    border-radius: 16px;
+    background: #f8fafc;
+}
+
+.class-status-title {
+    margin-bottom: 12px;
+    font-size: 19px;
+    font-weight: 900;
+}
+
+.class-status-options {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.class-status-option {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 54px;
+    padding: 10px;
+    border: 1px solid #d7dce2;
+    border-radius: 14px;
+    background: #fff;
+    cursor: pointer;
+    font-size: 18px;
+    font-weight: 800;
+}
+
+.class-status-option input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.class-status-normal:has(input:checked) {
+    border: 2px solid #16a34a;
+    background: #dcfce7;
+    color: #166534;
+}
+
+.class-status-holiday:has(input:checked) {
+    border: 2px solid #d97706;
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.class-status-reason-box {
+    margin-top: 14px;
+}
+
+.class-holiday-banner {
+    margin-top: 15px;
+    padding: 14px 16px;
+    border: 1px solid #f0c36a;
+    border-radius: 15px;
+    background: #fff7d6;
+    color: #7a4b00;
+    font-size: 18px;
+    font-weight: 900;
+    text-align: center;
+}
+
+@media (max-width: 520px) {
+    .class-status-options {
+        grid-template-columns: 1fr;
+    }
 }
 
 /* =========================================================
@@ -2470,6 +2605,63 @@ def class_attendance():
                     placeholder="例如：学习慈悲"
                 >
             </div>
+
+            <div class="class-status-box">
+
+                <div class="class-status-title">
+                    📅 今日课程状态
+                </div>
+
+                <div class="class-status-options">
+
+                    <label class="class-status-option class-status-normal">
+                        <input
+                            type="radio"
+                            name="class_status"
+                            value="normal"
+                            {% if lesson.class_status != 'holiday' %}
+                                checked
+                            {% endif %}
+                        >
+                        🟢 正常上课
+                    </label>
+
+                    <label class="class-status-option class-status-holiday">
+                        <input
+                            type="radio"
+                            name="class_status"
+                            value="holiday"
+                            {% if lesson.class_status == 'holiday' %}
+                                checked
+                            {% endif %}
+                        >
+                        🛕 佛学班休课
+                    </label>
+
+                </div>
+
+                <div
+                    class="class-status-reason-box"
+                    id="classStatusReasonBox"
+                    {% if lesson.class_status != 'holiday' %}
+                        style="display:none;"
+                    {% endif %}
+                >
+                    <label class="form-label">
+                        休课原因
+                    </label>
+
+                    <input
+                        class="form-input"
+                        type="text"
+                        id="classStatusReason"
+                        name="class_status_reason"
+                        value="{{ lesson.class_status_reason or '' }}"
+                        placeholder="例如：初一十五、全国运动会、周年庆、农历新年"
+                    >
+                </div>
+
+            </div>
             
         </div>
 
@@ -2527,9 +2719,30 @@ def class_attendance():
 
                         </div>
 
+                        <!-- 佛学班休课提示 -->
+
+                        <div
+                            class="class-holiday-banner"
+                            id="holiday_banner_{{ s.id }}"
+                            {% if lesson.class_status != 'holiday' %}
+                                style="display:none;"
+                            {% endif %}
+                        >
+                            🛕 佛学班假期日
+                            {% if lesson.class_status_reason %}
+                                · {{ lesson.class_status_reason }}
+                            {% endif %}
+                        </div>
+
                         <!-- 出席 -->
 
-                        <div class="student-section">
+                        <div
+                            class="student-section attendance-section"
+                            id="attendance_section_{{ s.id }}"
+                            {% if lesson.class_status == 'holiday' %}
+                                style="display:none;"
+                            {% endif %}
+                        >
 
                             <div class="student-section-title">
                                 📝 出席情况
@@ -2595,7 +2808,7 @@ def class_attendance():
                         <div
                             class="absence-reason-box"
                             id="absence_box_{{ s.id }}"
-                            {% if s.attendance_status != "absent" %}
+                            {% if lesson.class_status == 'holiday' or s.attendance_status != "absent" %}
                                 style="display:none;"
                             {% endif %}
                         >
@@ -2615,8 +2828,8 @@ def class_attendance():
                                     ("考试", "📝 考试"),
                                     ("旅游", "✈️ 旅游"),
                                     ("家里有事", "🏠 家里有事"),
+                                    ("回家乡", "🏡 回家乡"),
                                     ("未通知", "❓ 未通知"),
-                                    ("待确认", "⏳ 待确认"),
                                     ("其它", "✏️ 其它")
                                 ] %}
 
@@ -2828,13 +3041,78 @@ def class_attendance():
 
 <script>
 
+function updateClassStatusUI() {
+
+    const selectedStatus = document.querySelector(
+        'input[name="class_status"]:checked'
+    );
+
+    const isHoliday = (
+        selectedStatus
+        && selectedStatus.value === "holiday"
+    );
+
+    const reasonBox = document.getElementById(
+        "classStatusReasonBox"
+    );
+
+    const reasonInput = document.getElementById(
+        "classStatusReason"
+    );
+
+    if (reasonBox) {
+        reasonBox.style.display = isHoliday
+            ? "block"
+            : "none";
+    }
+
+    if (reasonInput) {
+        reasonInput.required = isHoliday;
+
+        if (!isHoliday) {
+            reasonInput.value = "";
+        }
+    }
+
+    document
+        .querySelectorAll(".attendance-section")
+        .forEach(function(section) {
+            section.style.display = isHoliday
+                ? "none"
+                : "block";
+        });
+
+    document
+        .querySelectorAll(".absence-reason-box")
+        .forEach(function(box) {
+            if (isHoliday) {
+                box.style.display = "none";
+            }
+        });
+
+    document
+        .querySelectorAll(".class-holiday-banner")
+        .forEach(function(banner) {
+            banner.style.display = isHoliday
+                ? "block"
+                : "none";
+        });
+}
+
 function markStudentPresentIfNeeded(studentId) {
     const selected = document.querySelector(
         'input[name="status_' + studentId + '"]:checked'
     );
 
-    // 已经是迟到或农舍时，不覆盖老师的真实记录。
-    if (selected && (selected.value === "late" || selected.value === "farm")) {
+    // 已经是缺席、迟到或农舍时，不覆盖老师的真实记录。
+    if (
+        selected
+        && (
+            selected.value === "absent"
+            || selected.value === "late"
+            || selected.value === "farm"
+        )
+    ) {
         return;
     }
 
@@ -2964,6 +3242,17 @@ function toggleOtherReason(studentId){
 document.addEventListener(
     "DOMContentLoaded",
     function() {
+
+        document
+            .querySelectorAll('input[name="class_status"]')
+            .forEach(function(radio) {
+                radio.addEventListener(
+                    "change",
+                    updateClassStatusUI
+                );
+            });
+
+        updateClassStatusUI();
 
         // 功课被老师手动修改时，
         // 只有学生不是缺席、迟到或农舍，才自动设为出席。
@@ -3805,7 +4094,7 @@ def class_students():
                     and s.group_id = %s
                 """
                 params.append(group_id)
-
+            
             # 搜索
             if q:
                 like = f"%{q}%"
@@ -3813,14 +4102,13 @@ def class_students():
                 where_sql += """
                     and (
                         s.name ilike %s
-                        or s.english_name ilike %s
-                        or s.parent_name ilike %s
-                        or s.parent_phone ilike %s
-                        )
+                        or coalesce(s.english_name, '') ilike %s
+                        or coalesce(s.parent_name, '') ilike %s
+                        or coalesce(s.parent_phone, '') ilike %s
+                    )
                 """
 
                 params.extend([
-                    like,
                     like,
                     like,
                     like,

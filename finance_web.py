@@ -3,6 +3,9 @@
 import os
 import re
 import tempfile
+import hmac
+
+from functools import wraps
 
 from copy import copy
 from io import BytesIO
@@ -279,6 +282,74 @@ def get_active_finance_vendors():
 finance_bp = Blueprint("finance", __name__, url_prefix="/finance")
 
 FINANCE_PIN = "123456"
+
+# 财政负责人密码必须放在 Render Environment：
+# FINANCE_ADMIN_PASSWORD=你的负责人密码
+FINANCE_ADMIN_PASSWORD = "123789"
+      
+def finance_admin_required(view_func):
+    """只允许已经通过负责人密码验证的财政负责人进入。"""
+    @wraps(view_func)
+    def wrapped(*args, **kwargs):
+        if not session.get("finance_login"):
+            return redirect(url_for("finance.finance_login"))
+
+        if not session.get("finance_admin"):
+            return redirect(
+                url_for(
+                    "finance.finance_admin_login",
+                    next=request.path,
+                )
+            )
+
+        return view_func(*args, **kwargs)
+
+    return wrapped
+
+
+def get_receipt_book_status(branch, category):
+    """返回收条簿最后号码与下一张号码；菜单显示用。"""
+    branch = str(branch or "CHE").strip().upper()
+    category = normalize_receipt_category(category)
+
+    row = db_query(
+        """
+        select prefix, current_number, number_width
+        from finance_receipt_books
+        where branch = %s and category = %s
+        limit 1
+        """,
+        (branch, category),
+        fetchone=True,
+    )
+
+    if not row:
+        return {
+            "branch": branch,
+            "category": category,
+            "last": "尚未设置",
+            "next": "尚未设置",
+            "configured": False,
+        }
+
+    prefix = str(row.get("prefix") or "")
+    current_number = int(row.get("current_number") or 0)
+    width = int(row.get("number_width") or 6)
+
+    last_no = (
+        f"{prefix}{current_number:0{width}d}"
+        if current_number > 0
+        else "尚未使用"
+    )
+
+    return {
+        "branch": branch,
+        "category": category,
+        "last": last_no,
+        "next": f"{prefix}{current_number + 1:0{width}d}",
+        "configured": True,
+    }
+
 
 SPECIAL_DONATION_TITLE = "813交流会财布施"
 
@@ -1066,10 +1137,12 @@ def finance_login():
 def finance_logout():
 
     session.pop("finance_login", None)
+    session.pop("finance_admin", None)
 
     return redirect(url_for("finance.finance_login"))
 
 @finance_bp.route("/late_members")
+@finance_admin_required
 def late_members():
 
     rows = db_query("""
@@ -1798,6 +1871,7 @@ def late_members():
     
 @finance_bp.route("/member/<member_id>/edit",
                   methods=["GET","POST"])
+@finance_admin_required
 def edit_member(member_id):
 
     member = db_query("""
@@ -1896,31 +1970,32 @@ def finance_home():
     <div class="finance-v5">
 
         <div class="v5-topbar">
-            <a class="v5-back" href="/admin-home">
-                ← 管理员首页
-            </a>
-
+            <a class="v5-back" href="/admin-home">← 管理员首页</a>
             <a class="v5-logout"
-               href="{{ url_for('finance.finance_logout') }}">
-                退出
-            </a>
+               href="{{ url_for('finance.finance_logout') }}">退出</a>
         </div>
 
         <div class="v5-header">
-            <h1>💰 财政系统 V5</h1>
-            <p>请选择要处理的工作</p>
+            <h1>💰 财政录入工作台</h1>
+            <p>给负责 Key In 的财政义工使用</p>
         </div>
 
         <div class="v5-menu-grid">
-
             <a class="v5-menu-btn v5-income"
                href="{{ url_for('finance.finance_income_menu') }}">
                 <div class="v5-icon">💵</div>
                 <div class="v5-menu-text">
                     <div class="v5-menu-title">收入录入</div>
-                    <div class="v5-menu-desc">
-                        月费、财布施、观音村、膳食结缘
-                    </div>
+                    <div class="v5-menu-desc">月费、财布施、观音村及其它收入</div>
+                </div>
+            </a>
+
+            <a class="v5-menu-btn v5-expense"
+               href="{{ url_for('finance.finance_expense_menu') }}">
+                <div class="v5-icon">🧾</div>
+                <div class="v5-menu-text">
+                    <div class="v5-menu-title">支出录入</div>
+                    <div class="v5-menu-desc">根据纸本 PV 项目选择支出类别</div>
                 </div>
             </a>
 
@@ -1928,269 +2003,1981 @@ def finance_home():
                href="{{ url_for('finance.bank_pending') }}">
                 <div class="v5-icon">🏦</div>
                 <div class="v5-menu-text">
-                    <div class="v5-menu-title">银行过账</div>
-                    <div class="v5-menu-desc">
-                        银行转账待确认与补开收条
-                    </div>
-                </div>
-            </a>
-
-            <a class="v5-menu-btn v5-expense"
-                href="{{ url_for('finance.finance_expense_menu') }}">
-
-                <div class="v5-icon">🧾</div>
-
-                <div class="v5-menu-text">
-
-                    <div class="v5-menu-title">
-                        支出录入
-                    </div>
-
-                    <div class="v5-menu-desc">
-                        供花、供果、供油、水电、电话网络及其它支出
-                    </div>
-
-                </div>
-
-            </a>
-
-            <a class="v5-menu-btn v5-member"
-               href="{{ url_for('finance.finance_member_menu') }}">
-                <div class="v5-icon">👥</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">会员与月费</div>
-                    <div class="v5-menu-desc">
-                        会员资料、月费情况与关怀名单
-                    </div>
-                </div>
-            </a>
-
-            <a class="v5-menu-btn v5-member"
-               href="{{ url_for('finance.donor_management') }}">
-                <div class="v5-icon">📇</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">布施人管理</div>
-                    <div class="v5-menu-desc">补充历史布施人的电话号码</div>
+                    <div class="v5-menu-title">银行资料</div>
+                    <div class="v5-menu-desc">输入及查看银行过账待处理资料</div>
                 </div>
             </a>
 
             <a class="v5-menu-btn v5-report"
-               href="{{ url_for('finance.finance_report_menu') }}">
-                <div class="v5-icon">📊</div>
+               href="{{ url_for('finance.finance_basic_records') }}">
+                <div class="v5-icon">🔍</div>
                 <div class="v5-menu-text">
-                    <div class="v5-menu-title">报表与查询</div>
-                    <div class="v5-menu-desc">
-                        Dashboard、财政记录及月报
-                    </div>
+                    <div class="v5-menu-title">记录查询</div>
+                    <div class="v5-menu-desc">查询最近输入的收入、支出、收条与 PV</div>
                 </div>
             </a>
-                                  
-            <a class="v5-menu-btn v5-report"
-               href="/finance/reports/excel">
+        </div>
 
-                <div class="v5-icon">📥</div>
-
-                <div class="v5-menu-text">
-
-                    <div class="v5-menu-title">
-                        Excel 下载中心
-                    </div>
-
-                    <div class="v5-menu-desc">
-                        下载月费、善款、观音村、膳食及 Petty Cash 报表
-                    </div>
-
-                </div>
-
+        <div style="margin-top:26px;text-align:center;">
+            <a class="v5-back"
+               href="{{ url_for('finance.finance_admin_login') }}">
+                🔐 财政负责人
             </a>
-
-            <a class="v5-menu-btn v5-alert"
-               href="{{ url_for('finance.late_members') }}">
-                <div class="v5-icon">🌿</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">月费关怀名单</div>
-                    <div class="v5-menu-desc">
-                        查看供养间隔与会员月费资料
-                    </div>
-                </div>
-            </a>
-                                  
-            <a class="v5-menu-btn v5-report"
-                href="/finance/month_end">
-
-                <div class="v5-icon">📒</div>
-
-                <div class="v5-menu-text">
-
-                    <div class="v5-menu-title">
-                        财政月结
-                    </div>
-
-                    <div class="v5-menu-desc">
-
-                        Cash Bank In、
-                        对账及总会报表
-
-                    </div>
-
-                </div>
-
-            </a>
-                                  
-            <a class="v5-menu-btn v5-report"
-               href="{{ url_for('finance_import.import_home') }}">
-
-                <div class="v5-icon">
-                    🗂️
-                </div>
-
-                <div class="v5-menu-text">
-
-                    <div class="v5-menu-title">
-                        历史资料导入
-                    </div>
-
-                    <div class="v5-menu-desc">
-                        导入月费、善款、Petty Cash 及历史 Excel
-                    </div>
-
-                </div>
-
-            </a>
-
         </div>
 
     </div>
     """)
 
+
+@finance_bp.route("/admin/login", methods=["GET", "POST"])
+def finance_admin_login():
+
+    if not session.get("finance_login"):
+        return redirect(url_for("finance.finance_login"))
+
+    error = ""
+    next_url = request.values.get("next", "").strip()
+
+    if request.method == "POST":
+
+        password = request.form.get("password", "").strip()
+
+        if not FINANCE_ADMIN_PASSWORD:
+
+            error = (
+                "尚未设置 FINANCE_ADMIN_PASSWORD，"
+                "请先在 Render Environment 设置。"
+            )
+
+        elif hmac.compare_digest(password, FINANCE_ADMIN_PASSWORD):
+
+            session["finance_admin"] = True
+
+            return redirect(
+                next_url
+                or url_for("finance.finance_admin_home")
+            )
+
+        else:
+            error = "负责人密码不正确，请重新输入。"
+
+    return render_template_string(
+        FINANCE_V5_STYLE + """
+        <style>
+
+        .finance-admin-login-page{
+            max-width:980px;
+            margin:0 auto;
+            padding:34px 20px 60px;
+        }
+
+        .finance-admin-login-page .admin-topbar{
+            margin-bottom:22px;
+        }
+
+        .finance-admin-login-page .admin-back{
+            display:inline-flex;
+            align-items:center;
+            gap:8px;
+            min-height:50px;
+            padding:0 22px;
+            border-radius:16px;
+            background:#eaf4ff;
+            color:#1769aa;
+            text-decoration:none;
+            font-size:19px;
+            font-weight:700;
+            transition:all .18s ease;
+        }
+
+        .finance-admin-login-page .admin-back:hover{
+            background:#dceeff;
+            transform:translateY(-1px);
+        }
+
+        .finance-admin-card{
+            overflow:hidden;
+            border-radius:26px;
+            background:#fff;
+            box-shadow:
+                0 18px 50px rgba(25, 83, 139, .14),
+                0 3px 12px rgba(0, 0, 0, .05);
+        }
+
+        .finance-admin-hero{
+            position:relative;
+            padding:42px 48px 38px;
+            color:#fff;
+            background:
+                radial-gradient(
+                    circle at 86% 20%,
+                    rgba(255,255,255,.18),
+                    transparent 24%
+                ),
+                linear-gradient(
+                    135deg,
+                    #1268bd 0%,
+                    #268fd0 100%
+                );
+        }
+
+        .finance-admin-hero::after{
+            content:"🔒";
+            position:absolute;
+            right:46px;
+            top:30px;
+            font-size:96px;
+            opacity:.16;
+            filter:grayscale(1) brightness(4);
+        }
+
+        .finance-admin-title-row{
+            display:flex;
+            align-items:center;
+            gap:18px;
+            position:relative;
+            z-index:1;
+        }
+
+        .finance-admin-lock{
+            width:76px;
+            height:76px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            flex:0 0 auto;
+            border-radius:22px;
+            background:rgba(255,255,255,.16);
+            border:1px solid rgba(255,255,255,.24);
+            font-size:42px;
+            box-shadow:inset 0 1px 0 rgba(255,255,255,.25);
+        }
+
+        .finance-admin-title{
+            margin:0;
+            font-size:40px;
+            line-height:1.2;
+            font-weight:800;
+            letter-spacing:1px;
+        }
+
+        .finance-admin-subtitle{
+            margin:10px 0 0;
+            font-size:20px;
+            line-height:1.7;
+            color:rgba(255,255,255,.9);
+        }
+
+        .finance-admin-features{
+            position:relative;
+            z-index:1;
+            display:grid;
+            grid-template-columns:repeat(4, 1fr);
+            gap:12px;
+            margin-top:28px;
+            padding-top:22px;
+            border-top:1px solid rgba(255,255,255,.25);
+        }
+
+        .finance-admin-feature{
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            gap:8px;
+            min-height:42px;
+            font-size:17px;
+            font-weight:700;
+            color:rgba(255,255,255,.96);
+        }
+
+        .finance-admin-feature-icon{
+            width:24px;
+            height:24px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            border:2px solid rgba(255,255,255,.9);
+            border-radius:50%;
+            font-size:13px;
+        }
+
+        .finance-admin-body{
+            padding:42px 48px 46px;
+        }
+
+        .finance-admin-form{
+            max-width:620px;
+            margin:0 auto;
+        }
+
+        .finance-admin-label{
+            display:flex;
+            align-items:center;
+            gap:10px;
+            margin-bottom:12px;
+            color:#24364a;
+            font-size:21px;
+            font-weight:800;
+        }
+
+        .finance-admin-input-wrap{
+            position:relative;
+        }
+
+        .finance-admin-password{
+            width:100%;
+            height:66px;
+            padding:0 62px 0 54px;
+            border:2px solid #d7e1eb;
+            border-radius:16px;
+            background:#fff;
+            color:#24364a;
+            font-size:21px;
+            outline:none;
+            box-sizing:border-box;
+            transition:
+                border-color .18s ease,
+                box-shadow .18s ease;
+        }
+
+        .finance-admin-password:focus{
+            border-color:#2384ce;
+            box-shadow:0 0 0 5px rgba(35,132,206,.12);
+        }
+
+        .finance-admin-password::placeholder{
+            color:#9aa9b9;
+        }
+
+        .finance-admin-input-icon{
+            position:absolute;
+            left:20px;
+            top:50%;
+            transform:translateY(-50%);
+            font-size:24px;
+            pointer-events:none;
+        }
+
+        .finance-admin-eye{
+            position:absolute;
+            right:14px;
+            top:50%;
+            transform:translateY(-50%);
+            width:42px;
+            height:42px;
+            border:0;
+            border-radius:12px;
+            background:transparent;
+            cursor:pointer;
+            font-size:22px;
+            color:#60758a;
+        }
+
+        .finance-admin-eye:hover{
+            background:#eef5fb;
+        }
+
+        .finance-admin-submit{
+            width:100%;
+            min-height:66px;
+            margin-top:22px;
+            border:0;
+            border-radius:16px;
+            background:linear-gradient(
+                135deg,
+                #176fc5,
+                #258ed1
+            );
+            color:#fff;
+            font-size:22px;
+            font-weight:800;
+            cursor:pointer;
+            box-shadow:0 10px 24px rgba(26,114,190,.22);
+            transition:
+                transform .18s ease,
+                box-shadow .18s ease;
+        }
+
+        .finance-admin-submit:hover{
+            transform:translateY(-2px);
+            box-shadow:0 14px 28px rgba(26,114,190,.28);
+        }
+
+        .finance-admin-error{
+            max-width:620px;
+            margin:0 auto 20px;
+            padding:17px 20px;
+            border:1px solid #f1c1c1;
+            border-left:6px solid #d94343;
+            border-radius:14px;
+            background:#fff4f4;
+            color:#a72c2c;
+            font-size:18px;
+            font-weight:700;
+            line-height:1.6;
+        }
+
+        .finance-admin-security{
+            max-width:620px;
+            margin:24px auto 0;
+            display:flex;
+            gap:14px;
+            padding:18px 20px;
+            border:1px solid #d7e7f5;
+            border-radius:15px;
+            background:#f3f8fd;
+        }
+
+        .finance-admin-security-icon{
+            flex:0 0 auto;
+            width:34px;
+            height:34px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            border-radius:50%;
+            background:#1976c9;
+            color:#fff;
+            font-weight:800;
+        }
+
+        .finance-admin-security-title{
+            margin:0 0 4px;
+            color:#1769aa;
+            font-size:17px;
+            font-weight:800;
+        }
+
+        .finance-admin-security-text{
+            margin:0;
+            color:#647588;
+            font-size:15px;
+            line-height:1.6;
+        }
+
+        @media (max-width:760px){
+
+            .finance-admin-login-page{
+                padding:20px 12px 40px;
+            }
+
+            .finance-admin-hero{
+                padding:30px 24px;
+            }
+
+            .finance-admin-title{
+                font-size:29px;
+            }
+
+            .finance-admin-subtitle{
+                font-size:17px;
+            }
+
+            .finance-admin-lock{
+                width:60px;
+                height:60px;
+                font-size:34px;
+            }
+
+            .finance-admin-hero::after{
+                display:none;
+            }
+
+            .finance-admin-features{
+                grid-template-columns:repeat(2, 1fr);
+            }
+
+            .finance-admin-feature{
+                justify-content:flex-start;
+                font-size:15px;
+            }
+
+            .finance-admin-body{
+                padding:30px 22px 34px;
+            }
+
+            .finance-admin-password{
+                height:60px;
+                font-size:18px;
+            }
+
+            .finance-admin-submit{
+                min-height:60px;
+                font-size:20px;
+            }
+
+        }
+
+        </style>
+
+        <div class="finance-admin-login-page">
+
+            <div class="admin-topbar">
+                <a
+                    class="admin-back"
+                    href="{{ url_for('finance.finance_home') }}"
+                >
+                    ← 返回录入工作台
+                </a>
+            </div>
+
+            <div class="finance-admin-card">
+
+                <div class="finance-admin-hero">
+
+                    <div class="finance-admin-title-row">
+
+                        <div class="finance-admin-lock">
+                            🔐
+                        </div>
+
+                        <div>
+                            <h1 class="finance-admin-title">
+                                财政负责人登入
+                            </h1>
+
+                            <p class="finance-admin-subtitle">
+                                仅限财政负责人使用
+                            </p>
+                        </div>
+
+                    </div>
+
+                    <div class="finance-admin-features">
+
+                        <div class="finance-admin-feature">
+                            <span class="finance-admin-feature-icon">✓</span>
+                            审核月结
+                        </div>
+
+                        <div class="finance-admin-feature">
+                            <span class="finance-admin-feature-icon">✓</span>
+                            收条簿管理
+                        </div>
+
+                        <div class="finance-admin-feature">
+                            <span class="finance-admin-feature-icon">✓</span>
+                            敏感资料
+                        </div>
+
+                        <div class="finance-admin-feature">
+                            <span class="finance-admin-feature-icon">✓</span>
+                            系统设置
+                        </div>
+
+                    </div>
+
+                </div>
+
+                <div class="finance-admin-body">
+
+                    {% if error %}
+
+                    <div class="finance-admin-error">
+                        ⚠️ {{ error }}
+                    </div>
+
+                    {% endif %}
+
+                    <form
+                        method="post"
+                        class="finance-admin-form"
+                    >
+
+                        <input
+                            type="hidden"
+                            name="next"
+                            value="{{ next_url }}"
+                        >
+
+                        <label
+                            class="finance-admin-label"
+                            for="admin-password"
+                        >
+                            👤 负责人密码
+                        </label>
+
+                        <div class="finance-admin-input-wrap">
+
+                            <span class="finance-admin-input-icon">
+                                🔒
+                            </span>
+
+                            <input
+                                id="admin-password"
+                                class="finance-admin-password"
+                                type="password"
+                                name="password"
+                                placeholder="请输入负责人密码"
+                                autocomplete="current-password"
+                                autofocus
+                                required
+                            >
+
+                            <button
+                                type="button"
+                                class="finance-admin-eye"
+                                onclick="toggleAdminPassword()"
+                                aria-label="显示或隐藏密码"
+                                title="显示或隐藏密码"
+                            >
+                                👁️
+                            </button>
+
+                        </div>
+
+                        <button
+                            class="finance-admin-submit"
+                            type="submit"
+                        >
+                            🛡️ 进入负责人中心
+                        </button>
+
+                    </form>
+
+                    <div class="finance-admin-security">
+
+                        <div class="finance-admin-security-icon">
+                            i
+                        </div>
+
+                        <div>
+                            <p class="finance-admin-security-title">
+                                安全提示
+                            </p>
+
+                            <p class="finance-admin-security-text">
+                                请妥善保管负责人密码，
+                                不要将密码透露给其他人员。
+                            </p>
+                        </div>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+
+        <script>
+
+        function toggleAdminPassword(){
+
+            const input =
+                document.getElementById("admin-password");
+
+            const button =
+                document.querySelector(".finance-admin-eye");
+
+            if(input.type === "password"){
+                input.type = "text";
+                button.textContent = "🙈";
+            }else{
+                input.type = "password";
+                button.textContent = "👁️";
+            }
+
+            input.focus();
+        }
+
+        </script>
+        """,
+        error=error,
+        next_url=next_url,
+    )
+
+
+@finance_bp.route("/admin/logout")
+def finance_admin_logout():
+    session.pop("finance_admin", None)
+    return redirect(url_for("finance.finance_home"))
+
+
+@finance_bp.route("/admin")
+@finance_admin_required
+def finance_admin_home():
+    return render_template_string(FINANCE_V5_STYLE + """
+    <div class="finance-v5">
+        <div class="v5-topbar">
+            <a class="v5-back" href="{{ url_for('finance.finance_home') }}">← 录入工作台</a>
+            <a class="v5-logout" href="{{ url_for('finance.finance_admin_logout') }}">退出负责人</a>
+        </div>
+        <div class="v5-header">
+            <h1>🔐 财政负责人中心</h1>
+            <p>审核、查询、月结与财政管理</p>
+        </div>
+        <div class="v5-menu-grid">
+            <a class="v5-menu-btn v5-report" href="{{ url_for('finance.dashboard') }}">
+                <div class="v5-icon">📊</div><div class="v5-menu-text"><div class="v5-menu-title">财政 Dashboard</div><div class="v5-menu-desc">查看收入、支出与户口统计</div></div>
+            </a>
+            <a class="v5-menu-btn" href="{{ url_for('finance.bank_pending') }}">
+                <div class="v5-icon">🏦</div><div class="v5-menu-text"><div class="v5-menu-title">银行确认</div><div class="v5-menu-desc">审核银行过账及补开收条</div></div>
+            </a>
+            <a class="v5-menu-btn v5-income" href="{{ url_for('finance.receipt_range_summary') }}">
+                <div class="v5-icon">📒</div><div class="v5-menu-text"><div class="v5-menu-title">收条范围汇总</div><div class="v5-menu-desc">统计收条张数、现金总额、跳号与作废</div></div>
+            </a>
+            <a class="v5-menu-btn v5-member" href="{{ url_for('finance.receipt_book_management') }}">
+                <div class="v5-icon">📕</div><div class="v5-menu-text"><div class="v5-menu-title">收条簿管理</div><div class="v5-menu-desc">查看每个收入项目最后与下一张收条</div></div>
+            </a>
+            <a class="v5-menu-btn v5-report" href="/finance/month_end">
+                <div class="v5-icon">📅</div><div class="v5-menu-text"><div class="v5-menu-title">财政月结</div><div class="v5-menu-desc">Cash Bank In、对账与月结</div></div>
+            </a>
+            <a class="v5-menu-btn v5-report" href="{{ url_for('finance.records') }}">
+                <div class="v5-icon">🔎</div><div class="v5-menu-text"><div class="v5-menu-title">完整记录查询</div><div class="v5-menu-desc">查看详情、状态与作废记录</div></div>
+            </a>
+            <a class="v5-menu-btn v5-member" href="{{ url_for('finance.donor_management') }}">
+                <div class="v5-icon">📇</div><div class="v5-menu-text"><div class="v5-menu-title">布施人管理</div><div class="v5-menu-desc">维护姓名与电话号码</div></div>
+            </a>
+            <a class="v5-menu-btn v5-member" href="{{ url_for('finance.finance_member_menu') }}">
+                <div class="v5-icon">👥</div><div class="v5-menu-text"><div class="v5-menu-title">会员与月费</div><div class="v5-menu-desc">会员资料与月费关怀名单</div></div>
+            </a>
+            <a class="v5-menu-btn v5-report" href="/finance/reports/excel">
+                <div class="v5-icon">📥</div><div class="v5-menu-text"><div class="v5-menu-title">Excel 下载中心</div><div class="v5-menu-desc">下载财政月报与各类报表</div></div>
+            </a>
+            <a class="v5-menu-btn v5-report" href="{{ url_for('finance.finance_vendors') }}">
+                <div class="v5-icon">⚙️</div><div class="v5-menu-text"><div class="v5-menu-title">财政设置</div><div class="v5-menu-desc">付款对象及其它设置</div></div>
+            </a>
+        </div>
+    </div>
+    """)
+
+
+@finance_bp.route("/records/basic")
+def finance_basic_records():
+    if not session.get("finance_login"):
+        return redirect(url_for("finance.finance_login"))
+
+    q = request.args.get("q", "").strip()
+    params = []
+    where = ""
+    if q:
+        keyword = f"%{q}%"
+        where = """and (coalesce(receipt_no,'') ilike %s or coalesce(payment_voucher_no,'') ilike %s or coalesce(name,'') ilike %s or coalesce(category,'') ilike %s)"""
+        params = [keyword, keyword, keyword, keyword]
+
+    rows = db_query(f"""
+        select id, record_date, record_type, receipt_no,
+               payment_voucher_no, name, category, amount,
+               payment_method, status
+        from finance_records
+        where 1=1 {where}
+        order by record_date desc, id desc
+        limit 100
+    """, tuple(params), fetchall=True)
+
+    return render_template_string(FINANCE_V5_STYLE + """
+    <div class="finance-v5" style="max-width:1200px;">
+        <div class="v5-topbar"><a class="v5-back" href="{{ url_for('finance.finance_home') }}">← 返回录入工作台</a></div>
+        <div class="v5-header"><h1>🔍 记录查询</h1><p>只供 Key In 义工核对最近录入资料；不可作废或修改</p></div>
+        <div class="card">
+            <form method="get" style="display:flex;gap:10px;flex-wrap:wrap;">
+                <input class="form-input" name="q" value="{{ q }}" placeholder="收条、PV、姓名或类别" style="flex:1;min-width:240px;">
+                <button class="btn-tool btn-primary" type="submit">查询</button>
+            </form>
+        </div>
+        <div class="card" style="overflow:auto;">
+            <table class="record-table" style="width:100%;min-width:900px;">
+                <thead><tr><th>日期</th><th>类型</th><th>收条／PV</th><th>姓名</th><th>类别</th><th>方式</th><th>金额</th><th>状态</th></tr></thead>
+                <tbody>
+                {% for r in rows %}
+                    <tr>
+                        <td>{{ r.record_date }}</td><td>{{ '收入' if r.record_type == 'income' else '支出' }}</td>
+                        <td>{{ r.receipt_no or r.payment_voucher_no or '-' }}</td><td>{{ r.name or '-' }}</td>
+                        <td>{{ r.category }}</td><td>{{ r.payment_method or '-' }}</td>
+                        <td>RM {{ '%.2f'|format(r.amount or 0) }}</td><td>{{ r.status or 'confirmed' }}</td>
+                    </tr>
+                {% else %}<tr><td colspan="8">没有找到记录</td></tr>{% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    """, rows=rows, q=q)
+
+
 @finance_bp.route("/menu/income")
 def finance_income_menu():
+    items = [
+        ("C", "CHE 月费", "CHE", "月费", url_for("finance.monthly_fee_batch", branch="CHE")),
+        ("S", "STW 月费", "STW", "月费", url_for("finance.monthly_fee_batch", branch="STW")),
+        ("🙏", "财布施", "CHE", "财布施", url_for("finance.income_batch", category="财布施")),
+        ("🏡", "观音村", "CHE", "观音村", url_for("finance.income_batch", category="观音村")),
+        ("🥗", "膳食结缘", "CHE", "膳食结缘", url_for("finance.income_batch", category="膳食结缘")),
+        ("🪵", "观音堂纯檀香布施", "CHE", "观音堂纯檀香布施", url_for("finance.income_batch", category="观音堂纯檀香布施")),
+        ("🎊", SPECIAL_DONATION_TITLE, "CHE", SPECIAL_DONATION_TITLE, url_for("finance.income_batch", category=SPECIAL_DONATION_TITLE)),
+        ("➕", "临时特别布施", "CHE", "临时特别布施", url_for("finance.income_batch", category="临时特别布施")),
+    ]
 
-    return render_template_string(FINANCE_V5_STYLE + FINANCE_DATE_COMPONENT + """
+    menu_items = []
+    for icon, title, branch, category, href in items:
+        menu_items.append({
+            "icon": icon,
+            "title": title,
+            "href": href,
+            "status": get_receipt_book_status(branch, category),
+        })
+
+    return render_template_string(FINANCE_V5_STYLE + """
+    <style>
+        .receipt-mini{margin-top:9px;padding-top:9px;border-top:1px dashed #cbd5e1;display:grid;gap:3px;font-size:14px;}
+        .receipt-mini strong{color:#1769aa;font-size:15px;}
+    </style>
     <div class="finance-v5">
-
-        <div class="v5-topbar">
-            <a class="v5-back"
-               href="{{ url_for('finance.finance_home') }}">
-                ← 返回财政首页
-            </a>
-        </div>
-
-        <div class="v5-header">
-            <h1>💵 收入录入</h1>
-            <p>请选择收入项目</p>
-        </div>
-
+        <div class="v5-topbar"><a class="v5-back" href="{{ url_for('finance.finance_home') }}">← 返回财政首页</a></div>
+        <div class="v5-header"><h1>💵 收入录入</h1><p>请选择收入项目；每个项目会显示最后及下一张收条</p></div>
         <div class="v5-menu-grid">
+            {% for item in menu_items %}
+            <a class="v5-menu-btn v5-income" href="{{ item.href }}">
+                <div class="v5-icon">{{ item.icon }}</div>
+                <div class="v5-menu-text">
+                    <div class="v5-menu-title">{{ item.title }}</div>
+                    <div class="receipt-mini">
+                        <span>上次最后一张：<strong>{{ item.status.last }}</strong></span>
+                        <span>下一张建议：<strong>{{ item.status.next }}</strong></span>
+                    </div>
+                </div>
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    """, menu_items=menu_items)
 
-            <a class="v5-menu-btn v5-member"
-               href="{{ url_for('finance.monthly_fee_batch', branch='CHE') }}">
-                <div class="v5-icon">C</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">CHE 月费</div>
-                    <div class="v5-menu-desc">
-                        批量登记 CHE 月费
-                    </div>
-                </div>
-            </a>
 
-            <a class="v5-menu-btn v5-member"
-               href="{{ url_for('finance.monthly_fee_batch', branch='STW') }}">
-                <div class="v5-icon">S</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">STW 月费</div>
-                    <div class="v5-menu-desc">
-                        批量登记 STW 月费
-                    </div>
-                </div>
-            </a>
+@finance_bp.route("/admin/receipt-books")
+@finance_admin_required
+def receipt_book_management():
+    rows = db_query("""
+        select branch, category, prefix, current_number, number_width
+        from finance_receipt_books
+        order by branch, category
+    """, fetchall=True)
 
-            <a class="v5-menu-btn v5-income"
-               href="{{ url_for('finance.income_batch', category='财布施') }}">
-                <div class="v5-icon">🙏</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">财布施</div>
-                    <div class="v5-menu-desc">
-                        批量登记财布施
-                    </div>
-                </div>
-            </a>
+    for row in rows:
+        width = int(row.get("number_width") or 6)
+        current = int(row.get("current_number") or 0)
+        prefix = str(row.get("prefix") or "")
+        row["last_no"] = f"{prefix}{current:0{width}d}" if current else "尚未使用"
+        row["next_no"] = f"{prefix}{current + 1:0{width}d}"
 
-            <a class="v5-menu-btn v5-income"
-               href="{{ url_for('finance.income_batch', category='观音村') }}">
-                <div class="v5-icon">🏡</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">观音村</div>
-                    <div class="v5-menu-desc">
-                        批量登记观音村收入
-                    </div>
-                </div>
-            </a>
+    return render_template_string(FINANCE_V5_STYLE + """
+    <div class="finance-v5" style="max-width:1100px;">
+        <div class="v5-topbar"><a class="v5-back" href="{{ url_for('finance.finance_admin_home') }}">← 负责人中心</a></div>
+        <div class="v5-header"><h1>📕 收条簿管理</h1><p>查看每个分会及收入项目目前使用到的号码</p></div>
+        <div class="card" style="overflow:auto;">
+            <table class="record-table" style="width:100%;min-width:760px;">
+                <thead><tr><th>分会</th><th>收入项目</th><th>前缀</th><th>上次最后一张</th><th>下一张建议</th></tr></thead>
+                <tbody>{% for r in rows %}<tr><td>{{ r.branch }}</td><td>{{ r.category }}</td><td>{{ r.prefix }}</td><td><strong>{{ r.last_no }}</strong></td><td><strong style="color:#1769aa;">{{ r.next_no }}</strong></td></tr>{% else %}<tr><td colspan="5">尚未建立 finance_receipt_books 设置</td></tr>{% endfor %}</tbody>
+            </table>
+        </div>
+    </div>
+    """, rows=rows)
 
-            <a class="v5-menu-btn v5-income"
-               href="{{ url_for('finance.income_batch', category='膳食结缘') }}">
-                <div class="v5-icon">🥗</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">膳食结缘</div>
-                    <div class="v5-menu-desc">
-                        批量登记膳食结缘收入
-                    </div>
-                </div>
-            </a>
-                                  
-            <a class="v5-menu-btn v5-income"
-            href="{{ url_for(
-                'finance.income_batch',
-                category='观音堂纯檀香布施'
-            ) }}">
-                <div class="v5-icon">🪵</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">
-                        观音堂纯檀香布施
-                    </div>
-                    <div class="v5-menu-desc">
-                        批量登记纯檀香相关布施
-                    </div>
-                </div>
-            </a>
 
-            <a class="v5-menu-btn v5-income"
-            href="{{ url_for(
-                'finance.income_batch',
-                category=special_donation_title
-            ) }}">
-                <div class="v5-icon">🎊</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">
-                        {{ special_donation_title }}
-                    </div>
-                    <div class="v5-menu-desc">
-                        本年度特别活动布施
-                    </div>
-                </div>
-            </a>
+@finance_bp.route(
+    "/admin/receipt-summary",
+    methods=["GET", "POST"]
+)
+@finance_admin_required
+def receipt_range_summary():
 
-            <a class="v5-menu-btn v5-income"
-            href="{{ url_for(
-                'finance.income_batch',
-                category='临时特别布施'
-            ) }}">
-                <div class="v5-icon">➕</div>
-                <div class="v5-menu-text">
-                    <div class="v5-menu-title">
-                        临时特别布施
+    branch = request.values.get(
+        "branch",
+        "CHE"
+    ).strip().upper()
+
+    category = request.values.get(
+        "category",
+        "月费"
+    ).strip()
+
+    receipt_from = request.values.get(
+        "receipt_from",
+        ""
+    ).strip().upper()
+
+    receipt_to = request.values.get(
+        "receipt_to",
+        ""
+    ).strip().upper()
+
+    result = None
+    records = []
+    error = ""
+
+    if branch not in ["CHE", "STW"]:
+        branch = "CHE"
+
+    if request.method == "POST":
+
+        pattern_from = re.match(
+            r"^([A-Z]+)(\d+)$",
+            receipt_from
+        )
+
+        pattern_to = re.match(
+            r"^([A-Z]+)(\d+)$",
+            receipt_to
+        )
+
+        if not pattern_from or not pattern_to:
+
+            error = (
+                "请输入完整收条编号，"
+                "例如 CHE0001201。"
+            )
+
+        elif pattern_from.group(1) != pattern_to.group(1):
+
+            error = (
+                "开始与结束收条必须使用相同前缀。"
+            )
+
+        elif pattern_from.group(1) != branch:
+
+            error = (
+                f"目前选择的分会是 {branch}，"
+                f"收条编号必须以 {branch} 开始。"
+            )
+
+        else:
+
+            start_no = int(pattern_from.group(2))
+            end_no = int(pattern_to.group(2))
+
+            if start_no > end_no:
+
+                error = (
+                    "开始号码不可大于结束号码。"
+                )
+
+            elif end_no - start_no > 1000:
+
+                error = (
+                    "一次最多检查 1001 张收条，"
+                    "请缩小范围。"
+                )
+
+            else:
+
+                records = db_query(
+                    """
+                    select
+                        id,
+                        receipt_no,
+                        record_date,
+                        receipt_date,
+                        name,
+                        category,
+                        amount,
+                        payment_method,
+                        status
+                    from finance_records
+                    where record_type = 'income'
+                      and receipt_no is not null
+                      and receipt_no <> ''
+                      and receipt_no >= %s
+                      and receipt_no <= %s
+                      and receipt_no ilike %s
+                      and category = %s
+                    order by receipt_no, id
+                    """,
+                    (
+                        receipt_from,
+                        receipt_to,
+                        f"{branch}%",
+                        category,
+                    ),
+                    fetchall=True,
+                )
+
+                by_number = {}
+
+                for row in records:
+
+                    receipt_value = str(
+                        row.get("receipt_no") or ""
+                    ).strip().upper()
+
+                    match = re.match(
+                        r"^([A-Z]+)(\d+)$",
+                        receipt_value
+                    )
+
+                    if (
+                        match
+                        and match.group(1)
+                        == pattern_from.group(1)
+                    ):
+                        by_number[
+                            int(match.group(2))
+                        ] = row
+
+                valid = [
+                    row
+                    for row in records
+                    if str(
+                        row.get("status")
+                        or "confirmed"
+                    ) != "cancelled"
+                ]
+
+                cancelled = [
+                    row
+                    for row in records
+                    if str(
+                        row.get("status")
+                        or "confirmed"
+                    ) == "cancelled"
+                ]
+
+                cash_total = sum(
+                    float(row.get("amount") or 0)
+                    for row in valid
+                    if str(
+                        row.get("payment_method")
+                        or ""
+                    ).strip() == "现金"
+                )
+
+                non_cash_total = sum(
+                    float(row.get("amount") or 0)
+                    for row in valid
+                    if str(
+                        row.get("payment_method")
+                        or ""
+                    ).strip() != "现金"
+                )
+
+                all_total = sum(
+                    float(row.get("amount") or 0)
+                    for row in valid
+                )
+
+                missing_numbers = [
+                    number
+                    for number in range(
+                        start_no,
+                        end_no + 1
+                    )
+                    if number not in by_number
+                ]
+
+                width = len(
+                    pattern_from.group(2)
+                )
+
+                prefix = pattern_from.group(1)
+
+                result = {
+                    "span_count":
+                        end_no - start_no + 1,
+
+                    "used_count":
+                        len(records),
+
+                    "valid_count":
+                        len(valid),
+
+                    "cancelled_count":
+                        len(cancelled),
+
+                    "missing_count":
+                        len(missing_numbers),
+
+                    "missing_text":
+                        ", ".join(
+                            f"{prefix}{number:0{width}d}"
+                            for number
+                            in missing_numbers[:30]
+                        ),
+
+                    "cash_total":
+                        cash_total,
+
+                    "non_cash_total":
+                        non_cash_total,
+
+                    "all_total":
+                        all_total,
+                }
+
+    categories = INCOME_CATEGORIES
+
+    return render_template_string(
+        FINANCE_V5_STYLE + """
+        <style>
+
+        .receipt-summary-page{
+            max-width:1280px;
+            margin:0 auto;
+            padding:30px 20px 70px;
+        }
+
+        .receipt-summary-page .receipt-topbar{
+            margin-bottom:22px;
+        }
+
+        .receipt-summary-page .receipt-back{
+            display:inline-flex;
+            align-items:center;
+            justify-content:center;
+            gap:8px;
+            min-height:50px;
+            padding:0 22px;
+            border-radius:16px;
+            background:#eaf4ff;
+            color:#1769aa;
+            text-decoration:none;
+            font-size:18px;
+            font-weight:800;
+            transition:
+                transform .18s ease,
+                background .18s ease;
+        }
+
+        .receipt-summary-page .receipt-back:hover{
+            background:#dceeff;
+            transform:translateY(-1px);
+        }
+
+        .receipt-hero{
+            position:relative;
+            overflow:hidden;
+            padding:38px 42px;
+            border-radius:26px;
+            color:#fff;
+            background:
+                radial-gradient(
+                    circle at 88% 15%,
+                    rgba(255,255,255,.18),
+                    transparent 25%
+                ),
+                linear-gradient(
+                    135deg,
+                    #166ebf 0%,
+                    #2693d2 100%
+                );
+            box-shadow:
+                0 16px 38px rgba(27,105,170,.18);
+        }
+
+        .receipt-hero::after{
+            content:"📒";
+            position:absolute;
+            right:48px;
+            top:19px;
+            font-size:120px;
+            opacity:.14;
+            transform:rotate(-7deg);
+        }
+
+        .receipt-hero-title{
+            position:relative;
+            z-index:1;
+            display:flex;
+            align-items:center;
+            gap:18px;
+        }
+
+        .receipt-hero-icon{
+            width:74px;
+            height:74px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            flex:0 0 auto;
+            border-radius:22px;
+            background:rgba(255,255,255,.17);
+            border:1px solid rgba(255,255,255,.25);
+            font-size:40px;
+        }
+
+        .receipt-hero h1{
+            margin:0;
+            font-size:38px;
+            line-height:1.25;
+            font-weight:850;
+            letter-spacing:.5px;
+        }
+
+        .receipt-hero p{
+            margin:9px 0 0;
+            font-size:19px;
+            line-height:1.6;
+            color:rgba(255,255,255,.92);
+        }
+
+        .receipt-form-card{
+            margin-top:24px;
+            padding:30px;
+            border:1px solid #e1eaf2;
+            border-radius:22px;
+            background:#fff;
+            box-shadow:
+                0 10px 30px rgba(30,75,115,.08);
+        }
+
+        .receipt-card-title{
+            display:flex;
+            align-items:center;
+            gap:10px;
+            margin:0 0 22px;
+            color:#21384d;
+            font-size:23px;
+            font-weight:850;
+        }
+
+        .receipt-form-grid{
+            display:grid;
+            grid-template-columns:
+                repeat(2, minmax(0,1fr));
+            gap:20px;
+        }
+
+        .receipt-field{
+            min-width:0;
+        }
+
+        .receipt-field label{
+            display:block;
+            margin-bottom:9px;
+            color:#34495e;
+            font-size:18px;
+            font-weight:800;
+        }
+
+        .receipt-field .form-input{
+            width:100%;
+            height:58px;
+            padding:0 16px;
+            border:2px solid #d9e3ec;
+            border-radius:14px;
+            background:#fff;
+            color:#24384c;
+            font-size:18px;
+            box-sizing:border-box;
+            outline:none;
+            transition:
+                border-color .18s ease,
+                box-shadow .18s ease;
+        }
+
+        .receipt-field .form-input:focus{
+            border-color:#2485cb;
+            box-shadow:
+                0 0 0 5px rgba(36,133,203,.11);
+        }
+
+        .receipt-field-help{
+            margin-top:7px;
+            color:#7b8b9b;
+            font-size:14px;
+            line-height:1.5;
+        }
+
+        .receipt-submit{
+            width:100%;
+            min-height:62px;
+            margin-top:24px;
+            border:0;
+            border-radius:15px;
+            background:
+                linear-gradient(
+                    135deg,
+                    #176fc5,
+                    #258fd2
+                );
+            color:#fff;
+            font-size:21px;
+            font-weight:850;
+            cursor:pointer;
+            box-shadow:
+                0 10px 25px rgba(27,112,188,.22);
+            transition:
+                transform .18s ease,
+                box-shadow .18s ease;
+        }
+
+        .receipt-submit:hover{
+            transform:translateY(-2px);
+            box-shadow:
+                0 14px 30px rgba(27,112,188,.28);
+        }
+
+        .receipt-error{
+            display:flex;
+            gap:13px;
+            margin-top:22px;
+            padding:18px 20px;
+            border:1px solid #efc0c0;
+            border-left:6px solid #d94343;
+            border-radius:15px;
+            background:#fff4f4;
+            color:#a82e2e;
+            font-size:17px;
+            font-weight:750;
+            line-height:1.6;
+        }
+
+        .receipt-summary-grid{
+            display:grid;
+            grid-template-columns:
+                repeat(3, minmax(0,1fr));
+            gap:18px;
+            margin-top:24px;
+        }
+
+        .receipt-summary-box{
+            position:relative;
+            overflow:hidden;
+            min-height:130px;
+            padding:24px;
+            border:1px solid #e1e9f0;
+            border-radius:20px;
+            background:#fff;
+            box-shadow:
+                0 8px 24px rgba(35,72,105,.07);
+        }
+
+        .receipt-summary-box::after{
+            content:"";
+            position:absolute;
+            left:0;
+            top:0;
+            bottom:0;
+            width:6px;
+            background:#2589ce;
+        }
+
+        .receipt-summary-box.warning::after{
+            background:#e0a320;
+        }
+
+        .receipt-summary-box.danger::after{
+            background:#d9534f;
+        }
+
+        .receipt-summary-box.success::after{
+            background:#2aa56f;
+        }
+
+        .receipt-summary-box.money::after{
+            background:#7357c8;
+        }
+
+        .receipt-summary-icon{
+            margin-bottom:12px;
+            font-size:25px;
+        }
+
+        .receipt-summary-value{
+            display:block;
+            color:#183b59;
+            font-size:31px;
+            font-weight:900;
+            line-height:1.2;
+            word-break:break-word;
+        }
+
+        .receipt-summary-label{
+            display:block;
+            margin-top:8px;
+            color:#748596;
+            font-size:16px;
+            font-weight:700;
+        }
+
+        .receipt-missing-card{
+            margin-top:22px;
+            padding:22px 24px;
+            border:1px solid #f0d49b;
+            border-radius:18px;
+            background:#fffaf0;
+        }
+
+        .receipt-missing-title{
+            display:flex;
+            align-items:center;
+            gap:9px;
+            margin-bottom:10px;
+            color:#945f00;
+            font-size:19px;
+            font-weight:850;
+        }
+
+        .receipt-missing-list{
+            color:#755524;
+            font-size:16px;
+            line-height:1.8;
+            overflow-wrap:anywhere;
+        }
+
+        .receipt-table-card{
+            margin-top:24px;
+            overflow:hidden;
+            border:1px solid #e1e8ef;
+            border-radius:20px;
+            background:#fff;
+            box-shadow:
+                0 8px 24px rgba(35,72,105,.07);
+        }
+
+        .receipt-table-header{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:15px;
+            padding:20px 24px;
+            border-bottom:1px solid #e5edf4;
+            background:#f7fafc;
+        }
+
+        .receipt-table-title{
+            margin:0;
+            color:#21384d;
+            font-size:21px;
+            font-weight:850;
+        }
+
+        .receipt-table-count{
+            padding:7px 12px;
+            border-radius:999px;
+            background:#e6f2fc;
+            color:#1769aa;
+            font-size:14px;
+            font-weight:800;
+        }
+
+        .receipt-table-wrap{
+            overflow-x:auto;
+        }
+
+        .receipt-record-table{
+            width:100%;
+            min-width:930px;
+            border-collapse:collapse;
+        }
+
+        .receipt-record-table th{
+            padding:15px 16px;
+            background:#eef5fb;
+            color:#355067;
+            font-size:15px;
+            font-weight:850;
+            text-align:left;
+            white-space:nowrap;
+        }
+
+        .receipt-record-table td{
+            padding:15px 16px;
+            border-top:1px solid #edf1f5;
+            color:#34495e;
+            font-size:15px;
+            vertical-align:middle;
+        }
+
+        .receipt-record-table tbody tr:hover{
+            background:#f8fbfe;
+        }
+
+        .receipt-no-badge{
+            display:inline-block;
+            padding:7px 10px;
+            border-radius:10px;
+            background:#eaf4fd;
+            color:#1769aa;
+            font-weight:850;
+            white-space:nowrap;
+        }
+
+        .receipt-amount{
+            color:#166d4a;
+            font-weight:850;
+            white-space:nowrap;
+        }
+
+        .receipt-status{
+            display:inline-flex;
+            align-items:center;
+            justify-content:center;
+            min-width:78px;
+            padding:6px 11px;
+            border-radius:999px;
+            font-size:13px;
+            font-weight:850;
+        }
+
+        .receipt-status.valid{
+            background:#e8f7ef;
+            color:#23774f;
+        }
+
+        .receipt-status.cancelled{
+            background:#fdeaea;
+            color:#b63f3f;
+        }
+
+        .receipt-empty{
+            padding:45px 20px;
+            color:#7b8b9b;
+            font-size:17px;
+            text-align:center;
+        }
+
+        @media (max-width:800px){
+
+            .receipt-summary-page{
+                padding:20px 12px 50px;
+            }
+
+            .receipt-hero{
+                padding:28px 23px;
+            }
+
+            .receipt-hero::after{
+                display:none;
+            }
+
+            .receipt-hero-icon{
+                width:60px;
+                height:60px;
+                border-radius:18px;
+                font-size:32px;
+            }
+
+            .receipt-hero h1{
+                font-size:29px;
+            }
+
+            .receipt-hero p{
+                font-size:16px;
+            }
+
+            .receipt-form-card{
+                padding:23px 18px;
+            }
+
+            .receipt-form-grid{
+                grid-template-columns:1fr;
+                gap:16px;
+            }
+
+            .receipt-summary-grid{
+                grid-template-columns:
+                    repeat(2, minmax(0,1fr));
+            }
+
+            .receipt-summary-box{
+                min-height:115px;
+                padding:20px;
+            }
+
+            .receipt-summary-value{
+                font-size:25px;
+            }
+
+        }
+
+        @media (max-width:520px){
+
+            .receipt-summary-grid{
+                grid-template-columns:1fr;
+            }
+
+            .receipt-hero-title{
+                align-items:flex-start;
+            }
+
+            .receipt-hero h1{
+                font-size:25px;
+            }
+
+        }
+
+        </style>
+
+        <div class="receipt-summary-page">
+
+            <div class="receipt-topbar">
+
+                <a
+                    class="receipt-back"
+                    href="{{ url_for(
+                        'finance.finance_admin_home'
+                    ) }}"
+                >
+                    ← 返回负责人中心
+                </a>
+
+            </div>
+
+            <section class="receipt-hero">
+
+                <div class="receipt-hero-title">
+
+                    <div class="receipt-hero-icon">
+                        📒
                     </div>
-                    <div class="v5-menu-desc">
-                        突发活动或临时项目使用
+
+                    <div>
+
+                        <h1>
+                            收条范围汇总
+                        </h1>
+
+                        <p>
+                            核对收条张数、现金金额、
+                            作废记录及未录入号码
+                        </p>
+
                     </div>
+
                 </div>
-            </a>
+
+            </section>
+
+            {% if error %}
+
+            <div class="receipt-error">
+                <span>⚠️</span>
+                <span>{{ error }}</span>
+            </div>
+
+            {% endif %}
+
+            <section class="receipt-form-card">
+
+                <h2 class="receipt-card-title">
+                    🔎 选择要检查的收条范围
+                </h2>
+
+                <form method="post">
+
+                    <div class="receipt-form-grid">
+
+                        <div class="receipt-field">
+
+                            <label for="receipt-branch">
+                                分会
+                            </label>
+
+                            <select
+                                id="receipt-branch"
+                                class="form-input"
+                                name="branch"
+                                onchange="updateReceiptPrefix()"
+                            >
+
+                                <option
+                                    value="CHE"
+                                    {% if branch == 'CHE' %}
+                                    selected
+                                    {% endif %}
+                                >
+                                    CHE — 蕉赖分会
+                                </option>
+
+                                <option
+                                    value="STW"
+                                    {% if branch == 'STW' %}
+                                    selected
+                                    {% endif %}
+                                >
+                                    STW — 实达阿南分会
+                                </option>
+
+                            </select>
+
+                        </div>
+
+                        <div class="receipt-field">
+
+                            <label for="receipt-category">
+                                收入项目
+                            </label>
+
+                            <select
+                                id="receipt-category"
+                                class="form-input"
+                                name="category"
+                            >
+
+                                {% for item in categories %}
+
+                                <option
+                                    value="{{ item }}"
+                                    {% if item == category %}
+                                    selected
+                                    {% endif %}
+                                >
+                                    {{ item }}
+                                </option>
+
+                                {% endfor %}
+
+                            </select>
+
+                        </div>
+
+                        <div class="receipt-field">
+
+                            <label for="receipt-from">
+                                开始收条
+                            </label>
+
+                            <input
+                                id="receipt-from"
+                                class="form-input"
+                                name="receipt_from"
+                                value="{{ receipt_from }}"
+                                placeholder="{{ branch }}0001201"
+                                autocomplete="off"
+                                required
+                            >
+
+                            <div class="receipt-field-help">
+                                输入这一段收条的第一张号码
+                            </div>
+
+                        </div>
+
+                        <div class="receipt-field">
+
+                            <label for="receipt-to">
+                                结束收条
+                            </label>
+
+                            <input
+                                id="receipt-to"
+                                class="form-input"
+                                name="receipt_to"
+                                value="{{ receipt_to }}"
+                                placeholder="{{ branch }}0001250"
+                                autocomplete="off"
+                                required
+                            >
+
+                            <div class="receipt-field-help">
+                                输入这一段收条的最后一张号码
+                            </div>
+
+                        </div>
+
+                    </div>
+
+                    <button
+                        class="receipt-submit"
+                        type="submit"
+                    >
+                        🧮 计算收条范围
+                    </button>
+
+                </form>
+
+            </section>
+
+            {% if result %}
+
+            <section class="receipt-summary-grid">
+
+                <div class="receipt-summary-box">
+
+                    <div class="receipt-summary-icon">
+                        🔢
+                    </div>
+
+                    <strong class="receipt-summary-value">
+                        {{ result.span_count }}
+                    </strong>
+
+                    <span class="receipt-summary-label">
+                        号码跨度
+                    </span>
+
+                </div>
+
+                <div class="receipt-summary-box success">
+
+                    <div class="receipt-summary-icon">
+                        ✅
+                    </div>
+
+                    <strong class="receipt-summary-value">
+                        {{ result.valid_count }}
+                    </strong>
+
+                    <span class="receipt-summary-label">
+                        有效收条
+                    </span>
+
+                </div>
+
+                <div class="receipt-summary-box danger">
+
+                    <div class="receipt-summary-icon">
+                        ❌
+                    </div>
+
+                    <strong class="receipt-summary-value">
+                        {{ result.cancelled_count }}
+                    </strong>
+
+                    <span class="receipt-summary-label">
+                        已作废
+                    </span>
+
+                </div>
+
+                <div class="receipt-summary-box warning">
+
+                    <div class="receipt-summary-icon">
+                        ⚠️
+                    </div>
+
+                    <strong class="receipt-summary-value">
+                        {{ result.missing_count }}
+                    </strong>
+
+                    <span class="receipt-summary-label">
+                        未录入／跳号
+                    </span>
+
+                </div>
+
+                <div class="receipt-summary-box money">
+
+                    <div class="receipt-summary-icon">
+                        💵
+                    </div>
+
+                    <strong class="receipt-summary-value">
+                        RM {{
+                            "%.2f"|format(
+                                result.cash_total
+                            )
+                        }}
+                    </strong>
+
+                    <span class="receipt-summary-label">
+                        现金应存银行
+                    </span>
+
+                </div>
+
+                <div class="receipt-summary-box success">
+
+                    <div class="receipt-summary-icon">
+                        💰
+                    </div>
+
+                    <strong class="receipt-summary-value">
+                        RM {{
+                            "%.2f"|format(
+                                result.all_total
+                            )
+                        }}
+                    </strong>
+
+                    <span class="receipt-summary-label">
+                        全部有效金额
+                    </span>
+
+                </div>
+
+            </section>
+
+            {% if result.missing_count %}
+
+            <section class="receipt-missing-card">
+
+                <div class="receipt-missing-title">
+                    ⚠️ 未找到以下收条号码
+                </div>
+
+                <div class="receipt-missing-list">
+
+                    {{ result.missing_text }}
+
+                    {% if result.missing_count > 30 %}
+                        ……
+                    {% endif %}
+
+                </div>
+
+            </section>
+
+            {% endif %}
+
+            <section class="receipt-table-card">
+
+                <div class="receipt-table-header">
+
+                    <h2 class="receipt-table-title">
+                        📋 收条明细
+                    </h2>
+
+                    <span class="receipt-table-count">
+                        共 {{ records|length }} 笔
+                    </span>
+
+                </div>
+
+                {% if records %}
+
+                <div class="receipt-table-wrap">
+
+                    <table class="receipt-record-table">
+
+                        <thead>
+
+                            <tr>
+                                <th>收条编号</th>
+                                <th>日期</th>
+                                <th>姓名</th>
+                                <th>类别</th>
+                                <th>付款方式</th>
+                                <th>金额</th>
+                                <th>状态</th>
+                            </tr>
+
+                        </thead>
+
+                        <tbody>
+
+                            {% for row in records %}
+
+                            {% set row_status =
+                                row.status
+                                or 'confirmed'
+                            %}
+
+                            <tr>
+
+                                <td>
+                                    <span class="receipt-no-badge">
+                                        {{ row.receipt_no }}
+                                    </span>
+                                </td>
+
+                                <td>
+                                    {{
+                                        row.receipt_date
+                                        or row.record_date
+                                    }}
+                                </td>
+
+                                <td>
+                                    {{ row.name or "—" }}
+                                </td>
+
+                                <td>
+                                    {{ row.category or "—" }}
+                                </td>
+
+                                <td>
+                                    {{
+                                        row.payment_method
+                                        or "—"
+                                    }}
+                                </td>
+
+                                <td class="receipt-amount">
+                                    RM {{
+                                        "%.2f"|format(
+                                            row.amount or 0
+                                        )
+                                    }}
+                                </td>
+
+                                <td>
+
+                                    {% if row_status ==
+                                          'cancelled' %}
+
+                                    <span
+                                        class="
+                                            receipt-status
+                                            cancelled
+                                        "
+                                    >
+                                        已作废
+                                    </span>
+
+                                    {% else %}
+
+                                    <span
+                                        class="
+                                            receipt-status
+                                            valid
+                                        "
+                                    >
+                                        有效
+                                    </span>
+
+                                    {% endif %}
+
+                                </td>
+
+                            </tr>
+
+                            {% endfor %}
+
+                        </tbody>
+
+                    </table>
+
+                </div>
+
+                {% else %}
+
+                <div class="receipt-empty">
+                    此范围没有找到符合条件的收条记录。
+                </div>
+
+                {% endif %}
+
+            </section>
+
+            {% endif %}
 
         </div>
 
-    </div>
-    """,
-    special_donation_title=SPECIAL_DONATION_TITLE
+        <script>
+
+        function updateReceiptPrefix(){
+
+            const branch =
+                document.getElementById(
+                    "receipt-branch"
+                ).value;
+
+            const fromInput =
+                document.getElementById(
+                    "receipt-from"
+                );
+
+            const toInput =
+                document.getElementById(
+                    "receipt-to"
+                );
+
+            fromInput.placeholder =
+                branch + "0001201";
+
+            toInput.placeholder =
+                branch + "0001250";
+        }
+
+        </script>
+        """,
+        branch=branch,
+        category=category,
+        categories=categories,
+        receipt_from=receipt_from,
+        receipt_to=receipt_to,
+        result=result,
+        records=records,
+        error=error,
     )
 
 @finance_bp.route("/menu/expense")
@@ -2282,6 +4069,7 @@ def finance_expense_menu():
     )
 
 @finance_bp.route("/menu/member")
+@finance_admin_required
 def finance_member_menu():
 
     return render_template_string(FINANCE_V5_STYLE + FINANCE_DATE_COMPONENT + """
@@ -2340,6 +4128,7 @@ def finance_member_menu():
     """)
 
 @finance_bp.route("/menu/report")
+@finance_admin_required
 def finance_report_menu():
 
     today_ym = date.today().strftime("%Y-%m")
@@ -2529,6 +4318,7 @@ def finance_report_menu():
     )
 
 @finance_bp.route("/member_management")
+@finance_admin_required
 def member_management():
 
     q = request.args.get("q", "").strip()
@@ -3025,6 +4815,7 @@ def member_management():
     )
 
 @finance_bp.route("/member/<member_id>/status", methods=["POST"])
+@finance_admin_required
 def update_member_status(member_id):
 
     status = request.form.get("status", "").strip()
@@ -3043,6 +4834,7 @@ def update_member_status(member_id):
     return redirect(url_for("finance.member_management"))
 
 @finance_bp.route("/add_member", methods=["GET","POST"])
+@finance_admin_required
 def add_member():
     return "Add Member Coming Soon"
 
@@ -6124,6 +7916,7 @@ function addDonor(name){
         )
 
 @finance_bp.route("/donors")
+@finance_admin_required
 def donor_management():
 
     q = request.args.get("q", "").strip()
@@ -6295,6 +8088,7 @@ def update_donor_phone():
 
 
 @finance_bp.route("/bank_pending/<int:pending_id>/delete", methods=["POST"])
+@finance_admin_required
 def delete_bank_pending(pending_id):
 
     db_query("""
@@ -7585,6 +9379,7 @@ def confirm_bank(pending_id):
     "/records/<int:record_id>/cancel",
     methods=["POST"]
 )
+@finance_admin_required
 def cancel_record(record_id):
 
     # 先读取完整资料
@@ -9296,6 +11091,7 @@ def record_detail(record_id):
     )
 
 @finance_bp.route("/dashboard")
+@finance_admin_required
 def dashboard():
 
     ym = request.args.get(
@@ -11818,6 +13614,7 @@ def get_next_payment_voucher():
     "/vendors",
     methods=["GET", "POST"]
 )
+@finance_admin_required
 def finance_vendors():
 
     message = ""
@@ -12203,6 +14000,7 @@ def finance_vendors():
     "/vendors/<int:vendor_id>/toggle",
     methods=["POST"]
 )
+@finance_admin_required
 def toggle_finance_vendor(vendor_id):
 
     db_query("""
