@@ -2790,15 +2790,18 @@ def receipt_range_summary():
         "月费"
     ).strip()
 
-    receipt_from = request.values.get(
+    receipt_from_input = request.values.get(
         "receipt_from",
         ""
     ).strip().upper()
 
-    receipt_to = request.values.get(
+    receipt_to_input = request.values.get(
         "receipt_to",
         ""
     ).strip().upper()
+
+    receipt_from = ""
+    receipt_to = ""
 
     result = None
     records = []
@@ -2809,40 +2812,73 @@ def receipt_range_summary():
 
     if request.method == "POST":
 
-        pattern_from = re.match(
-            r"^([A-Z]+)(\d+)$",
-            receipt_from
-        )
+        def parse_receipt_number(raw_value, selected_branch):
 
-        pattern_to = re.match(
-            r"^([A-Z]+)(\d+)$",
-            receipt_to
-        )
+            raw_value = str(raw_value or "").strip().upper()
 
-        if not pattern_from or not pattern_to:
+            if not raw_value:
+                return None
 
-            error = (
-                "请输入完整收条编号，"
-                "例如 CHE0001201。"
+            # 允许只输入数字，例如 1555
+            if raw_value.isdigit():
+                return int(raw_value)
+
+            # 也兼容完整编号，例如 CHE0001555
+            match = re.match(
+                r"^([A-Z]+)[\s\-]?(\d+)$",
+                raw_value
             )
 
-        elif pattern_from.group(1) != pattern_to.group(1):
+            if not match:
+                return None
+
+            prefix = match.group(1)
+            number = int(match.group(2))
+
+            if prefix != selected_branch:
+                return "wrong_branch"
+
+            return number
+
+
+        start_result = parse_receipt_number(
+            receipt_from_input,
+            branch
+        )
+
+        end_result = parse_receipt_number(
+            receipt_to_input,
+            branch
+        )
+
+        if start_result == "wrong_branch" or end_result == "wrong_branch":
 
             error = (
-                "开始与结束收条必须使用相同前缀。"
+                f"目前选择的是 {branch} 分会，"
+                f"请输入 {branch} 收条号码。"
             )
 
-        elif pattern_from.group(1) != branch:
+        elif start_result is None or end_result is None:
 
             error = (
-                f"目前选择的分会是 {branch}，"
-                f"收条编号必须以 {branch} 开始。"
+                "请输入收条号码。"
+                "可以只输入数字，例如 1555。"
             )
 
         else:
 
-            start_no = int(pattern_from.group(2))
-            end_no = int(pattern_to.group(2))
+            start_no = start_result
+            end_no = end_result
+
+            receipt_width = 7
+
+            receipt_from = (
+                f"{branch}{start_no:0{receipt_width}d}"
+            )
+
+            receipt_to = (
+                f"{branch}{end_no:0{receipt_width}d}"
+            )
 
             if start_no > end_no:
 
@@ -2905,8 +2941,7 @@ def receipt_range_summary():
 
                     if (
                         match
-                        and match.group(1)
-                        == pattern_from.group(1)
+                        and match.group(1) == branch
                     ):
                         by_number[
                             int(match.group(2))
@@ -2962,11 +2997,8 @@ def receipt_range_summary():
                     if number not in by_number
                 ]
 
-                width = len(
-                    pattern_from.group(2)
-                )
-
-                prefix = pattern_from.group(1)
+                width = receipt_width
+                prefix = branch
 
                 result = {
                     "span_count":
@@ -3625,18 +3657,20 @@ def receipt_range_summary():
                                 开始收条
                             </label>
 
-                            <input
+                            <<input
                                 id="receipt-from"
                                 class="form-input"
                                 name="receipt_from"
-                                value="{{ receipt_from }}"
-                                placeholder="{{ branch }}0001201"
+                                value="{{ receipt_from_input }}"
+                                placeholder="例如 1555"
+                                inputmode="numeric"
                                 autocomplete="off"
                                 required
                             >
 
                             <div class="receipt-field-help">
-                                输入这一段收条的第一张号码
+                                只需输入数字，系统会自动补成
+                                {{ branch }}0001555
                             </div>
 
                         </div>
@@ -3651,14 +3685,15 @@ def receipt_range_summary():
                                 id="receipt-to"
                                 class="form-input"
                                 name="receipt_to"
-                                value="{{ receipt_to }}"
-                                placeholder="{{ branch }}0001250"
+                                value="{{ receipt_to_input }}"
+                                placeholder="例如 1560"
+                                inputmode="numeric"
                                 autocomplete="off"
                                 required
                             >
 
                             <div class="receipt-field-help">
-                                输入这一段收条的最后一张号码
+                                只需输入数字，系统会自动补上分会及前导零
                             </div>
 
                         </div>
@@ -3973,8 +4008,8 @@ def receipt_range_summary():
         branch=branch,
         category=category,
         categories=categories,
-        receipt_from=receipt_from,
-        receipt_to=receipt_to,
+        receipt_from_input=receipt_from_input,
+        receipt_to_input=receipt_to_input,
         result=result,
         records=records,
         error=error,

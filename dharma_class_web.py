@@ -1485,6 +1485,10 @@ def class_attendance():
                     # -------------------------------------------------
                     for sid in student_ids:
 
+                        # 先取得学生资料（无论是否休课都会用到）
+                        sid_int = int(sid)
+                        student_name = student_name_map.get(sid_int, "")
+
                         attendance_status = request.form.get(
                             f"status_{sid}",
                             "present"
@@ -1593,9 +1597,6 @@ def class_attendance():
                                 absence_reason or None,
                                 marked_by
                             ))
-
-                            sid_int = int(sid)
-                            student_name = student_name_map.get(sid_int, "")
 
                             old_attendance = old_attendance_map.get(
                                 sid_int,
