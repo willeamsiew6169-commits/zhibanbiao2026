@@ -236,6 +236,121 @@ def _normalize_member_id(value: Any, prefix: str) -> str:
     return text
 
 
+def _name_key(value: Any) -> str:
+    """Return a stable comparison key for Chinese/English member names."""
+    text = _text(value).lower()
+    text = re.sub(r"[\s·•・._,'’`-]+", "", text)
+    return text
+
+
+def _member_number(value: Any) -> int | None:
+    """Extract the numeric part from 005, CHE-005, STW005 or Excel numbers."""
+    text = _text(value).upper().replace(" ", "")
+    if not text:
+        return None
+    match = re.search(r"(\d+)(?:\.0)?$", text)
+    return int(match.group(1)) if match else None
+
+
+def _build_stw_member_mapping(workbook) -> dict[str, Any]:
+    """Read the workbook's Master Data sheet.
+
+    The STW workbook keeps the current STW number in column A and the old CHE
+    number used by finance in column B.  Conversion is verified with the name,
+    so a number that is already a valid STW number is not accidentally changed.
+    """
+    result: dict[str, Any] = {
+        "by_old_and_name": {},
+        "by_stw_and_name": {},
+        "by_name": {},
+        "source_sheet": "",
+    }
+
+    master = None
+    for sheet in workbook.worksheets:
+        title_key = re.sub(r"[\s_-]+", "", sheet.title).lower()
+        if title_key in {"masterdata", "mastermemberdata", "membermaster"}:
+            master = sheet
+            break
+
+    if master is None:
+        return result
+
+    header_row = None
+    for r in range(1, min(master.max_row, 20) + 1):
+        row_text = " | ".join(
+            _text(master.cell(r, c).value).lower()
+            for c in range(1, min(master.max_column, 10) + 1)
+        )
+        if "stw" in row_text and "che" in row_text and ("名字" in row_text or "name" in row_text):
+            header_row = r
+            break
+
+    if header_row is None:
+        return result
+
+    result["source_sheet"] = master.title
+
+    for r in range(header_row + 1, master.max_row + 1):
+        stw_no = _member_number(master.cell(r, 1).value)
+        che_no = _member_number(master.cell(r, 2).value)
+        chinese_name = _text(master.cell(r, 3).value)
+        alternate_name = _text(master.cell(r, 4).value)
+
+        if stw_no is None:
+            continue
+
+        target = f"STW-{stw_no}"
+        names = [name for name in (chinese_name, alternate_name) if _name_key(name)]
+
+        for name in names:
+            key = _name_key(name)
+            result["by_stw_and_name"][(stw_no, key)] = target
+            if che_no is not None:
+                result["by_old_and_name"][(che_no, key)] = target
+            result["by_name"].setdefault(key, set()).add(target)
+
+    return result
+
+
+def _resolve_stw_member_id(
+    raw_member_id: Any,
+    name: Any,
+    prefix: str,
+    mapping: dict[str, Any] | None,
+) -> tuple[str, str, bool]:
+    """Resolve an STW workbook's old CHE number to the current STW number.
+
+    Returns: (current_member_id, original_normalized_id, converted).
+    """
+    original = _normalize_member_id(raw_member_id, prefix)
+    if prefix != "STW" or not original or not mapping:
+        return original, original, False
+
+    number = _member_number(raw_member_id)
+    name_key = _name_key(name)
+    if number is None:
+        return original, original, False
+
+    # It is already the correct STW number for this person.
+    current = mapping.get("by_stw_and_name", {}).get((number, name_key))
+    if current:
+        return current, original, current != original
+
+    # Finance entered the former CHE number; convert it to the current STW ID.
+    converted = mapping.get("by_old_and_name", {}).get((number, name_key))
+    if converted:
+        return converted, original, converted != original
+
+    # Name-only fallback is allowed only when the name maps to one unique member.
+    targets = mapping.get("by_name", {}).get(name_key, set())
+    if len(targets) == 1:
+        target = next(iter(targets))
+        return target, original, target != original
+
+    return original, original, False
+
+
 def _payment_method(cash: float, cheque: float, bank: float) -> tuple[str, str]:
     used = [
         name
@@ -917,18 +1032,58 @@ def _expense_db_exists(data: dict[str, Any]) -> bool:
 
 
 def _bank_deposit_db_exists(data: dict[str, Any]) -> bool:
+    return bool(_find_bank_deposit_id(data))
+
+
+def _find_bank_deposit_id(data: dict[str, Any]) -> int | None:
+    """Find the matching Bank In master row.
+
+    V8.1 identity rule:
+    1. For CDM rows, branch + ym + cdm_sequence is the primary identity.
+    2. Older rows without cdm_sequence fall back to date/reference/amount.
+    3. receipt_from / receipt_to are display fields only.
+    """
+    branch = str(data.get("branch") or "CHE").strip().upper()
+    ym = str(data.get("ym") or "").strip()
+    cdm_sequence = data.get("cdm_sequence")
+
+    if ym and cdm_sequence not in (None, ""):
+        row = db_query(
+            """
+            select id
+            from finance_bank_deposits
+            where coalesce(branch, 'CHE') = %s
+              and coalesce(ym, to_char(deposit_date, 'YYYY-MM')) = %s
+              and nullif(regexp_replace(coalesce(cdm_sequence::text, ''), '[^0-9]', '', 'g'), '')::integer = %s
+            order by id
+            limit 1
+            """,
+            (branch, ym, int(cdm_sequence)),
+            fetchone=True,
+        )
+        if row:
+            return int(row["id"])
+
     row = db_query(
         """
-        select id from finance_bank_deposits
-        where deposit_date=%s
-          and abs(amount-%s)<0.005
-          and coalesce(reference_no,'')=coalesce(%s,'')
+        select id
+        from finance_bank_deposits
+        where deposit_date = %s
+          and fund_account = %s
+          and abs(amount - %s) < 0.005
+          and coalesce(reference_no, '') = coalesce(%s, '')
+        order by id
         limit 1
         """,
-        (data.get("deposit_date") or None, data.get("amount") or 0, data.get("reference_no") or ""),
+        (
+            data.get("deposit_date") or None,
+            data.get("fund_account") or "",
+            data.get("amount") or 0,
+            data.get("reference_no") or "",
+        ),
         fetchone=True,
     )
-    return bool(row)
+    return int(row["id"]) if row else None
 
 
 def _stage_row(
@@ -1045,15 +1200,33 @@ def _infer_monthly_prefix(sheet, file_name: str, header_row: int) -> str:
 
 
 
-def _monthly_amount_columns(sheet, header_row: int) -> dict[str, int | None]:
-    """Detect monthly-fee amount columns across old and new GYT templates.
-
-    Old template:
-        J = total amount, K = cash, L = cheque, M = online bank
-    New template:
-        J = cash, K = cheque, L = online bank, M = CDM sequence
-    Some transitional sheets only contain J = total amount.
+def _monthly_amount_columns(
+    sheet,
+    header_row: int
+) -> dict[str, int | None]:
     """
+    自动识别月费 Excel 的金额及 CDM 栏位。
+
+    旧版：
+        J = Total Amount
+        K = Cash
+        L = Cheque
+        M = Online Bank Transfer
+        N = CDM Seq
+        O = CDM Bank-in Amount
+        P = CDM Bank-in Date
+        Q = Remark
+
+    新版：
+        J = Cash
+        K = Cheque
+        L = Online Bank Transfer
+        M = CDM Seq
+        N = CDM Bank-in Amount
+        O = CDM Bank-in Date
+        P = Remark
+    """
+
     found: dict[str, int | None] = {
         "total": None,
         "cash": None,
@@ -1065,38 +1238,175 @@ def _monthly_amount_columns(sheet, header_row: int) -> dict[str, int | None]:
         "remarks": None,
     }
 
-    for r in range(max(1, header_row - 2), min(sheet.max_row, header_row + 1) + 1):
-        for c in range(1, min(sheet.max_column, 20) + 1):
-            text = _text(sheet.cell(r, c).value).lower().replace("\n", " ")
+    # 标题可能分布在表头上面两行至下面一行
+    start_row = max(1, header_row - 3)
+    end_row = min(sheet.max_row, header_row + 2)
+
+    for r in range(start_row, end_row + 1):
+
+        for c in range(1, min(sheet.max_column, 22) + 1):
+
+            text = _text(sheet.cell(r, c).value)
+
+            text = (
+                text.lower()
+                .replace("\n", " ")
+                .replace("\r", " ")
+                .replace("–", "-")
+                .replace("—", "-")
+            )
+
+            text = re.sub(r"\s+", " ", text).strip()
+
             if not text:
                 continue
-            if ("cash" in text or "现款" in text or "現款" in text) and "bank-in" not in text:
-                found["cash"] = c
-            elif "cheque" in text or "支票" in text:
+
+            # 总金额
+            if (
+                "total amount" in text
+                or "amount (rm)" in text
+                or "总金额" in text
+                or "總金額" in text
+            ):
+                # 上层合并标题“Amount RM”不能直接判断，
+                # 这里只在实际交易栏附近使用。
+                if c in (10, 11):
+                    found["total"] = c
+
+            # Cash
+            if (
+                "cash" in text
+                or "现款" in text
+                or "現款" in text
+                or "现金" in text
+                or "現金" in text
+            ):
+                if (
+                    "bank-in" not in text
+                    and "bank in" not in text
+                    and "deposit" not in text
+                ):
+                    found["cash"] = c
+
+            # Cheque
+            elif (
+                "cheque" in text
+                or "check" in text
+                or "支票" in text
+            ):
                 found["cheque"] = c
-            elif "online bank" in text or "网上银行" in text or "網上銀行" in text:
-                found["bank"] = c
-            elif "cdm seq" in text:
+
+            # Online Bank Transfer
+            elif (
+                "online bank" in text
+                or "bank transfer" in text
+                or "网上银行" in text
+                or "網上銀行" in text
+                or "银行过账" in text
+                or "銀行過賬" in text
+            ):
+                if (
+                    "bank-in amount" not in text
+                    and "bank in amount" not in text
+                ):
+                    found["bank"] = c
+
+            # CDM Sequence
+            elif (
+                "cdm seq" in text
+                or "cdm sequence" in text
+                or "cdm no" in text
+                or "cdm编号" in text
+                or "cdm編號" in text
+            ):
                 found["cdm_seq"] = c
-            elif "bank-in amount" in text or "bank in amount" in text:
+
+            # CDM Bank-in Amount
+            elif (
+                "bank-in amount" in text
+                or "bank in amount" in text
+                or "deposit amount" in text
+                or "存入金额" in text
+                or "存入金額" in text
+            ):
                 found["bank_in_amount"] = c
-            elif "bank-in date" in text or "bank in date" in text:
+
+            # CDM Bank-in Date
+            elif (
+                "bank-in date" in text
+                or "bank in date" in text
+                or "deposit date" in text
+                or "存入日期" in text
+            ):
                 found["bank_in_date"] = c
-            elif "remark" in text or "备注" in text or "備註" in text:
+
+            # Remarks
+            elif (
+                "remark" in text
+                or "remarks" in text
+                or "备注" in text
+                or "備註" in text
+            ):
                 found["remarks"] = c
 
     cash_col = found["cash"]
-    # In the old workbook, J is the calculated total and cash starts at K.
-    if cash_col == 11:
-        found["total"] = 10
-    # Transitional old sheets have only J as the transaction amount.
-    elif cash_col is None:
-        found["total"] = 10
+    bank_col = found["bank"]
 
-    # Safe fallbacks for the known GYT workbook layout.
-    found["bank_in_amount"] = found["bank_in_amount"] or 14
-    found["bank_in_date"] = found["bank_in_date"] or 15
-    found["remarks"] = found["remarks"] or 16
+    # ==========================================
+    # 旧版格式
+    # J Total、K Cash、L Cheque、M Bank
+    # ==========================================
+    if cash_col == 11 or bank_col == 13:
+
+        found["total"] = found["total"] or 10
+        found["cash"] = found["cash"] or 11
+        found["cheque"] = found["cheque"] or 12
+        found["bank"] = found["bank"] or 13
+
+        found["cdm_seq"] = found["cdm_seq"] or 14
+        found["bank_in_amount"] = (
+            found["bank_in_amount"] or 15
+        )
+        found["bank_in_date"] = (
+            found["bank_in_date"] or 16
+        )
+        found["remarks"] = found["remarks"] or 17
+
+    # ==========================================
+    # 新版格式
+    # J Cash、K Cheque、L Bank、M CDM Seq
+    # ==========================================
+    elif cash_col == 10 or bank_col == 12:
+
+        found["cash"] = found["cash"] or 10
+        found["cheque"] = found["cheque"] or 11
+        found["bank"] = found["bank"] or 12
+
+        found["cdm_seq"] = found["cdm_seq"] or 13
+        found["bank_in_amount"] = (
+            found["bank_in_amount"] or 14
+        )
+        found["bank_in_date"] = (
+            found["bank_in_date"] or 15
+        )
+        found["remarks"] = found["remarks"] or 16
+
+    # ==========================================
+    # 无法识别时，先采用新版格式
+    # ==========================================
+    else:
+
+        found["total"] = found["total"] or 10
+
+        found["cdm_seq"] = found["cdm_seq"] or 13
+        found["bank_in_amount"] = (
+            found["bank_in_amount"] or 14
+        )
+        found["bank_in_date"] = (
+            found["bank_in_date"] or 15
+        )
+        found["remarks"] = found["remarks"] or 16
+
     return found
 
 
@@ -1106,6 +1416,7 @@ def _parse_monthly_sheet(
     file_name: str,
     month_from: str = "",
     month_to: str = "",
+    stw_member_mapping: dict[str, Any] | None = None,
 ):
     header_row = _monthly_header_row(sheet)
     if not header_row:
@@ -1122,16 +1433,102 @@ def _parse_monthly_sheet(
         lambda: {"receipts": [], "amount": 0.0, "date": None}
     )
     seen_receipts: set[str] = set()
+    last_cdm_seq = ""
 
     for r in range(header_row + 2, sheet.max_row + 1):
-        raw = {chr(64 + c): sheet.cell(r, c).value for c in range(1, 17)}
-        receipt_no = _normalize_receipt(sheet.cell(r, 2).value)
-        name = _text(sheet.cell(r, 4).value)
+
+        raw = {
+            chr(64 + c): sheet.cell(r, c).value
+            for c in range(1, 17)
+        }
+
+        receipt_no = _normalize_receipt(
+            sheet.cell(r, 2).value
+        )
+
+        name = _text(
+            sheet.cell(r, 4).value
+        )
+
+        # ==========================================
+        # 先读取 CDM
+        # 因为 CDM 可能放在没有收条编号和姓名的汇总行
+        # ==========================================
+        cdm_seq = (
+            _text(
+                sheet.cell(
+                    r,
+                    amount_cols["cdm_seq"]
+                ).value
+            )
+            if amount_cols["cdm_seq"]
+            else ""
+        )
+
+        bank_in_amount = (
+            _amount(
+                sheet.cell(
+                    r,
+                    amount_cols["bank_in_amount"]
+                ).value
+            )
+            if amount_cols["bank_in_amount"]
+            else 0.0
+        )
+
+        bank_in_date = (
+            _excel_date(
+                sheet.cell(
+                    r,
+                    amount_cols["bank_in_date"]
+                ).value
+            )
+            if amount_cols["bank_in_date"]
+            else None
+        )
+
+        # 有新的 CDM Seq，就记住它
+        if cdm_seq:
+            last_cdm_seq = cdm_seq
+
+        # 当前行有 CDM Seq，或金额／日期写在下一行时，
+        # 都归到最近一个 CDM Seq
+        effective_cdm_seq = cdm_seq or (
+            last_cdm_seq
+            if bank_in_amount > 0 or bank_in_date
+            else ""
+        )
+
+        if effective_cdm_seq:
+
+            g = deposit_groups[effective_cdm_seq]
+
+            # 只有真正有金额的月费收条才加入收条清单
+            if receipt_no and name:
+                g["receipts"].append(receipt_no)
+
+            # 只有同一行同时具备 Bank-in Amount 与 Bank-in Date，
+            # 才视为真正的 CDM 汇总行。
+            # 这样可避免月尾总计（例如 RM8,850，但没有 Bank-in Date）
+            # 被错误归到最后一个 CDM Seq。
+            if bank_in_amount > 0 and bank_in_date:
+                g["amount"] = bank_in_amount
+                g["date"] = bank_in_date
+                # 这一批已经完整结束，后续月结总计不可继续沿用该 CDM。
+                last_cdm_seq = ""
+
+        # 没有月费资料，但可能已经在上面收集了 CDM
         if not receipt_no and not name:
             continue
 
         receipt_date = _excel_date(sheet.cell(r, 1).value)
-        member_id = _normalize_member_id(sheet.cell(r, 3).value, prefix)
+        raw_member_id = sheet.cell(r, 3).value
+        member_id, original_member_id, member_id_converted = _resolve_stw_member_id(
+            raw_member_id,
+            name,
+            prefix,
+            stw_member_mapping,
+        )
         payment_month_from = _month_ym(sheet.cell(r, 5).value)
         payment_month_to = _month_ym(sheet.cell(r, 6).value)
         month_count = int(_amount(sheet.cell(r, 8).value) or 0)
@@ -1240,13 +1637,7 @@ def _parse_monthly_sheet(
             continue
 
         method, method_warning = _payment_method(cash, cheque, bank)
-        cdm_seq = (
-            _text(sheet.cell(r, amount_cols["cdm_seq"]).value)
-            if amount_cols["cdm_seq"]
-            else ""
-        )
-        bank_in_amount = _amount(sheet.cell(r, amount_cols["bank_in_amount"]).value)
-        bank_in_date = _excel_date(sheet.cell(r, amount_cols["bank_in_date"]).value)
+        
         remarks = _text(sheet.cell(r, amount_cols["remarks"]).value)
         bank_holder = _text(sheet.cell(r, 17).value)
         bank_note = _text(sheet.cell(r, 18).value)
@@ -1324,6 +1715,10 @@ def _parse_monthly_sheet(
             duplicate = True
         if receipt_no:
             seen_receipts.add(receipt_no)
+        if member_id_converted:
+            warnings.append(
+                f"会员编号已按STW Master Data由 {original_member_id} 转换为 {member_id}"
+            )
         if member_id and not _member_exists(member_id):
             warnings.append(f"会员表找不到 {member_id}，仍可作为历史资料导入")
 
@@ -1336,6 +1731,8 @@ def _parse_monthly_sheet(
             "sub_category": "",
             "receipt_no": receipt_no,
             "member_id": member_id,
+            "legacy_member_id": original_member_id if member_id_converted else "",
+            "member_id_converted": member_id_converted,
             "name": name,
             "phone": "",
             "amount": amount,
@@ -1387,15 +1784,7 @@ def _parse_monthly_sheet(
             error="；".join(errors),
             warning="；".join(warnings),
         )
-
-        if cdm_seq and receipt_no:
-            g = deposit_groups[cdm_seq]
-            g["receipts"].append(receipt_no)
-            if bank_in_amount > 0:
-                g["amount"] = bank_in_amount
-            if bank_in_date:
-                g["date"] = bank_in_date
-
+        
     _stage_deposits(
         batch_id,
         sheet.title,
@@ -1403,6 +1792,7 @@ def _parse_monthly_sheet(
         deposit_groups,
         bank_name,
         _fund_account("月费"),
+        sheet_ym,
     )
     return True
 
@@ -1541,21 +1931,32 @@ def _stage_deposits(
     groups: dict[str, dict[str, Any]],
     bank_name: str,
     fund_account: str,
+    source_ym: str = "",
 ):
     for seq, g in groups.items():
-        receipts = g["receipts"]
+        # 以 Excel 实际列出的 CDM 收条清单为准；去重但保留原顺序。
+        receipts = []
+        seen = set()
+        for receipt in g.get("receipts", []):
+            normalized_receipt = _normalize_receipt(receipt)
+            if normalized_receipt and normalized_receipt not in seen:
+                receipts.append(normalized_receipt)
+                seen.add(normalized_receipt)
+
         amount = float(g["amount"] or 0)
         deposit_date = g["date"]
+
+        # V8 最终规则：只有 Excel 同时具备有效 Bank-in 金额和日期，
+        # 才代表这批 CDM 已真正完成。仅有 CDM Seq 或收条清单时，
+        # 仍属于“等待 CDM”，不可建立或暂存 Bank Deposit。
+        if amount <= 0 or not deposit_date:
+            continue
+
         errors: list[str] = []
         warnings: list[str] = []
-        if amount <= 0:
-            warnings.append("CDM批次没有Bank-in金额，暂不导入Bank In")
-        if not deposit_date:
-            warnings.append("CDM批次没有Bank-in日期")
-        if deposit_date:
-            lock = require_finance_month_open(deposit_date, fund_account)
-            if lock:
-                errors.append(lock)
+        lock = require_finance_month_open(deposit_date, fund_account)
+        if lock:
+            errors.append(lock)
 
         normalized = {
             "deposit_date": deposit_date.isoformat() if deposit_date else "",
@@ -1568,6 +1969,8 @@ def _stage_deposits(
             "amount": amount,
             "remarks": f"历史Excel CDM批次 {seq}",
             "cdm_sequence": seq,
+            "source_ym": source_ym,
+            "receipt_list": receipts,
             "import_source": file_name,
             "import_action": "bank_only",
             "match_note": "新增Cash Bank In记录",
@@ -1673,6 +2076,7 @@ def _parse_workbook(
     month_to: str = "",
 ) -> list[str]:
     wb = load_workbook(BytesIO(content), data_only=True, read_only=False)
+    stw_member_mapping = _build_stw_member_mapping(wb)
     recognized: list[str] = []
     skip_names = {
         "summary", "blank_master", "blank master", "master name list",
@@ -1689,7 +2093,12 @@ def _parse_workbook(
         # as Jan-26, Feb-26. Detect them by their header, not filename/title.
         if _monthly_header_row(sheet):
             if _parse_monthly_sheet(
-                sheet, batch_id, file_name, month_from, month_to
+                sheet,
+                batch_id,
+                file_name,
+                month_from,
+                month_to,
+                stw_member_mapping=stw_member_mapping,
             ):
                 recognized.append(title)
             continue
@@ -1978,6 +2387,9 @@ def import_confirm(batch_id: int):
     member_added = 0
     receipt_filled = 0
     bank_added = 0
+    bank_items_linked = 0
+    bank_deposits_checked = 0
+    bank_deposit_mismatches = 0
     skipped = 0
 
     with get_conn() as conn:
@@ -2144,71 +2556,118 @@ def import_confirm(batch_id: int):
                 elif row_type == "bank_deposit" and action == "bank_only":
                     if not data.get("deposit_date") or float(data.get("amount") or 0) <= 0:
                         continue
-                    # 先检查 Reference No 是否已经存在
-                    if data.get("reference_no"):
+                    
+                    # V8.2：直接在当前事务内 UPSERT。
+                    # 不再使用另一条数据库连接先查询，否则当前事务中刚建立的
+                    # CDM 主档可能不可见，并再次触发唯一约束。
+                    deposit_date_value = data.get("deposit_date")
+                    deposit_ym = (
+                        str(deposit_date_value)[:7]
+                        if deposit_date_value
+                        else str(data.get("ym") or "").strip()
+                    )
+                    cdm_sequence_value = data.get("cdm_sequence") or None
 
-                        cur.execute("""
-                            select id
-                            from finance_bank_deposits
-                            where lower(reference_no)=lower(%s)
-                            limit 1
-                        """, (
-                            data["reference_no"],
-                        ))
-
-                        if cur.fetchone():
-
-                            cur.execute(
-                                """
-                                update finance_import_rows
-                                set status='duplicate'
-                                where id=%s
-                                """,
-                                (row["id"],),
-                            )
-
-                            skipped += 1
-                            continue
-
-                    # 再检查其它条件
-                    if _bank_deposit_db_exists(data):
-
+                    if cdm_sequence_value not in (None, ""):
                         cur.execute(
                             """
-                            update finance_import_rows
-                            set status='duplicate'
-                            where id=%s
+                            insert into finance_bank_deposits
+                            (
+                                branch, deposit_date, ym, fund_account, bank_name,
+                                reference_no, receipt_from, receipt_to, amount,
+                                remarks, import_batch_id, import_source, cdm_sequence
+                            )
+                            values ('CHE',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                            on conflict (branch, ym, cdm_sequence)
+                            where cdm_sequence is not null
+                            do update set
+                                deposit_date = excluded.deposit_date,
+                                fund_account = excluded.fund_account,
+                                bank_name = excluded.bank_name,
+                                reference_no = excluded.reference_no,
+                                receipt_from = excluded.receipt_from,
+                                receipt_to = excluded.receipt_to,
+                                amount = excluded.amount,
+                                remarks = excluded.remarks,
+                                import_batch_id = excluded.import_batch_id,
+                                import_source = excluded.import_source
+                            returning id, (xmax = 0) as inserted
                             """,
-                            (row["id"],),
+                            (
+                                deposit_date_value, deposit_ym,
+                                data.get("fund_account"), data.get("bank_name") or None,
+                                data.get("reference_no") or None,
+                                data.get("receipt_from") or None,
+                                data.get("receipt_to") or None,
+                                data.get("amount") or 0,
+                                data.get("remarks") or "历史Excel CDM导入",
+                                batch_id, data.get("import_source") or batch.get("file_name"),
+                                int(cdm_sequence_value),
+                            ),
                         )
-
-                        skipped += 1
-                        continue
-                    cur.execute(
-                        """
-                        insert into finance_bank_deposits
-                        (
-                            deposit_date, ym, fund_account, bank_name,
-                            reference_no, receipt_from, receipt_to, amount,
-                            remarks, import_batch_id, import_source, cdm_sequence
-                        )
-                        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        returning id
-                        """,
-                        (
-                            data.get("deposit_date"), data.get("ym"),
-                            data.get("fund_account"), data.get("bank_name") or None,
-                            data.get("reference_no") or None,
-                            data.get("receipt_from") or None,
-                            data.get("receipt_to") or None,
-                            data.get("amount") or 0,
-                            data.get("remarks") or "历史Excel CDM导入",
-                            batch_id, data.get("import_source") or batch.get("file_name"),
-                            data.get("cdm_sequence") or None,
-                        ),
-                    )
-                    bank_deposit_id = cur.fetchone()["id"]
-                    bank_added += 1
+                        deposit_result = cur.fetchone()
+                        bank_deposit_id = deposit_result["id"]
+                        if deposit_result.get("inserted"):
+                            bank_added += 1
+                    else:
+                        existing_deposit_id = _find_bank_deposit_id(data)
+                        if existing_deposit_id:
+                            cur.execute(
+                                """
+                                update finance_bank_deposits
+                                set deposit_date=%s,
+                                    ym=%s,
+                                    fund_account=%s,
+                                    bank_name=%s,
+                                    reference_no=%s,
+                                    receipt_from=%s,
+                                    receipt_to=%s,
+                                    amount=%s,
+                                    remarks=%s,
+                                    import_batch_id=%s,
+                                    import_source=%s,
+                                    branch=coalesce(branch, 'CHE')
+                                where id=%s
+                                returning id
+                                """,
+                                (
+                                    deposit_date_value, deposit_ym,
+                                    data.get("fund_account"), data.get("bank_name") or None,
+                                    data.get("reference_no") or None,
+                                    data.get("receipt_from") or None,
+                                    data.get("receipt_to") or None,
+                                    data.get("amount") or 0,
+                                    data.get("remarks") or "历史Excel CDM导入",
+                                    batch_id, data.get("import_source") or batch.get("file_name"),
+                                    existing_deposit_id,
+                                ),
+                            )
+                            bank_deposit_id = cur.fetchone()["id"]
+                        else:
+                            cur.execute(
+                                """
+                                insert into finance_bank_deposits
+                                (
+                                    branch, deposit_date, ym, fund_account, bank_name,
+                                    reference_no, receipt_from, receipt_to, amount,
+                                    remarks, import_batch_id, import_source, cdm_sequence
+                                )
+                                values ('CHE',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,null)
+                                returning id
+                                """,
+                                (
+                                    deposit_date_value, deposit_ym,
+                                    data.get("fund_account"), data.get("bank_name") or None,
+                                    data.get("reference_no") or None,
+                                    data.get("receipt_from") or None,
+                                    data.get("receipt_to") or None,
+                                    data.get("amount") or 0,
+                                    data.get("remarks") or "历史Excel CDM导入",
+                                    batch_id, data.get("import_source") or batch.get("file_name"),
+                                ),
+                            )
+                            bank_deposit_id = cur.fetchone()["id"]
+                            bank_added += 1
 
                 cur.execute(
                     """
@@ -2221,12 +2680,152 @@ def import_confirm(batch_id: int):
                 )
                 processed += 1
 
+            # ==========================================================
+            # 依据每张 Excel 收条所属的 CDM Seq，重建 Bank In 明细。
+            # 不再使用 receipt_from ~ receipt_to 的 BETWEEN 推断。
+            # 连重复的 monthly_fee / bank_deposit 行也必须参与，因为
+            # finance_records 和 finance_bank_deposits 可能早已存在。
+            # ==========================================================
+            cur.execute(
+                """
+                select id, status, normalized_data, raw_data, bank_deposit_id
+                from finance_import_rows
+                where batch_id=%s and row_type='bank_deposit'
+                order by id
+                """,
+                (batch_id,),
+            )
+            staged_deposits = cur.fetchall() or []
+
+            for staged in staged_deposits:
+                data = staged.get("normalized_data") or {}
+                raw_data = staged.get("raw_data") or {}
+                if isinstance(data, str):
+                    data = json.loads(data)
+                if isinstance(raw_data, str):
+                    raw_data = json.loads(raw_data)
+
+                # V8 双重保险：旧批次里若曾暂存“只有 CDM Seq、没有真实
+                # Bank-in 金额或日期”的空 CDM，确认导入时必须直接忽略。
+                if (
+                    not data.get("deposit_date")
+                    or float(data.get("amount") or 0) <= 0
+                ):
+                    continue
+
+                receipts = data.get("receipt_list") or raw_data.get("receipts") or []
+                receipts = [
+                    _normalize_receipt(x)
+                    for x in receipts
+                    if _normalize_receipt(x)
+                ]
+
+                if not receipts:
+                    continue
+
+                deposit_id = staged.get("bank_deposit_id") or _find_bank_deposit_id(data)
+                if not deposit_id:
+                    raise ValueError(
+                        f"找不到 Bank In 主档：{data.get('reference_no') or '-'} / "
+                        f"{data.get('deposit_date') or '-'} / RM{float(data.get('amount') or 0):.2f}"
+                    )
+
+                # 这一批以 Excel 的逐张收条清单为准，先清掉旧的范围推断结果。
+                cur.execute(
+                    "delete from finance_bank_deposit_items where deposit_id=%s",
+                    (deposit_id,),
+                )
+
+                for receipt_no in receipts:
+                    cur.execute(
+                        """
+                        select id, amount
+                        from finance_records
+                        where receipt_no=%s
+                          and record_type='income'
+                          and category='月费'
+                          and coalesce(status, 'confirmed') <> 'cancelled'
+                        order by id desc
+                        limit 1
+                        """,
+                        (receipt_no,),
+                    )
+                    finance_row = cur.fetchone()
+                    if not finance_row:
+                        raise ValueError(
+                            f"Bank In {data.get('reference_no') or '-'} 找不到收条 {receipt_no} 的财政记录"
+                        )
+
+                    cur.execute(
+                        """
+                        insert into finance_bank_deposit_items
+                            (deposit_id, finance_record_id, amount)
+                        values (%s, %s, %s)
+                        on conflict (finance_record_id)
+                        do update set
+                            deposit_id = excluded.deposit_id,
+                            amount = excluded.amount
+                        """,
+                        (deposit_id, finance_row["id"], finance_row.get("amount") or 0),
+                    )
+                    bank_items_linked += 1
+
+                # receipt_from / receipt_to 只作为显示范围，真正关系以 items 为准。
+                cur.execute(
+                    """
+                    update finance_bank_deposits
+                    set receipt_from=%s, receipt_to=%s
+                    where id=%s
+                    """,
+                    (min(receipts), max(receipts), deposit_id),
+                )
+
+                # 导入后自动核对：Bank In 金额必须等于逐张收条合计。
+                cur.execute(
+                    """
+                    select
+                        count(*) as receipt_count,
+                        coalesce(sum(coalesce(i.amount, r.amount, 0)), 0) as linked_amount
+                    from finance_bank_deposit_items i
+                    join finance_records r on r.id = i.finance_record_id
+                    where i.deposit_id = %s
+                    """,
+                    (deposit_id,),
+                )
+                check_row = cur.fetchone() or {}
+                bank_deposits_checked += 1
+                linked_amount = float(check_row.get("linked_amount") or 0)
+                expected_amount = float(data.get("amount") or 0)
+
+                if abs(linked_amount - expected_amount) >= 0.005:
+                    bank_deposit_mismatches += 1
+                    raise ValueError(
+                        f"Bank In 对账不平：{data.get('reference_no') or '-'} / "
+                        f"{data.get('deposit_date') or '-'}，"
+                        f"Bank In RM{expected_amount:.2f}，"
+                        f"收条合计 RM{linked_amount:.2f}，"
+                        f"差额 RM{expected_amount - linked_amount:.2f}，"
+                        f"收条 {', '.join(receipts)}"
+                    )
+
+                cur.execute(
+                    """
+                    update finance_import_rows
+                    set bank_deposit_id=%s
+                    where id=%s
+                    """,
+                    (deposit_id, staged["id"]),
+                )
+
             result_summary = {
                 "processed_rows": processed,
                 "finance_records_added": finance_added,
                 "member_payments_added": member_added,
                 "missing_receipts_filled": receipt_filled,
                 "bank_deposits_added": bank_added,
+                "bank_deposit_items_linked": bank_items_linked,
+                "bank_deposits_checked": bank_deposits_checked,
+                "bank_deposit_mismatches": bank_deposit_mismatches,
                 "duplicates_skipped": skipped,
             }
             cur.execute(
@@ -2254,13 +2853,19 @@ def import_confirm(batch_id: int):
             "member_payments_added": member_added,
             "missing_receipts_filled": receipt_filled,
             "bank_deposits_added": bank_added,
+            "bank_deposit_items_linked": bank_items_linked,
+            "bank_deposits_checked": bank_deposits_checked,
+            "bank_deposit_mismatches": bank_deposit_mismatches,
             "duplicates_skipped": skipped,
         },
         reason="历史Excel智能同步导入确认",
     )
     flash(
         f"导入完成：财政记录 {finance_added}，月费查询新增 {member_added}，"
-        f"补回收条编号 {receipt_filled}，Bank In {bank_added}，重复跳过 {skipped}。",
+        f"补回收条编号 {receipt_filled}，Bank In {bank_added}，"
+        f"Bank In收条连接 {bank_items_linked}，"
+        f"完成对账 {bank_deposits_checked} 批，差异 {bank_deposit_mismatches} 批，"
+        f"重复跳过 {skipped}。",
         "success",
     )
     return redirect(url_for("finance_import.import_preview", batch_id=batch_id))
@@ -2300,7 +2905,12 @@ IMPORT_HOME_HTML = """
 <td>{{ b.ready_rows or 0 }}</td><td>{{ b.warning_rows or 0 }}</td><td>{{ b.duplicate_rows or 0 }}</td><td>{{ b.skipped_rows or 0 }}</td><td>{{ b.review_rows or 0 }}</td><td>{{ b.error_rows or 0 }}</td>
 <td><a class="btn-tool btn-secondary" href="{{ url_for('finance_import.import_preview', batch_id=b.id) }}">查看</a></td></tr>
 {% else %}<tr><td colspan="11">还没有导入记录</td></tr>{% endfor %}</tbody></table></div></div>
-<div class="btn-row"><a class="btn-tool btn-secondary" href="{{ url_for('finance.finance_home') }}">← 返回财政首页</a></div>
+<div class="btn-row">
+    <a class="btn-tool btn-secondary"
+       href="{{ url_for('finance.finance_admin_home') }}">
+        ← 返回资金中心
+    </a>
+</div>
 </div></body></html>
 """
 

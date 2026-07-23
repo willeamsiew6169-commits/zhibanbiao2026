@@ -106,3 +106,20 @@ def dharma_class_manifest():
             "type": "image/png"
         }]
     }
+
+@manifest_bp.route("/finance-manifest.json")
+def finance_manifest():
+    return {
+        "name": "观音堂财政系统",
+        "short_name": "财政",
+        "start_url": "/finance",
+        "scope": "/finance/",
+        "display": "standalone",
+        "background_color": "#fffdf8",
+        "theme_color": "#f4b400",
+        "icons": [{
+            "src": "/static/finance_icon.png?v=1",
+            "sizes": "512x512",
+            "type": "image/png"
+        }]
+    }

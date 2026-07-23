@@ -25,6 +25,35 @@ finance_month_end_bp = Blueprint(
     url_prefix="/finance/month_end"
 )
 
+def get_month_petty_cash_in(ym, fund_account):
+    """
+    读取本月银行提款转入 Petty Cash 的金额。
+
+    finance_cash_movements 规则：
+    account_type = 'cash'
+    movement_type = 'cash_in'
+    """
+
+    # 目前只有 CHE 使用 Petty Cash
+    branch = "CHE"
+
+    row = db_query("""
+        select coalesce(sum(amount), 0) as total
+        from finance_cash_movements
+        where branch = %s
+          and account_type = 'cash'
+          and movement_type = 'cash_in'
+          and to_char(record_date, 'YYYY-MM') = %s
+    """, (
+        branch,
+        ym,
+    ), fetchone=True)
+
+    return float(
+        (row or {}).get("total")
+        or 0
+    )
+
 
 def get_month_cash_income(ym, fund_account):
     row = db_query("""
@@ -38,6 +67,124 @@ def get_month_cash_income(ym, fund_account):
     """, (fund_account, ym), fetchone=True)
 
     return float((row or {}).get("total") or 0)
+
+def get_petty_cash_ledger_rows(
+    ym,
+    fund_account,
+    opening_cash=0,
+):
+    """
+    生成与 Excel 一样的 Petty Cash 流水：
+
+    Date | In | Out | Balance | Itemised
+
+    In：
+    银行提款转入 Petty Cash
+
+    Out：
+    finance_records 内所有现金支出
+    """
+
+    rows = []
+
+    # 1. 本月银行提款转入 Petty Cash
+    cash_in_rows = db_query("""
+        select
+            record_date,
+            amount,
+            coalesce(remarks, '') as remarks,
+            id
+        from finance_cash_movements
+        where branch = 'CHE'
+          and account_type = 'cash'
+          and movement_type = 'cash_in'
+          and to_char(record_date, 'YYYY-MM') = %s
+        order by record_date, id
+    """, (
+        ym,
+    ), fetchall=True) or []
+
+    for row in cash_in_rows:
+        rows.append({
+            "record_date": row.get("record_date"),
+            "in_amount": float(row.get("amount") or 0),
+            "out_amount": 0.0,
+            "itemised": (
+                row.get("remarks")
+                or "GYT Cash In"
+            ),
+            "sort_id": int(row.get("id") or 0),
+            "sort_type": 0,
+        })
+
+    # 2. 本月现金支出
+    expense_rows = db_query("""
+        select
+            record_date,
+            amount,
+            category,
+            sub_category,
+            name,
+            payment_voucher_no,
+            remarks,
+            id
+        from finance_records
+        where record_type = 'expense'
+          and payment_method = '现金'
+          and fund_account = %s
+          and to_char(record_date, 'YYYY-MM') = %s
+          and coalesce(status, 'confirmed') <> 'cancelled'
+        order by record_date, id
+    """, (
+        fund_account,
+        ym,
+    ), fetchall=True) or []
+
+    for row in expense_rows:
+
+        item_parts = [
+            row.get("category"),
+            row.get("sub_category"),
+            row.get("name"),
+            row.get("payment_voucher_no"),
+            row.get("remarks"),
+        ]
+
+        itemised = " / ".join(
+            str(value).strip()
+            for value in item_parts
+            if str(value or "").strip()
+        )
+
+        rows.append({
+            "record_date": row.get("record_date"),
+            "in_amount": 0.0,
+            "out_amount": float(row.get("amount") or 0),
+            "itemised": itemised or "现金支出",
+            "sort_id": int(row.get("id") or 0),
+            "sort_type": 1,
+        })
+
+    # 日期相同：Cash In 先显示，支出随后显示
+    rows.sort(
+        key=lambda row: (
+            row["record_date"],
+            row["sort_type"],
+            row["sort_id"],
+        )
+    )
+
+    balance = float(opening_cash or 0)
+
+    for row in rows:
+        balance += (
+            row["in_amount"]
+            - row["out_amount"]
+        )
+
+        row["balance"] = balance
+
+    return rows
 
 
 def get_month_cash_expense(ym, fund_account):
@@ -121,9 +268,9 @@ def month_end_home():
             <div class="v5-topbar">
                 <a
                     class="v5-back"
-                    href="{{ url_for('finance.finance_home') }}"
+                    href="{{ url_for('finance.finance_admin_home') }}"
                 >
-                    ← 返回财政首页
+                    ← 返回负责人中心
                 </a>
             </div>
 
@@ -773,7 +920,7 @@ def cash_bank_in():
 
                 <div class="summary-box">
                     <div class="summary-label-bank">
-                        本月现金收入
+                        🏦 银行提款
                     </div>
                     <div class="
                         summary-value-bank
@@ -1159,13 +1306,24 @@ def get_cash_reconciliation_summary(
     fund_account,
     opening_cash=None
 ):
+    """
+    Petty Cash 计算完全跟 Excel 一样：
+
+    上月结余
+    + 本月 GYT Cash In
+    - 本月现金支出
+    = 系统应有 Petty Cash
+
+    佛友缴交的现金月费不计算在 Petty Cash 内。
+    """
+
     if opening_cash is None:
         opening_cash = get_previous_closing_cash(
             ym,
             fund_account
         )
 
-    cash_income = get_month_cash_income(
+    petty_cash_in = get_month_petty_cash_in(
         ym,
         fund_account
     )
@@ -1175,24 +1333,33 @@ def get_cash_reconciliation_summary(
         fund_account
     )
 
-    cash_banked_in = get_month_bank_in_total(
-        ym,
-        fund_account
-    )
-
     expected_cash = (
         float(opening_cash or 0)
-        + float(cash_income or 0)
+        + float(petty_cash_in or 0)
         - float(cash_expense or 0)
-        - float(cash_banked_in or 0)
     )
 
     return {
-        "opening_cash": float(opening_cash or 0),
-        "cash_income": float(cash_income or 0),
-        "cash_expense": float(cash_expense or 0),
-        "cash_banked_in": float(cash_banked_in or 0),
-        "expected_cash": float(expected_cash or 0),
+        "opening_cash": float(
+            opening_cash or 0
+        ),
+
+        # 暂时保留旧 key，避免页面和数据库马上报错
+        # 这里现在代表 GYT Cash In，不再代表佛友现金收入
+        "cash_income": float(
+            petty_cash_in or 0
+        ),
+
+        "cash_expense": float(
+            cash_expense or 0
+        ),
+
+        # Petty Cash 不再扣月费 Bank In
+        "cash_banked_in": 0.0,
+
+        "expected_cash": float(
+            expected_cash or 0
+        ),
     }
 
 
@@ -1231,20 +1398,34 @@ def cash_reconciliation():
         select *
         from finance_cash_reconciliation
         where ym = %s
-          and fund_account = %s
+        and fund_account = %s
         limit 1
-    """, (ym, fund_account), fetchone=True)
+    """, (
+        ym,
+        fund_account,
+    ), fetchone=True)
 
-    opening_cash = (
-        float(existing["opening_cash"] or 0)
-        if existing
-        else get_previous_closing_cash(
-            ym,
-            fund_account
+    if existing:
+        opening_cash = float(
+            existing.get("opening_cash")
+            or 0
         )
-    )
+    else:
+        opening_cash = float(
+            get_previous_closing_cash(
+                ym,
+                fund_account
+            )
+            or 0
+        )
 
     summary = get_cash_reconciliation_summary(
+        ym,
+        fund_account,
+        opening_cash
+    )
+
+    ledger_rows = get_petty_cash_ledger_rows(
         ym,
         fund_account,
         opening_cash
@@ -1325,6 +1506,12 @@ def cash_reconciliation():
         )
 
         summary = get_cash_reconciliation_summary(
+            ym,
+            fund_account,
+            opening_cash
+        )
+
+        ledger_rows = get_petty_cash_ledger_rows(
             ym,
             fund_account,
             opening_cash
@@ -1580,6 +1767,41 @@ def cash_reconciliation():
     white-space:nowrap;
 }
 
+.petty-cash-table{
+    width:100%;
+    min-width:850px;
+}
+
+.petty-cash-table th:nth-child(2),
+.petty-cash-table th:nth-child(3),
+.petty-cash-table th:nth-child(4),
+.petty-cash-table td:nth-child(2),
+.petty-cash-table td:nth-child(3),
+.petty-cash-table td:nth-child(4){
+    text-align:right;
+    white-space:nowrap;
+}
+
+.opening-row{
+    background:#f8fafc;
+    font-weight:800;
+}
+
+.money-in{
+    color:#15803d;
+    font-weight:800;
+}
+
+.money-out{
+    color:#b91c1c;
+    font-weight:800;
+}
+
+.money-balance{
+    color:#1d4ed8;
+    font-weight:900;
+}
+
 @media(max-width:700px){
     .filter-grid,
     .form-grid,
@@ -1710,7 +1932,7 @@ def cash_reconciliation():
             <div class="recon-row">
                 <div class="recon-symbol">＋</div>
                 <div class="recon-label">
-                    本月现金收入
+                    🏦 银行提款
                 </div>
                 <div class="recon-value">
                     RM {{ "%.2f"|format(
@@ -1730,19 +1952,7 @@ def cash_reconciliation():
                     ) }}
                 </div>
             </div>
-
-            <div class="recon-row">
-                <div class="recon-symbol">−</div>
-                <div class="recon-label">
-                    已存入银行
-                </div>
-                <div class="recon-value">
-                    RM {{ "%.2f"|format(
-                        summary.cash_banked_in
-                    ) }}
-                </div>
-            </div>
-
+            
             <div class="recon-row expected-row">
                 <div class="recon-symbol">＝</div>
                 <div class="recon-label">
@@ -1756,6 +1966,86 @@ def cash_reconciliation():
             </div>
 
         </div>
+    </div>
+
+    <div class="card">
+
+        <div class="section-title">
+            📋 Petty Cash Balance
+        </div>
+
+        <div class="table-responsive">
+
+            <table class="record-table petty-cash-table">
+
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>In</th>
+                        <th>Out</th>
+                        <th>Balance</th>
+                        <th>Itemised</th>
+                    </tr>
+                </thead>
+
+                <tbody>
+
+                    <tr class="opening-row">
+                        <td>{{ ym }}-01</td>
+                        <td></td>
+                        <td></td>
+                        <td>
+                            RM {{ "%.2f"|format(opening_cash) }}
+                        </td>
+                        <td>
+                            B/F — 上月结余
+                        </td>
+                    </tr>
+
+                    {% for row in ledger_rows %}
+
+                        <tr>
+                            <td>
+                                {{ row.record_date }}
+                            </td>
+
+                            <td class="money-in">
+                                {% if row.in_amount %}
+                                    RM {{ "%.2f"|format(row.in_amount) }}
+                                {% endif %}
+                            </td>
+
+                            <td class="money-out">
+                                {% if row.out_amount %}
+                                    RM {{ "%.2f"|format(row.out_amount) }}
+                                {% endif %}
+                            </td>
+
+                            <td class="money-balance">
+                                RM {{ "%.2f"|format(row.balance) }}
+                            </td>
+
+                            <td>
+                                {{ row.itemised }}
+                            </td>
+                        </tr>
+
+                    {% else %}
+
+                        <tr>
+                            <td colspan="5" class="empty-state">
+                                本月没有 Petty Cash 流水。
+                            </td>
+                        </tr>
+
+                    {% endfor %}
+
+                </tbody>
+
+            </table>
+
+        </div>
+
     </div>
 
     <div class="card">
@@ -2028,6 +2318,8 @@ def cash_reconciliation():
         form_data=form_data,
         difference=difference,
         history=history,
+        ledger_rows=ledger_rows,
+        opening_cash=opening_cash,
         message=message,
         message_type=message_type
     )
@@ -2084,28 +2376,85 @@ def delete_cash_bank_in(deposit_id):
         url_for("finance_month_end.month_end_home")
     )
 
+def get_month_bank_income(
+    ym,
+    fund_account,
+):
+    """
+    读取本月直接进入银行的收入。
 
+    观音堂日常户口：
+    只统计 CHE 月费银行过账。
 
+    STW 日常户口：
+    只统计 STW 月费银行过账。
+    """
 
-def get_month_bank_income(ym, fund_account):
-    row = db_query("""
-        select coalesce(sum(amount), 0) as total
-        from finance_records
-        where record_type = 'income'
-          and fund_account = %s
-          and to_char(record_date, 'YYYY-MM') = %s
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and payment_method in (
-              '银行过账',
-              '支票'
-          )
-    """, (fund_account, ym), fetchone=True)
+    if fund_account == "观音堂日常户口":
+        branch_prefix = "CHE-%"
 
-    return float((row or {}).get("total") or 0)
+    elif fund_account == "STW 日常户口":
+        branch_prefix = "STW-%"
+
+    else:
+        branch_prefix = None
+
+    if branch_prefix:
+
+        row = db_query("""
+            select coalesce(sum(amount), 0) as total
+            from finance_records
+            where record_type = 'income'
+              and category = '月费'
+              and fund_account = %s
+              and member_id ilike %s
+              and to_char(record_date, 'YYYY-MM') = %s
+              and coalesce(status, 'confirmed') <> 'cancelled'
+              and payment_method in (
+                  '银行过账',
+                  '支票',
+                  'ATM',
+                  'TouchNGo',
+                  'DuitNow',
+                  'QR'
+              )
+        """, (
+            fund_account,
+            branch_prefix,
+            ym,
+        ), fetchone=True)
+
+    else:
+
+        row = db_query("""
+            select coalesce(sum(amount), 0) as total
+            from finance_records
+            where record_type = 'income'
+              and fund_account = %s
+              and to_char(record_date, 'YYYY-MM') = %s
+              and coalesce(status, 'confirmed') <> 'cancelled'
+              and payment_method in (
+                  '银行过账',
+                  '支票',
+                  'ATM',
+                  'TouchNGo',
+                  'DuitNow',
+                  'QR'
+              )
+        """, (
+            fund_account,
+            ym,
+        ), fetchone=True)
+
+    return float(
+        (row or {}).get("total")
+        or 0
+    )
 
 
 def get_month_bank_expense(ym, fund_account):
-    row = db_query("""
+
+    direct_row = db_query("""
         select coalesce(sum(amount), 0) as total
         from finance_records
         where record_type = 'expense'
@@ -2114,11 +2463,43 @@ def get_month_bank_expense(ym, fund_account):
           and coalesce(status, 'confirmed') <> 'cancelled'
           and payment_method in (
               '银行过账',
-              '支票'
+              '银行转账',
+              '支票',
+              'Bank',
+              'Bank Transfer',
+              'Online Transfer',
+              'Cheque'
           )
-    """, (fund_account, ym), fetchone=True)
+    """, (
+        fund_account,
+        ym
+    ), fetchone=True)
 
-    return float((row or {}).get("total") or 0)
+    direct_bank_expense = float(
+        (direct_row or {}).get("total") or 0
+    )
+
+    cash_out_total = 0.0
+
+    # 目前银行提款只属于观音堂日常户口
+    if fund_account == "观音堂日常户口":
+
+        movement_row = db_query("""
+            select coalesce(sum(amount), 0) as total
+            from finance_cash_movements
+            where branch = 'CHE'
+              and account_type = 'bank'
+              and movement_type = 'cash_out'
+              and to_char(record_date, 'YYYY-MM') = %s
+        """, (
+            ym,
+        ), fetchone=True)
+
+        cash_out_total = float(
+            (movement_row or {}).get("total") or 0
+        )
+
+    return direct_bank_expense + cash_out_total
 
 
 def get_previous_bank_closing(ym, fund_account):
@@ -3307,28 +3688,47 @@ def export_hq_report():
     methods=["GET", "POST"]
 )
 def month_close():
+    """
+    简化版财政月结：
+    1. 检查 Cash Reconciliation
+    2. 检查 Bank Reconciliation
+    3. 自动计算本月收支与结余
+    4. 一键锁定月份
+    """
 
     if not session.get("finance_login"):
         return redirect(
             url_for("finance.finance_login")
         )
 
+    fund_accounts = [
+        "观音堂日常户口",
+        "总会户口",
+    ]
+
     ym = (
         request.form.get("ym")
         or request.args.get("ym")
         or date.today().strftime("%Y-%m")
-    )
+    ).strip()
 
     fund_account = (
         request.form.get("fund_account")
         or request.args.get("fund_account")
         or "观音堂日常户口"
-    )
+    ).strip()
+
+    if fund_account not in fund_accounts:
+        fund_account = "观音堂日常户口"
 
     message = ""
+    message_type = "danger"
 
     cash_recon = db_query("""
-        select status
+        select
+            status,
+            actual_cash,
+            difference
         from finance_cash_reconciliation
         where ym = %s
           and fund_account = %s
@@ -3336,7 +3736,10 @@ def month_close():
     """, (ym, fund_account), fetchone=True)
 
     bank_recon = db_query("""
-        select status
+        select
+            status,
+            statement_balance,
+            difference
         from finance_bank_reconciliation
         where ym = %s
           and fund_account = %s
@@ -3351,8 +3754,58 @@ def month_close():
         limit 1
     """, (ym, fund_account), fetchone=True)
 
-    if request.method == "POST":
+    previous = db_query("""
+        select closing_balance
+        from finance_month_close
+        where fund_account = %s
+          and ym < %s
+          and status = 'closed'
+        order by ym desc
+        limit 1
+    """, (fund_account, ym), fetchone=True)
 
+    opening_balance = float(
+        (previous or {}).get("closing_balance") or 0
+    )
+
+    income_row = db_query("""
+        select coalesce(sum(amount), 0) as total
+        from finance_records
+        where record_type = 'income'
+          and fund_account = %s
+          and to_char(record_date, 'YYYY-MM') = %s
+          and coalesce(status, 'confirmed') <> 'cancelled'
+    """, (fund_account, ym), fetchone=True)
+
+    expense_row = db_query("""
+        select coalesce(sum(amount), 0) as total
+        from finance_records
+        where record_type = 'expense'
+          and fund_account = %s
+          and to_char(record_date, 'YYYY-MM') = %s
+          and coalesce(status, 'confirmed') <> 'cancelled'
+    """, (fund_account, ym), fetchone=True)
+
+    income = float((income_row or {}).get("total") or 0)
+    expense = float((expense_row or {}).get("total") or 0)
+    closing_balance = opening_balance + income - expense
+
+    cash_done = bool(
+        cash_recon
+        and cash_recon.get("status") == "confirmed"
+    )
+
+    bank_done = bool(
+        bank_recon
+        and bank_recon.get("status") == "confirmed"
+    )
+
+    is_closed = bool(
+        closed
+        and closed.get("status") == "closed"
+    )
+
+    if request.method == "POST":
         closed_by = request.form.get(
             "closed_by",
             ""
@@ -3363,17 +3816,17 @@ def month_close():
             ""
         ).strip()
 
-        if closed and closed.get("status") == "closed":
+        if is_closed:
             message = "这个月份已经完成月结，无需重复关闭。"
 
         elif not closed_by:
             message = "请填写月结负责人。"
 
-        elif not cash_recon or cash_recon.get("status") != "confirmed":
-            message = "Cash Reconciliation 尚未确认。"
+        elif not cash_done:
+            message = "请先完成第 1 步：现金核对。"
 
-        elif not bank_recon or bank_recon.get("status") != "confirmed":
-            message = "Bank Reconciliation 尚未确认。"
+        elif not bank_done:
+            message = "请先完成第 2 步：银行核对。"
 
         else:
             db_query("""
@@ -3381,6 +3834,10 @@ def month_close():
                 (
                     ym,
                     fund_account,
+                    opening_balance,
+                    income,
+                    expense,
+                    closing_balance,
                     cash_reconciliation_status,
                     bank_reconciliation_status,
                     closed_by,
@@ -3391,10 +3848,15 @@ def month_close():
                 values
                 (
                     %s, %s, %s, %s,
+                    %s, %s, %s, %s,
                     %s, %s, 'closed', %s
                 )
                 on conflict (ym, fund_account)
                 do update set
+                    opening_balance = excluded.opening_balance,
+                    income = excluded.income,
+                    expense = excluded.expense,
+                    closing_balance = excluded.closing_balance,
                     cash_reconciliation_status =
                         excluded.cash_reconciliation_status,
                     bank_reconciliation_status =
@@ -3406,11 +3868,15 @@ def month_close():
             """, (
                 ym,
                 fund_account,
+                opening_balance,
+                income,
+                expense,
+                closing_balance,
                 cash_recon.get("status"),
                 bank_recon.get("status"),
                 closed_by,
                 date.today().isoformat(),
-                remarks
+                remarks,
             ))
 
             write_finance_audit(
@@ -3420,14 +3886,23 @@ def month_close():
                 new_value={
                     "ym": ym,
                     "fund_account": fund_account,
-                    "cash_reconciliation_status": cash_recon.get("status"),
-                    "bank_reconciliation_status": bank_recon.get("status"),
+                    "opening_balance": opening_balance,
+                    "income": income,
+                    "expense": expense,
+                    "closing_balance": closing_balance,
+                    "cash_reconciliation_status":
+                        cash_recon.get("status"),
+                    "bank_reconciliation_status":
+                        bank_recon.get("status"),
                     "closed_by": closed_by,
                     "status": "closed",
                     "remarks": remarks,
                 },
                 reason=remarks,
-                actor=closed_by or get_current_finance_user(),
+                actor=(
+                    closed_by
+                    or get_current_finance_user()
+                ),
             )
 
             return redirect(
@@ -3440,7 +3915,22 @@ def month_close():
             )
 
     if request.args.get("saved") == "1":
-        message = "本月财政月结已完成。"
+        message = "本月财政月结已完成，并已锁定本月余额。"
+        message_type = "success"
+
+    # redirect 后重新读取，确保页面显示最新状态
+    closed = db_query("""
+        select *
+        from finance_month_close
+        where ym = %s
+          and fund_account = %s
+        limit 1
+    """, (ym, fund_account), fetchone=True)
+
+    is_closed = bool(
+        closed
+        and closed.get("status") == "closed"
+    )
 
     return render_template_string("""
 <!doctype html>
@@ -3448,58 +3938,147 @@ def month_close():
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Month Close</title>
+<title>财政月结</title>
 <link rel="stylesheet"
       href="{{ url_for('static', filename='css/toolbox.css') }}">
+
 <style>
-.close-page{max-width:820px}
-.close-header{
+.month-close-page{max-width:920px}
+.month-close-hero{
     background:linear-gradient(135deg,#334155,#0f172a);
-    color:#fff;padding:28px;border-radius:22px;margin-bottom:20px
+    color:#fff;
+    padding:28px;
+    border-radius:22px;
+    margin-bottom:20px;
 }
-.close-header h1{margin:0 0 8px}
-.close-header p{margin:0;opacity:.92}
-.status-line{
-    display:flex;justify-content:space-between;gap:12px;
-    padding:15px;border:1px solid #e2e8f0;
-    border-radius:14px;margin-bottom:10px
+.month-close-hero h1{margin:0 0 8px;font-size:32px}
+.month-close-hero p{margin:0;opacity:.9;line-height:1.6}
+.month-close-filter{
+    display:grid;
+    grid-template-columns:1fr 1fr auto;
+    gap:14px;
+    align-items:end;
 }
-.ok{color:#15803d;font-weight:900}
-.wait{color:#b45309;font-weight:900}
+.step-list{display:grid;gap:12px}
+.step-card{
+    display:grid;
+    grid-template-columns:54px 1fr auto;
+    align-items:center;
+    gap:14px;
+    padding:17px;
+    border:1px solid #e2e8f0;
+    border-radius:16px;
+    background:#fff;
+}
+.step-number{
+    width:48px;
+    height:48px;
+    border-radius:50%;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#eef2ff;
+    color:#3730a3;
+    font-size:21px;
+    font-weight:900;
+}
+.step-title{font-size:19px;font-weight:900;color:#1f2937}
+.step-desc{margin-top:4px;color:#667085;font-size:14px}
+.step-status{
+    min-width:92px;
+    text-align:center;
+    padding:8px 11px;
+    border-radius:999px;
+    font-size:13px;
+    font-weight:900;
+}
+.status-ok{background:#dcfce7;color:#166534}
+.status-wait{background:#fef3c7;color:#92400e}
+.status-locked{background:#dbeafe;color:#1e40af}
+.amount-grid{
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:13px;
+}
+.amount-box{
+    padding:18px;
+    border:1px solid #e2e8f0;
+    border-radius:16px;
+    background:#f8fafc;
+}
+.amount-label{color:#64748b;font-size:14px}
+.amount-value{margin-top:7px;font-size:26px;font-weight:900}
+.amount-closing{
+    grid-column:1/-1;
+    background:#eff6ff;
+    border-color:#bfdbfe;
+}
+.amount-closing .amount-value{color:#1d4ed8;font-size:31px}
+.close-form-grid{
+    display:grid;
+    grid-template-columns:1fr;
+    gap:14px;
+}
+.locked-box{
+    padding:22px;
+    border-radius:16px;
+    background:#f0fdf4;
+    border:1px solid #86efac;
+    color:#166534;
+    text-align:center;
+    font-weight:900;
+    font-size:18px;
+}
+@media(max-width:720px){
+    .month-close-filter{grid-template-columns:1fr}
+    .step-card{grid-template-columns:48px 1fr}
+    .step-status{grid-column:1/-1;margin-left:62px}
+    .amount-grid{grid-template-columns:1fr}
+    .amount-closing{grid-column:auto}
+}
 </style>
 </head>
-<body>
-<div class="page close-page">
 
-    <div class="close-header">
-        <h1>🔒 Month Close</h1>
-        <p>确认现金与银行对账完成后，登记本月结账。</p>
+<body>
+<div class="page month-close-page">
+
+    <div class="month-close-hero">
+        <h1>📒 财政月结</h1>
+        <p>
+            不需要自己判断顺序。系统会检查现金、银行对账，
+            全部完成后才可一键锁定月份。
+        </p>
     </div>
 
     {% if message %}
-        <div class="alert alert-success">{{ message }}</div>
+        <div class="alert
+            {% if message_type == 'success' %}
+                alert-success
+            {% else %}
+                alert-danger
+            {% endif %}
+        ">
+            {{ message }}
+        </div>
     {% endif %}
 
     <div class="card">
-        <form method="get">
+        <form method="get" class="month-close-filter">
             <div class="form-group">
-                <label class="form-label">月份</label>
+                <label class="form-label">月结月份</label>
                 <input class="form-input"
-                       name="ym"
                        type="month"
-                       value="{{ ym }}">
+                       name="ym"
+                       value="{{ ym }}"
+                       required>
             </div>
 
             <div class="form-group">
                 <label class="form-label">基金户口</label>
                 <select class="form-input" name="fund_account">
-                    {% for account in [
-                        '观音堂日常户口',
-                        '总会户口'
-                    ] %}
+                    {% for account in fund_accounts %}
                         <option value="{{ account }}"
-                            {% if fund_account == account %}selected{% endif %}
-                        >
+                            {% if account == fund_account %}selected{% endif %}>
                             {{ account }}
                         </option>
                     {% endfor %}
@@ -3507,73 +4086,157 @@ def month_close():
             </div>
 
             <button class="btn-tool btn-primary" type="submit">
-                查看
+                查看月份
             </button>
         </form>
     </div>
 
     <div class="card">
-        <div class="status-line">
-            <span>Cash Reconciliation</span>
-            <span class="
-                {% if cash_recon and cash_recon.status == 'confirmed' %}
-                    ok
-                {% else %}
-                    wait
-                {% endif %}
-            ">
-                {{ cash_recon.status if cash_recon else "未完成" }}
-            </span>
-        </div>
+        <div class="section-title">按顺序完成</div>
 
-        <div class="status-line">
-            <span>Bank Reconciliation</span>
-            <span class="
-                {% if bank_recon and bank_recon.status == 'confirmed' %}
-                    ok
-                {% else %}
-                    wait
-                {% endif %}
-            ">
-                {{ bank_recon.status if bank_recon else "未完成" }}
-            </span>
-        </div>
+        <div class="step-list">
+            <div class="step-card">
+                <div class="step-number">1</div>
+                <div>
+                    <div class="step-title">核对现金在手</div>
+                    <div class="step-desc">
+                        点算实际现金，确认系统应有现金是否一致。
+                    </div>
+                </div>
+                <div class="step-status
+                    {% if cash_done %}status-ok{% else %}status-wait{% endif %}">
+                    {% if cash_done %}✅ 已完成{% else %}待处理{% endif %}
+                </div>
+            </div>
 
-        <div class="status-line">
-            <span>Month Close</span>
-            <span class="{% if closed %}ok{% else %}wait{% endif %}">
-                {{ closed.status if closed else "未结账" }}
-            </span>
+            {% if not cash_done and not is_closed %}
+                <a class="btn-tool btn-primary"
+                   href="{{ url_for(
+                       'finance_month_end.cash_reconciliation',
+                       ym=ym,
+                       fund_account=fund_account
+                   ) }}">
+                    去完成第 1 步
+                </a>
+            {% endif %}
+
+            <div class="step-card">
+                <div class="step-number">2</div>
+                <div>
+                    <div class="step-title">核对银行月结单</div>
+                    <div class="step-desc">
+                        输入 Statement Ending Balance，确认银行差异。
+                    </div>
+                </div>
+                <div class="step-status
+                    {% if bank_done %}status-ok{% else %}status-wait{% endif %}">
+                    {% if bank_done %}✅ 已完成{% else %}待处理{% endif %}
+                </div>
+            </div>
+
+            {% if cash_done and not bank_done and not is_closed %}
+                <a class="btn-tool btn-primary"
+                   href="{{ url_for(
+                       'finance_month_end.bank_reconciliation',
+                       ym=ym,
+                       fund_account=fund_account
+                   ) }}">
+                    去完成第 2 步
+                </a>
+            {% endif %}
+
+            <div class="step-card">
+                <div class="step-number">3</div>
+                <div>
+                    <div class="step-title">锁定本月</div>
+                    <div class="step-desc">
+                        保存期初、收入、支出和期末结余，完成月结。
+                    </div>
+                </div>
+                <div class="step-status
+                    {% if is_closed %}status-locked{% else %}status-wait{% endif %}">
+                    {% if is_closed %}🔒 已锁定{% else %}待月结{% endif %}
+                </div>
+            </div>
         </div>
     </div>
 
     <div class="card">
-        <form method="post">
-            <input type="hidden" name="ym" value="{{ ym }}">
-            <input type="hidden" name="fund_account" value="{{ fund_account }}">
+        <div class="section-title">本月结余预览</div>
 
-            <div class="form-group">
-                <label class="form-label">月结负责人</label>
-                <input class="form-input"
-                       name="closed_by"
-                       value="{{ closed.closed_by if closed else '' }}"
-                       required>
+        <div class="amount-grid">
+            <div class="amount-box">
+                <div class="amount-label">上月结余</div>
+                <div class="amount-value">
+                    RM {{ "%.2f"|format(opening_balance) }}
+                </div>
             </div>
 
-            <div class="form-group">
-                <label class="form-label">备注</label>
-                <textarea class="form-input"
-                          name="remarks"
-                          rows="4">{{ closed.remarks if closed else '' }}</textarea>
+            <div class="amount-box">
+                <div class="amount-label">本月收入</div>
+                <div class="amount-value">
+                    RM {{ "%.2f"|format(income) }}
+                </div>
             </div>
 
-            <button class="btn-tool btn-success"
-                    type="submit"
-                    style="width:100%;"
-                    onclick="return confirm('确定完成本月财政月结？');">
-                ✅ 完成本月结账
-            </button>
-        </form>
+            <div class="amount-box">
+                <div class="amount-label">本月支出</div>
+                <div class="amount-value">
+                    RM {{ "%.2f"|format(expense) }}
+                </div>
+            </div>
+
+            <div class="amount-box amount-closing">
+                <div class="amount-label">本月期末结余</div>
+                <div class="amount-value">
+                    RM {{ "%.2f"|format(closing_balance) }}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        {% if is_closed %}
+            <div class="locked-box">
+                🔒 {{ ym }} 已完成月结<br>
+                负责人：{{ closed.closed_by or '-' }}
+            </div>
+        {% else %}
+            <form method="post" class="close-form-grid">
+                <input type="hidden" name="ym" value="{{ ym }}">
+                <input type="hidden"
+                       name="fund_account"
+                       value="{{ fund_account }}">
+
+                <div class="form-group">
+                    <label class="form-label">月结负责人</label>
+                    <input class="form-input"
+                           name="closed_by"
+                           value="{{ current_user }}"
+                           required>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">备注（可不填）</label>
+                    <textarea class="form-input"
+                              name="remarks"
+                              rows="3"></textarea>
+                </div>
+
+                <button class="btn-tool btn-success"
+                        type="submit"
+                        {% if not cash_done or not bank_done %}disabled{% endif %}
+                        onclick="return confirm(
+                            '确定锁定 {{ ym }}？月结后本月资料不可再修改。'
+                        );">
+                    {% if cash_done and bank_done %}
+                        ✅ 完成本月月结
+                    {% else %}
+                        请先完成上面的核对
+                    {% endif %}
+                </button>
+            </form>
+        {% endif %}
     </div>
 
     <div class="btn-row">
@@ -3584,6 +4247,11 @@ def month_close():
            ) }}">
             ← 返回财政月结
         </a>
+
+        <a class="btn-tool btn-primary"
+           href="{{ url_for('finance.finance_admin_home') }}">
+            返回负责人中心
+        </a>
     </div>
 
 </div>
@@ -3592,8 +4260,16 @@ def month_close():
     """,
         ym=ym,
         fund_account=fund_account,
-        cash_recon=cash_recon,
-        bank_recon=bank_recon,
+        fund_accounts=fund_accounts,
+        cash_done=cash_done,
+        bank_done=bank_done,
+        is_closed=is_closed,
         closed=closed,
-        message=message
+        opening_balance=opening_balance,
+        income=income,
+        expense=expense,
+        closing_balance=closing_balance,
+        current_user=get_current_finance_user() or "",
+        message=message,
+        message_type=message_type,
     )

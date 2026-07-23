@@ -2708,7 +2708,11 @@ def finance_upload():
                                 # 2. 会员编号
                                 # =========================
                                 member_no = int(row["编号 No/"])
-                                member_id = f"CHE-{member_no}"
+
+                                if branch == "STW":
+                                    member_id = f"STW-{member_no}"
+                                else:
+                                    member_id = f"CHE-{member_no}"
 
                                 # =========================
                                 # 3. 会员主档

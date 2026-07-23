@@ -105,33 +105,38 @@ def json_dumps_safe(value: Any) -> str:
     return json.dumps(json_safe_value(value), ensure_ascii=False, sort_keys=True)
 
 
-def get_month_close_record(record_date: Any, fund_account: str | None = None):
+def get_month_close_record(
+    record_date: Any,
+    fund_account: str = "观音堂日常户口",
+):
+    """
+    读取指定月份、指定户口已经完成的月结记录。
+
+    record_date 支持：
+    - "2026-07"
+    - "2026-07-15"
+    - date / datetime
+
+    默认读取：
+    - 观音堂日常户口
+    """
+
     ym = get_finance_ym(record_date)
-    if fund_account:
-        return db_query(
-            """
-            select *
-            from finance_month_close
-            where ym = %s
-              and fund_account = %s
-              and status = 'closed'
-            order by id desc
-            limit 1
-            """,
-            (ym, fund_account),
-            fetchone=True,
-        )
 
     return db_query(
         """
         select *
         from finance_month_close
         where ym = %s
+          and fund_account = %s
           and status = 'closed'
         order by id desc
         limit 1
         """,
-        (ym,),
+        (
+            ym,
+            fund_account,
+        ),
         fetchone=True,
     )
 

@@ -26,6 +26,7 @@ from db import db_query, get_conn
 from library_web import library_bp
 from reading_web import reading_bp
 
+from finance_v7 import finance_v7_bp
 from finance_web import finance_bp
 import finance_export
 
@@ -35,6 +36,7 @@ from lunar_rules import get_special_day_info
 from dharma_class_web import dharma_class_bp
 from schedule.schedule_web import schedule_bp
 from datetime import datetime, date, timedelta
+from finance_engine import finance_engine_api_bp
 from finance_month_end import finance_month_end_bp
 from finance_audit import finance_audit_bp
 from flask import (
@@ -108,32 +110,19 @@ ATTENDANCE_HEADERS = [
 app = Flask(__name__)
 app.secret_key = "change-this-simple-secret"
 app.permanent_session_lifetime = timedelta(hours=2)
-app.register_blueprint(finance_bp)
-print("\n===== 实际 Finance 首页来源 =====")
-
-for rule in app.url_map.iter_rules():
-    if str(rule) == "/finance/":
-        func = app.view_functions.get(rule.endpoint)
-        code = getattr(func, "__code__", None)
-
-        print("网址：", rule)
-        print("Endpoint：", rule.endpoint)
-        print("模块：", getattr(func, "__module__", "unknown"))
-        print("文件：", code.co_filename if code else "unknown")
-        print("函数：", getattr(func, "__name__", "unknown"))
-
-print("================================\n")
+app.register_blueprint(finance_engine_api_bp)
 app.register_blueprint(finance_month_end_bp)
 app.register_blueprint(finance_import_bp)
 app.register_blueprint(finance_audit_bp)
 app.register_blueprint(dharma_class_bp)
+app.register_blueprint(finance_v7_bp)
 app.register_blueprint(schedule_bp)
 app.register_blueprint(manifest_bp)
+app.register_blueprint(finance_bp)
 app.register_blueprint(reading_bp)
 app.register_blueprint(library_bp)
 app.register_blueprint(member_bp)
 app.register_blueprint(admin_bp)
-
 
 
 

@@ -99,6 +99,7 @@ YOUTH_GROUP_TEACHERS = [
 LOW_GROUP_TEACHERS = [
     "陈映如",
     "黄丽萍",
+    "许愫芩",
     "伍蔚枋",
 ]
 
@@ -1777,7 +1778,32 @@ def class_attendance():
             # =========================================================
             # 读取学生和点名状态
             # =========================================================
-            cur.execute("""
+            today = datetime.now(
+                ZoneInfo("Asia/Kuala_Lumpur")
+            ).date()
+
+            if selected_date == today:
+
+                where_sql = """
+                    where
+                        s.status='active'
+                        and s.branch='CHE'
+                        and s.group_id=%s
+                """
+
+            else:
+
+                where_sql = """
+                    where
+                        s.branch='CHE'
+                        and s.group_id=%s
+                        and (
+                            s.status='active'
+                            or a.student_id is not null
+                        )
+                """
+
+            cur.execute(f"""
                 select
                     s.id,
                     s.name,
@@ -1799,12 +1825,10 @@ def class_attendance():
 
                 left join dharma_attendance a
                     on a.student_id = s.id
-                   and a.class_date = %s
-                   and a.branch = 'CHE'
+                and a.class_date = %s
+                and a.branch = 'CHE'
 
-                where s.status = 'active'
-                  and s.branch = 'CHE'
-                  and s.group_id = %s
+                {where_sql}
 
                 order by
                     s.birth_year desc nulls last,
@@ -3541,11 +3565,11 @@ def class_lessons():
                     l.group_id,
                     l.teacher_name,
                     l.topic,
-                    l.material,
                     l.content,
-                    l.remark,
-                    l.created_at,
+                    coalesce(l.class_status, 'normal') as class_status,
+                    coalesce(l.class_status_reason, '') as class_status_reason,
                     g.name as group_name,
+                    g.sort_order as group_sort_order,
 
                     (
                         select count(*)
@@ -3717,6 +3741,27 @@ def class_lessons():
     text-align: center;
     font-size: 18px;
     font-weight: 700;
+}
+                                  
+.lesson-status-normal{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    font-weight:700;
+    color:#18794e;
+}
+
+.lesson-status-holiday{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    font-weight:800;
+    color:#9a6700;
+}
+
+.lesson-status-reason{
+    color:#666;
+    font-weight:600;
 }
 
 @media (max-width: 650px) {
@@ -3928,9 +3973,24 @@ def class_lessons():
                             {{ lesson.teacher_name or "—" }}
                         </div>
 
-                        <div>
-                            📚 教材／资源：
-                            {{ lesson.material or "—" }}
+                        <div class="lesson-status">
+
+                            {% if lesson.class_status == "holiday" %}
+
+                                🛕 <strong>佛学班休课</strong>
+
+                                {% if lesson.class_status_reason %}
+                                    <span class="muted">
+                                        （{{ lesson.class_status_reason }}）
+                                    </span>
+                                {% endif %}
+
+                            {% else %}
+
+                                🟢 <strong>正常上课</strong>
+
+                            {% endif %}
+
                         </div>
 
                     </div>
@@ -5874,26 +5934,34 @@ def class_students_add():
     methods=["GET", "POST"]
 )
 def class_students_edit(student_id):
-    
-    current_year = datetime.now(
+
+    malaysia_now = datetime.now(
         ZoneInfo("Asia/Kuala_Lumpur")
-    ).year
+    )
+
+    current_year = malaysia_now.year
+    status_date = malaysia_now.date()
 
     with get_conn() as conn:
         with conn.cursor(
             cursor_factory=RealDictCursor
         ) as cur:
 
+            # =========================================================
             # 读取可用组别
+            # =========================================================
             cur.execute("""
                 select id, name
                 from dharma_class_groups
                 where is_active = true
                 order by sort_order, id
             """)
+
             groups = cur.fetchall()
 
+            # =========================================================
             # 读取学生资料
+            # =========================================================
             cur.execute("""
                 select *
                 from dharma_students
@@ -5901,16 +5969,28 @@ def class_students_edit(student_id):
             """, (student_id,))
 
             student = cur.fetchone()
-            original_student = dict(student) if student else None
+
+            original_student = (
+                dict(student)
+                if student
+                else None
+            )
 
             if not student:
-                flash("找不到这个学生。", "bad")
+                flash(
+                    "找不到这个学生。",
+                    "bad"
+                )
+
                 return redirect(
                     url_for(
                         "dharma_class.class_students"
                     )
                 )
 
+            # =========================================================
+            # POST
+            # =========================================================
             if request.method == "POST":
 
                 action = request.form.get(
@@ -5918,15 +5998,121 @@ def class_students_edit(student_id):
                     "save"
                 ).strip()
 
-                # 暂停学生
-                if action == "inactive":
+                # -----------------------------------------------------
+                # 暂停 / 恢复学生
+                # -----------------------------------------------------
+                status_action_map = {
+                    "inactive": "paused",   # 兼容旧按钮
+                    "paused": "paused",
+                    "pause": "paused",
+                    "active": "active",
+                    "restore": "active",
+                }
 
+                if action in status_action_map:
+
+                    new_status = status_action_map[action]
+
+                    old_status = (
+                        original_student.get("status")
+                        or "active"
+                    )
+
+                    # 兼容旧状态 inactive
+                    normalized_old_status = (
+                        "paused"
+                        if old_status == "inactive"
+                        else old_status
+                    )
+
+                    # 已经是相同状态
+                    if normalized_old_status == new_status:
+
+                        # 顺便把旧 inactive 正式改成 paused
+                        if old_status == "inactive":
+                            cur.execute("""
+                                update dharma_students
+                                set status = 'paused'
+                                where id = %s
+                            """, (student_id,))
+
+                            conn.commit()
+
+                        if new_status == "paused":
+                            flash(
+                                "这位学生目前已经是暂停状态。",
+                                "good"
+                            )
+                        else:
+                            flash(
+                                "这位学生目前已经是在读状态。",
+                                "good"
+                            )
+
+                        return redirect(
+                            url_for(
+                                "dharma_class.class_students_edit",
+                                student_id=student_id
+                            )
+                        )
+
+                    # 1. 更新学生目前状态
                     cur.execute("""
                         update dharma_students
-                        set status = 'inactive'
+                        set status = %s
                         where id = %s
-                    """, (student_id,))
+                    """, (
+                        new_status,
+                        student_id
+                    ))
 
+                    # 2. 关闭目前尚未结束的状态历史
+                    cur.execute("""
+                        update dharma_student_status_history
+                        set end_date = %s
+                        where student_id = %s
+                          and end_date is null
+                    """, (
+                        status_date,
+                        student_id
+                    ))
+
+                    # 3. 新增新的目前状态
+                    cur.execute("""
+                        insert into dharma_student_status_history
+                        (
+                            branch,
+                            student_id,
+                            status,
+                            start_date,
+                            end_date,
+                            reason,
+                            changed_by
+                        )
+                        values
+                        (
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            null,
+                            %s,
+                            %s
+                        )
+                    """, (
+                        original_student.get("branch") or "CHE",
+                        student_id,
+                        new_status,
+                        status_date,
+                        (
+                            "学生暂停佛学班"
+                            if new_status == "paused"
+                            else "学生恢复上课"
+                        ),
+                        "管理员"
+                    ))
+
+                    # 4. 审计记录
                     write_dharma_audit_log(
                         cur,
                         actor_name="管理员",
@@ -5937,13 +6123,22 @@ def class_students_edit(student_id):
                         student_name=original_student.get("name"),
                         group_id=original_student.get("group_id"),
                         field_name="student_status",
-                        old_value=original_student.get("status"),
-                        new_value="inactive",
+                        old_value=old_status,
+                        new_value=new_status,
                     )
 
                     conn.commit()
 
-                    flash("学生已暂停。", "good")
+                    if new_status == "paused":
+                        flash(
+                            "学生已暂停，过去的点名及功课记录仍然保留。",
+                            "good"
+                        )
+                    else:
+                        flash(
+                            "学生已恢复上课，并会重新出现在点名名单。",
+                            "good"
+                        )
 
                     return redirect(
                         url_for(
@@ -5951,8 +6146,9 @@ def class_students_edit(student_id):
                         )
                     )
 
-                # 读取表单资料
-                
+                # =====================================================
+                # 保存学生基本资料
+                # =====================================================
                 name = request.form.get(
                     "name",
                     ""
@@ -6005,8 +6201,7 @@ def class_students_edit(student_id):
                     else None
                 )
 
-                # 将刚提交的资料放回 student
-                # 验证失败时，页面会保留用户刚输入的内容
+                # 验证失败时保留输入
                 student["name"] = name
                 student["english_name"] = english_name
                 student["gender"] = gender
@@ -6016,7 +6211,9 @@ def class_students_edit(student_id):
                 student["group_id"] = group_id_text
                 student["remark"] = remark
 
+                # -----------------------------------------------------
                 # 验证资料
+                # -----------------------------------------------------
                 if not name:
                     flash(
                         "学生姓名必须填写。",
@@ -6088,6 +6285,14 @@ def class_students_edit(student_id):
                     }
 
                     for field_name, new_value in student_changes.items():
+
+                        old_value = original_student.get(
+                            field_name
+                        )
+
+                        if old_value == new_value:
+                            continue
+
                         write_dharma_audit_log(
                             cur,
                             actor_name="管理员",
@@ -6098,7 +6303,7 @@ def class_students_edit(student_id):
                             student_name=name,
                             group_id=group_id,
                             field_name=field_name,
-                            old_value=original_student.get(field_name),
+                            old_value=old_value,
                             new_value=new_value,
                         )
 
@@ -6114,7 +6319,7 @@ def class_students_edit(student_id):
                             "dharma_class.class_students"
                         )
                     )
-
+            
     return render_template_string("""
 <!doctype html>
 <html lang="zh">
@@ -7386,19 +7591,27 @@ def class_records():
 
             cur.execute(f"""
                 select
+                    s.student_no,
                     s.name,
                     s.english_name,
                     g.name as group_name,
                     a.status,
+                    a.absence_reason,
                     a.remark,
                     a.marked_by,
                     a.marked_at
                 from dharma_attendance a
-                join dharma_students s on s.id = a.student_id
-                left join dharma_class_groups g on g.id = s.group_id
+                join dharma_students s
+                    on s.id = a.student_id
+                left join dharma_class_groups g
+                    on g.id = s.group_id
                 where a.class_date = %s
+                and a.branch = 'CHE'
                 {where_group}
-                order by g.sort_order, s.name
+                order by
+                    g.sort_order,
+                    s.student_no nulls last,
+                    s.name
             """, params)
 
             records = cur.fetchall()
@@ -7487,7 +7700,37 @@ def class_records():
                                     {{ r.status }}
                                 {% endif %}
                             </td>
-                            <td>{{ r.remark or "-" }}</td>
+                            <td>
+                                {% if r.status in ("absent", "leave") %}
+                                    {% if r.absence_reason %}
+                                        {% if r.absence_reason == "生病" %}
+                                            🤒 生病
+                                        {% elif r.absence_reason == "学校活动" %}
+                                            🏫 学校活动
+                                        {% elif r.absence_reason == "考试" %}
+                                            📝 考试
+                                        {% elif r.absence_reason == "旅游" %}
+                                            ✈️ 旅游
+                                        {% elif r.absence_reason == "家里有事" %}
+                                            🏠 家里有事
+                                        {% elif r.absence_reason == "回家乡" %}
+                                            🚗 回家乡
+                                        {% elif r.absence_reason == "未通知" %}
+                                            ❓ 未通知
+                                        {% else %}
+                                            {{ r.absence_reason }}
+                                        {% endif %}
+                                    {% elif r.remark %}
+                                        {{ r.remark }}
+                                    {% else %}
+                                        未填写原因
+                                    {% endif %}
+                                {% elif r.remark %}
+                                    {{ r.remark }}
+                                {% else %}
+                                    -
+                                {% endif %}
+                            </td>
                             <td>{{ r.marked_by or "-" }}</td>
                             <td>{{ r.marked_at or "-" }}</td>
                         </tr>
@@ -9691,40 +9934,71 @@ def class_export_scripture_homework():
 @dharma_class_bp.route("/promote", methods=["GET", "POST"])
 def class_promote():
 
-    target_year = request.values.get("target_year") or str(date.today().year + 1)
+    malaysia_today = datetime.now(
+        ZoneInfo("Asia/Kuala_Lumpur")
+    ).date()
+
+    target_year = (
+        request.values.get("target_year")
+        or str(malaysia_today.year + 1)
+    )
 
     with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with conn.cursor(
+            cursor_factory=RealDictCursor
+        ) as cur:
 
+            # =========================================================
+            # 读取组别
+            # =========================================================
             cur.execute("""
-                select id, name, sort_order
+                select
+                    id,
+                    name,
+                    sort_order
                 from dharma_class_groups
                 where is_active = true
                 order by sort_order, id
             """)
             groups = cur.fetchall()
 
+            # =========================================================
+            # 只读取目前在读学生
+            # =========================================================
             cur.execute("""
                 select
                     s.id,
                     s.name,
                     s.english_name,
                     s.group_id,
+                    s.branch,
+                    s.status,
                     g.name as group_name
                 from dharma_students s
-                join dharma_class_groups g on g.id = s.group_id
+                join dharma_class_groups g
+                    on g.id = s.group_id
                 where s.status = 'active'
-                order by g.sort_order, s.name
+                  and s.branch = 'CHE'
+                order by
+                    g.sort_order,
+                    s.name
             """)
             students = cur.fetchall()
 
+            # =========================================================
+            # 执行升班
+            # =========================================================
             if request.method == "POST":
 
                 updated = 0
-                inactive = 0
+                paused_count = 0
 
                 for s in students:
-                    new_value = request.form.get(f"new_group_{s['id']}")
+
+                    new_value = request.form.get(
+                        f"new_group_{s['id']}",
+                        ""
+                    ).strip()
 
                     if not new_value:
                         continue
@@ -9732,32 +10006,128 @@ def class_promote():
                     if new_value == "same":
                         continue
 
-                    if new_value == "inactive":
+                    # -------------------------------------------------
+                    # 暂停学生
+                    # -------------------------------------------------
+                    if new_value == "paused":
+
                         cur.execute("""
                             update dharma_students
-                            set status = 'inactive'
+                            set status = 'paused'
                             where id = %s
-                        """, (s["id"],))
-                        inactive += 1
+                        """, (
+                            s["id"],
+                        ))
+
+                        # 关闭目前状态历史
+                        cur.execute("""
+                            update dharma_student_status_history
+                            set end_date = %s
+                            where student_id = %s
+                              and end_date is null
+                        """, (
+                            malaysia_today,
+                            s["id"]
+                        ))
+
+                        # 新增暂停状态历史
+                        cur.execute("""
+                            insert into dharma_student_status_history
+                            (
+                                branch,
+                                student_id,
+                                status,
+                                start_date,
+                                end_date,
+                                reason,
+                                changed_by
+                            )
+                            values
+                            (
+                                %s,
+                                %s,
+                                'paused',
+                                %s,
+                                null,
+                                %s,
+                                %s
+                            )
+                        """, (
+                            s.get("branch") or "CHE",
+                            s["id"],
+                            malaysia_today,
+                            f"{target_year} 年度升班时暂停",
+                            "管理员"
+                        ))
+
+                        write_dharma_audit_log(
+                            cur,
+                            actor_name="管理员",
+                            action_type="update",
+                            entity_type="student",
+                            entity_id=s["id"],
+                            student_id=s["id"],
+                            student_name=s["name"],
+                            group_id=s["group_id"],
+                            field_name="student_status",
+                            old_value=s.get("status") or "active",
+                            new_value="paused",
+                        )
+
+                        paused_count += 1
                         continue
 
-                    new_group_id = int(new_value)
+                    # -------------------------------------------------
+                    # 更换组别
+                    # -------------------------------------------------
+                    try:
+                        new_group_id = int(new_value)
+                    except (TypeError, ValueError):
+                        continue
 
                     if new_group_id != s["group_id"]:
+
                         cur.execute("""
                             update dharma_students
                             set group_id = %s
                             where id = %s
-                        """, (new_group_id, s["id"]))
+                        """, (
+                            new_group_id,
+                            s["id"]
+                        ))
+
+                        write_dharma_audit_log(
+                            cur,
+                            actor_name="管理员",
+                            action_type="update",
+                            entity_type="student",
+                            entity_id=s["id"],
+                            student_id=s["id"],
+                            student_name=s["name"],
+                            group_id=new_group_id,
+                            field_name="group_id",
+                            old_value=s["group_id"],
+                            new_value=new_group_id,
+                        )
+
                         updated += 1
 
                 conn.commit()
 
                 flash(
-                    f"{target_year} 年度升班完成：更新组别 {updated} 位，暂停 {inactive} 位。",
+                    (
+                        f"{target_year} 年度升班完成："
+                        f"更新组别 {updated} 位，"
+                        f"暂停 {paused_count} 位。"
+                    ),
                     "good"
                 )
-                return redirect(url_for("dharma_class.class_students"))
+
+                return redirect(
+                    url_for(
+                        "dharma_class.class_students"
+                    )
+                )
 
     return render_template_string("""
 <!doctype html>
@@ -9774,8 +10144,10 @@ def class_promote():
 
     <div class="card">
         <h1 class="page-title">🎓 年度升班</h1>
+
         <p class="page-subtitle">
-            老师可逐位选择新组别。没有要更动的学生，保留「保持原组」即可。
+            老师可逐位选择新组别。
+            没有要更动的学生，保留「保持原组」即可。
         </p>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
@@ -9789,11 +10161,19 @@ def class_promote():
         <form method="get">
             <div class="form-group">
                 <label class="form-label">目标学年</label>
-                <input class="form-input" name="target_year" value="{{ target_year }}">
+
+                <input
+                    class="form-input"
+                    name="target_year"
+                    value="{{ target_year }}"
+                >
             </div>
 
             <div class="btn-row">
-                <button class="btn-tool btn-primary" type="submit">
+                <button
+                    class="btn-tool btn-primary"
+                    type="submit"
+                >
                     🔍 查看学生
                 </button>
             </div>
@@ -9805,10 +10185,16 @@ def class_promote():
 
         {% if students %}
         <form method="post">
-            <input type="hidden" name="target_year" value="{{ target_year }}">
+
+            <input
+                type="hidden"
+                name="target_year"
+                value="{{ target_year }}"
+            >
 
             <div class="table-responsive">
                 <table class="record-table">
+
                     <thead>
                         <tr>
                             <th>姓名</th>
@@ -9817,21 +10203,36 @@ def class_promote():
                             <th>新组别</th>
                         </tr>
                     </thead>
+
                     <tbody>
                         {% for s in students %}
                         <tr>
                             <td>{{ s.name }}</td>
                             <td>{{ s.english_name or "-" }}</td>
                             <td>{{ s.group_name }}</td>
+
                             <td>
-                                <select class="form-input" name="new_group_{{ s.id }}">
-                                    <option value="same">保持原组</option>
+                                <select
+                                    class="form-input"
+                                    name="new_group_{{ s.id }}"
+                                >
+                                    <option value="same">
+                                        保持原组
+                                    </option>
 
                                     {% for g in groups %}
-                                        <option value="{{ g.id }}"
+                                        <option
+                                            value="{{ g.id }}"
                                             {% if
-                                                (s.group_name == '低年组' and g.name == '少年组') or
-                                                (s.group_name == '少年组' and g.name == '高年组')
+                                                (
+                                                    s.group_name == "低年组"
+                                                    and g.name == "少年组"
+                                                )
+                                                or
+                                                (
+                                                    s.group_name == "少年组"
+                                                    and g.name == "高年组"
+                                                )
                                             %}
                                                 selected
                                             {% endif %}
@@ -9840,7 +10241,9 @@ def class_promote():
                                         </option>
                                     {% endfor %}
 
-                                    <option value="inactive">暂停学生</option>
+                                    <option value="paused">
+                                        暂停学生
+                                    </option>
                                 </select>
                             </td>
                         </tr>
@@ -9850,9 +10253,15 @@ def class_promote():
             </div>
 
             <div class="btn-row">
-                <button class="btn-tool btn-danger"
-                        type="submit"
-                        onclick="return confirm('确定要执行年度升班吗？请确认每位学生的新组别。');">
+                <button
+                    class="btn-tool btn-danger"
+                    type="submit"
+                    onclick="
+                        return confirm(
+                            '确定要执行年度升班吗？请确认每位学生的新组别。'
+                        );
+                    "
+                >
                     ✅ 确认执行升班
                 </button>
             </div>

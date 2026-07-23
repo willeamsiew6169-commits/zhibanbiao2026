@@ -3597,7 +3597,7 @@ def finance_admin_home():
     )
 
 
-    return render_template_string(r"""
+    return render_template_string("""
 <!doctype html>
 <html lang="zh">
 <head>
@@ -7398,7 +7398,10 @@ def monthly_fee_batch(branch):
 
     action = request.form.get("action", "")
 
-    default_amount = money(50)
+    default_amount = money(
+        request.form.get("default_amount")
+        or 350
+    )
 
     def make_receipt_no(start_no, index):
         match = re.match(r"^([A-Z]+)(\d+)$", start_no)
@@ -7481,33 +7484,28 @@ def monthly_fee_batch(branch):
 
                 continue
 
-            # 支持普通金额与月数倍数：
-            # 108 -> 默认 RM50；108 100 -> RM100
-            # 108 3 / 108*3 / 108,3 -> 3个月 = RM150
-            multiplier_match = re.match(
-                r"^(.+?)[*,，]\s*(\d{1,2})$",
-                line
-            )
+            parts = line.split()
 
-            if multiplier_match:
-                raw_member_keyword = multiplier_match.group(1).strip()
-                month_multiplier = int(multiplier_match.group(2))
-                amount = money(month_multiplier * 50)
+            # 支持：
+            # 108
+            # 108 100
+            # 张三
+            # 张三 100
+            if (
+                len(parts) >= 2
+                and re.fullmatch(
+                    r"\d+(?:\.\d+)?",
+                    parts[-1]
+                )
+            ):
+                amount = money(parts[-1])
+                raw_member_keyword = (
+                    " ".join(parts[:-1]).strip()
+                )
+
             else:
-                parts = line.split()
-                if (
-                    len(parts) >= 2
-                    and re.fullmatch(r"\d+(?:\.\d+)?", parts[-1])
-                ):
-                    last_number = money(parts[-1])
-                    raw_member_keyword = " ".join(parts[:-1]).strip()
-                    if last_number == int(last_number) and 1 <= int(last_number) <= 49:
-                        amount = money(int(last_number) * 50)
-                    else:
-                        amount = last_number
-                else:
-                    amount = default_amount
-                    raw_member_keyword = line
+                amount = default_amount
+                raw_member_keyword = line
 
             receipt_no = make_receipt_no(
                 receipt_start,
@@ -8030,169 +8028,738 @@ def monthly_fee_batch(branch):
 # - error 会阻止“确认全部入账”
 # - warning 只提醒，仍然允许确认入账
 
-    return render_template_string(r"""
-<!doctype html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ branch }} 月费录入</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='css/toolbox.css') }}">
-<style>
-*{box-sizing:border-box}
-body{background:#eef4fa}
-.finance-page{max-width:1540px;margin:0 auto;padding:14px}
-.topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
-.title-row{display:flex;align-items:center;gap:12px}.title-row h1{margin:0;font-size:30px}
-.shortcut-bar{padding:10px 14px;border:1px solid #cde7d2;border-radius:10px;background:#eefbf1;color:#245b32;font-weight:750}
-.workbench{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:stretch}
-.panel{background:#fff;border:1px solid #dce5ef;border-radius:16px;box-shadow:0 5px 18px rgba(31,51,71,.07);padding:16px;height:100%}
-.panel-title{display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:21px}.badge{display:inline-flex;width:28px;height:28px;align-items:center;justify-content:center;border-radius:50%;background:#1769aa;color:#fff;font-weight:800}
-.compact-settings{display:flex;flex-direction:column;gap:10px;margin-bottom:14px}
-.date-box,.receipt-box{border:1px solid #cfe0ef;border-radius:12px;background:#f7fbff;padding:11px 12px}
-.box-label{display:block;margin-bottom:7px;font-weight:850;color:#23384d}
-.date-controls{display:grid;grid-template-columns:42px minmax(220px,1fr) 42px 110px;gap:8px}
-.date-controls button,.date-controls input{height:44px;border:1px solid #b9c9d8;border-radius:9px;background:#fff;font-size:16px;font-weight:800}
-.date-controls input{width:100%;padding:0 10px;color:#163b5b}.date-controls .f2{background:#1769aa;color:#fff;border-color:#1769aa}
-.date-status{margin-top:7px;color:#667085;font-size:13px}
-.receipt-top{display:flex;flex-direction:column;gap:10px}.or-row{display:grid;grid-template-columns:120px minmax(140px,220px);gap:10px;align-items:center}.or-row .box-label{margin:0}.or-row input{width:100%;min-width:0}.receipt-number-row{display:grid;grid-template-columns:120px minmax(0,1fr);gap:10px;align-items:start}.receipt-number-row>.box-label{margin:11px 0 0}.receipt-input{display:grid;grid-template-columns:62px minmax(180px,1fr);gap:8px}.prefix{display:flex;align-items:center;justify-content:center;min-width:0;border-radius:9px;background:#eaf4ff;color:#1769aa;font-weight:850}.receipt-input input{width:100%;min-width:0}
-.form-input,.form-select,textarea{border:1px solid #c8d4e0;border-radius:10px;background:#fff;padding:10px 12px;font-size:17px}
-.field-help{display:block;margin-top:5px;color:#667085;font-size:13px}
-.quick-section{border-top:1px solid #e5edf5;padding-top:13px}.quick-grid{display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:12px;align-items:end}.form-label{display:block;margin-bottom:6px;font-weight:850;font-size:17px}.quick-grid .form-input{width:100%;height:48px}.amount-control{display:grid;grid-template-columns:44px 1fr 44px;gap:7px}.amount-control button{border:1px solid #c8d4e0;border-radius:9px;background:#f7f9fb;font-size:23px;font-weight:850}.amount-control input{text-align:center;font-size:23px;font-weight:850}
-.space-status{min-height:22px;margin:7px 0;color:#586a7d;font-size:13px;font-weight:750}.space-status.active{color:#1769aa}
-.multiplier-grid{display:grid;grid-template-columns:repeat(10,minmax(0,1fr));gap:6px}.multi-btn{padding:8px 2px;border:1px solid #bfd4e6;border-radius:9px;background:#f7fbff;color:#145f98;font-weight:850;cursor:pointer}.multi-btn span{display:block;font-size:11px;margin-top:2px}.multi-btn.active{background:#1769aa;color:#fff;border-color:#1769aa}
-.add-btn{width:100%;height:50px;margin-top:10px;border:0;border-radius:10px;background:#19a84a;color:#fff;font-size:20px;font-weight:850;cursor:pointer}
-.batch-textarea{width:100%;height:210px;resize:none;line-height:1.55;font-family:Consolas,"Microsoft YaHei",monospace}
-.receipt-check{margin-top:10px;border:1px solid #d7e4f0;border-radius:12px;overflow:hidden}.receipt-head{display:flex;justify-content:space-between;gap:10px;padding:10px 12px;background:#f4f9fd;font-weight:850}.receipt-wrap{max-height:205px;overflow:auto}.receipt-table{width:100%;border-collapse:collapse;font-size:13px}.receipt-table th,.receipt-table td{padding:8px 10px;border-bottom:1px solid #edf2f7;text-align:left}.receipt-table th{position:sticky;top:0;background:#f8fafc}.receipt-empty{padding:16px;text-align:center;color:#7b8b9b}.receipt-summary{padding:9px 12px;background:#fbfdff;font-weight:750}
-.payment-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.payment-grid .form-input,.payment-grid .form-select{width:100%;height:44px}.full{grid-column:1/-1}.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.actions.single{grid-template-columns:1fr}.actions button{height:48px;border:0;border-radius:10px;font-size:18px;font-weight:850;color:#fff}.preview-btn{background:#2764e7}.confirm-btn{background:#19a84a}
-.message{margin-bottom:12px;padding:11px 14px;border-radius:10px;background:#fff3cd;color:#715b00;font-weight:750}
-.preview-card{grid-column:1/-1;margin-top:14px}.table-responsive{overflow:auto}.record-table{width:100%;border-collapse:collapse}.record-table th,.record-table td{padding:9px;border-bottom:1px solid #e5e7eb;white-space:nowrap;text-align:left}.ok{color:#16863a;font-weight:750}.err{color:#c62828;font-weight:750}.warn{color:#b77900;font-weight:750}
-.help-btn{height:42px;padding:0 15px;border:1px solid #bfd4e6;border-radius:10px;background:#fff;color:#145f98;font-size:16px;font-weight:850;cursor:pointer;white-space:nowrap}
-.help-dialog{width:min(560px,calc(100vw - 28px));border:0;border-radius:16px;padding:0;box-shadow:0 24px 70px rgba(15,23,42,.28)}
-.help-dialog::backdrop{background:rgba(15,23,42,.45)}
-.help-card{padding:20px}.help-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}.help-head h2{margin:0;font-size:23px}.help-close{width:38px;height:38px;border:0;border-radius:9px;background:#eef3f8;font-size:22px;cursor:pointer}.help-grid{display:grid;grid-template-columns:140px 1fr;gap:9px 14px}.help-key{font-weight:850;color:#145f98}.help-note{margin-top:14px;padding:11px 12px;border-radius:10px;background:#eefbf1;color:#245b32;font-weight:750}
-@media(max-width:1100px){.workbench{grid-template-columns:1fr}.batch-textarea{height:230px}}
-@media(max-width:700px){.finance-page{padding:8px}.topbar{align-items:flex-start;flex-direction:column}.quick-grid,.payment-grid{grid-template-columns:1fr}.date-controls{grid-template-columns:40px minmax(0,1fr) 40px}.date-controls .f2{grid-column:1/-1}.multiplier-grid{grid-template-columns:repeat(5,1fr)}.or-row,.receipt-number-row{grid-template-columns:1fr}.receipt-number-row>.box-label{margin:0}.actions{grid-template-columns:1fr}}
-</style>
-</head>
-<body>
-<div class="finance-page">
-  <div class="topbar">
-    <div class="title-row"><a class="btn-tool btn-secondary" href="{{ url_for('finance.finance_income_menu') }}">← 返回</a><h1>💳 {{ branch }} 月费录入</h1><button class="help-btn" type="button" onclick="document.getElementById('usageHelp').showModal()">❓ 使用说明</button></div>
-    <div class="shortcut-bar">F2 插入日期｜编号 + Space + 1～0｜Enter 加入｜Ctrl+Enter 预览</div>
-  </div>
-  <dialog id="usageHelp" class="help-dialog">
-    <div class="help-card">
-      <div class="help-head">
-        <h2>❓ 月费录入使用说明</h2>
-        <button class="help-close" type="button" onclick="document.getElementById('usageHelp').close()">×</button>
-      </div>
-      <div class="help-grid">
-        <div class="help-key">F2</div><div>把当前选择的收条日期插入右边清单。</div>
-        <div class="help-key">编号 → Space</div><div>进入金额快捷模式。</div>
-        <div class="help-key">1～9、0</div><div>选择 RM50～RM500；例如 2 = RM100，0 = RM500。</div>
-        <div class="help-key">Enter</div><div>把当前会员加入待录入清单。</div>
-        <div class="help-key">Ctrl + Enter</div><div>预览整批资料。</div>
-        <div class="help-key">每位一行</div><div>系统会自动把每位会员放在独立一行，格式为 <b>编号 金额</b>。</div><div class="help-key">直接输入</div><div><b>208 3</b>、<b>208*3</b> 或 <b>208,3</b> 都代表 3 个月、RM150。</div>
-      </div>
-      <div class="help-note">完成一笔后，系统会清空会员栏、金额恢复 RM50，并把游标放回会员栏。</div>
-    </div>
-  </dialog>
-  {% if message %}<div class="message">{{ message }}</div>{% endif %}
-  <form id="financeEntryForm" method="post">
-    <div class="workbench">
-      <section class="panel">
-        <h2 class="panel-title"><span class="badge">1</span>收条资料与单笔加入</h2>
-        <div class="compact-settings">
-          <div class="receipt-box">
-            <div class="receipt-top">
-              <div class="or-row">
-                <label class="box-label">📒 OR Book</label>
-                <input class="form-input" name="receipt_book_no" type="number" value="{{ current_book_no }}">
-              </div>
-              <div class="receipt-number-row">
-                <label class="box-label">收条开始号码</label>
-                <div>
-                  <div class="receipt-input"><span class="prefix">{{ branch }}</span><input class="form-input" name="receipt_start" value="{{ receipt_start_raw }}"></div>
-                  <span class="field-help">下一张：{{ next_receipt_no }}</span>
+    return render_template_string(FINANCE_DATE_COMPONENT + """
+    <!doctype html>
+    <html lang="zh">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+
+        <title>{{ branch }} 月费录入</title>
+
+        <link
+            rel="stylesheet"
+            href="{{ url_for('static', filename='css/toolbox.css') }}"
+        >
+
+        <style>
+            .finance-form-page{
+                max-width:920px;
+            }
+
+            .finance-header-card{
+                margin-bottom:18px;
+                background:linear-gradient(135deg,#1769aa,#2589c5);
+                color:#fff;
+            }
+
+            .finance-header-card .page-title,
+            .finance-header-card .page-subtitle{
+                color:#fff;
+            }
+
+            .finance-back-row{
+                margin-bottom:16px;
+            }
+
+            .step-title{
+                display:flex;
+                align-items:center;
+                gap:10px;
+                margin-bottom:18px;
+            }
+
+            .step-title .section-title{
+                margin:0;
+            }
+
+            .step-badge{
+                flex:0 0 auto;
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                width:36px;
+                height:36px;
+                border-radius:50%;
+                background:#1769aa;
+                color:#fff;
+                font-size:17px;
+                font-weight:800;
+            }
+
+            .settings-grid{
+                display:grid;
+                grid-template-columns:repeat(2,minmax(0,1fr));
+                gap:16px;
+            }
+
+            .settings-grid .form-group{
+                margin:0;
+            }
+
+            .finance-full{
+                grid-column:1 / -1;
+            }
+
+            .receipt-input-row{
+                display:flex;
+                align-items:stretch;
+                gap:10px;
+            }
+
+            .receipt-prefix{
+                min-width:78px;
+                display:flex;
+                align-items:center;
+                justify-content:center;
+                padding:0 15px;
+                border-radius:10px;
+                background:#eaf4ff;
+                color:#1769aa;
+                font-weight:800;
+                font-size:20px;
+            }
+
+            .receipt-input-row .form-input{
+                flex:1;
+                min-width:0;
+            }
+
+            .field-help{
+                display:block;
+                color:#667085;
+                font-size:15px;
+                line-height:1.55;
+                margin-top:7px;
+            }
+
+            .quick-member-row{
+                display:grid;
+                grid-template-columns:minmax(0,1fr) 280px;
+                gap:14px;
+                align-items:end;
+            }
+
+            .amount-panel{
+                display:grid;
+                grid-template-columns:54px 1fr 54px;
+                gap:8px;
+                align-items:stretch;
+            }
+
+            .amount-step-btn{
+                border:1px solid #cbd5e1;
+                border-radius:10px;
+                background:#f8fafc;
+                color:#172033;
+                font-size:25px;
+                font-weight:800;
+                cursor:pointer;
+            }
+
+            .amount-step-btn:hover{
+                background:#eaf4ff;
+                border-color:#8fbce0;
+            }
+
+            .amount-step-btn:active{
+                transform:scale(.97);
+            }
+
+            #quick_amount{
+                text-align:center;
+                font-size:25px;
+                font-weight:800;
+            }
+
+            .amount-shortcuts{
+                display:flex;
+                flex-wrap:wrap;
+                gap:8px;
+                margin-top:12px;
+            }
+
+            .amount-chip{
+                min-width:72px;
+                border:1px solid #cbd5e1;
+                border-radius:999px;
+                background:#fff;
+                padding:9px 14px;
+                color:#1769aa;
+                font-size:16px;
+                font-weight:800;
+                cursor:pointer;
+            }
+
+            .amount-chip:hover{
+                background:#eaf4ff;
+                border-color:#8fbce0;
+            }
+
+            .quick-add-btn{
+                width:100%;
+                margin-top:16px;
+            }
+
+            .batch-textarea{
+                width:100%;
+                min-height:250px;
+                resize:vertical;
+                line-height:1.75;
+                font-family:Consolas,"Microsoft YaHei",monospace;
+                font-size:18px;
+            }
+
+            .batch-help-grid{
+                display:grid;
+                grid-template-columns:repeat(5,minmax(0,1fr));
+                gap:10px;
+                margin-top:12px;
+            }
+
+            .batch-help-item{
+                padding:12px 14px;
+                border:1px solid #dbe3ed;
+                border-radius:12px;
+                background:#f8fafc;
+                color:#475467;
+                font-size:14px;
+                line-height:1.6;
+            }
+
+            .batch-help-item strong{
+                display:block;
+                margin-bottom:4px;
+                color:#172033;
+            }
+
+            .batch-help-item code{
+                color:#1769aa;
+                font-weight:800;
+            }
+
+            .action-row{
+                display:grid;
+                grid-template-columns:1fr 1fr;
+                gap:12px;
+                margin-top:18px;
+            }
+
+            .action-row.single{
+                grid-template-columns:1fr;
+            }
+
+            .action-row .btn-tool{
+                width:100%;
+            }
+
+            .payment-date-box{
+                display:none;
+            }
+
+            .preview-success{
+                color:#16863a;
+                font-weight:700;
+            }
+
+            .preview-error{
+                color:#c62828;
+                font-weight:700;
+            }
+
+            .preview-date{
+                white-space:nowrap;
+                font-weight:700;
+                color:#1769aa;
+            }
+                                  
+            .preview-warning{
+                color:#b77900;
+                font-weight:700;
+            }
+
+            @media(max-width:760px){
+                .settings-grid,
+                .quick-member-row,
+                .batch-help-grid,
+                .action-row{
+                    grid-template-columns:1fr;
+                }
+
+                .finance-full{
+                    grid-column:auto;
+                }
+
+                .receipt-input-row{
+                    align-items:stretch;
+                }
+            }
+        </style>
+    </head>
+
+    <body>
+    <div class="page finance-form-page">
+
+        <div class="finance-back-row">
+            <a
+                class="btn-tool btn-secondary"
+                href="{{ url_for('finance.finance_income_menu') }}"
+            >
+                ← 返回收入录入
+            </a>
+        </div>
+
+        <div class="card finance-header-card">
+            <h1 class="page-title">💳 {{ branch }} 月费录入</h1>
+            <p class="page-subtitle">
+                先设定收条资料，再加入会员；单笔与批量共用同一份待录入清单。
+            </p>
+        </div>
+
+        {% if message %}
+            <div class="alert alert-danger">{{ message }}</div>
+        {% endif %}
+
+        <form method="post">
+
+            <div class="card">
+                <div class="step-title">
+                    <span class="step-badge">1</span>
+                    <h2 class="section-title">收条资料与单笔加入</h2>
                 </div>
-              </div>
-            </div>
-          </div>
-          <div class="date-box">
-            <label class="box-label">📅 默认开收条日期</label>
-            <div class="date-controls">
-              <button type="button" onclick="changeBatchDate(-1)">←</button>
-              <input id="batch_insert_date" name="receipt_date" type="date" value="{{ default_receipt_date }}">
-              <button type="button" onclick="changeBatchDate(1)">→</button>
-              <button class="f2" type="button" onclick="insertBatchDate()">F2 插入</button>
-            </div>
-            <div id="batch_date_status" class="date-status">当前选择：{{ default_receipt_date }}</div>
-          </div>
-        </div>
-        <div class="quick-section">
-          <div class="quick-grid">
-            <div><label class="form-label">会员编号或姓名</label><input id="quick_member_keyword" class="form-input" placeholder="例如：108、CHE-108、张三" autocomplete="off"></div>
-            <div><label class="form-label">本笔金额 RM</label><div class="amount-control"><button type="button" onclick="changeQuickAmount(-50)">−</button><input id="quick_amount" class="form-input" type="number" step="50" min="50" value="50"><button type="button" onclick="changeQuickAmount(50)">＋</button></div></div>
-          </div>
-          <div id="space_mode_status" class="space-status">输入编号后按 Space，再按 1～0；例如 208 → Space → 2 → Enter = RM100</div>
-          <div class="multiplier-grid">
-            {% for n, amount in [(1,50),(2,100),(3,150),(4,200),(5,250),(6,300),(7,350),(8,400),(9,450),(10,500)] %}
-            <button type="button" class="multi-btn {% if n == 1 %}active{% endif %}" data-months="{{ n }}" onclick="setMonthMultiplier({{ n }},this)">{{ 0 if n == 10 else n }}<span>RM{{ amount }}</span></button>
-            {% endfor %}
-          </div>
-          <button class="add-btn" type="button" onclick="addQuickMember()">＋ 加入待录入清单</button>
-        </div>
-      </section>
+                                  
+                <div class="card" style="margin-bottom:18px;background:#f8fbff;border:1px solid #d8e7f7;">
 
-      <section class="panel">
-        <h2 class="panel-title"><span class="badge">2</span>待录入清单与付款资料</h2>
-        <textarea id="raw_text" class="batch-textarea" name="raw_text" placeholder="单笔加入会自动逐行排列；每位会员一行。也可直接贴上多位会员资料。&#10;&#10;例如：&#10;@2026-07-23&#10;108 50&#10;188 100">{{ raw_text }}</textarea>
-        <div class="receipt-check">
-          <div class="receipt-head"><span>🧾 收条号码对照</span><span id="receipt_check_next">下一张：{{ next_receipt_no }}</span></div>
-          <div class="receipt-wrap"><table class="receipt-table"><thead><tr><th>收条号码</th><th>输入资料</th><th>金额</th></tr></thead><tbody id="receipt_check_body"></tbody></table><div id="receipt_check_empty" class="receipt-empty">加入会员后，这里会自动显示对应收条号码。</div></div>
-          <div id="receipt_check_summary" class="receipt-summary">共 0 张 · RM 0.00</div>
-        </div>
-        <div class="payment-grid">
-          <div><label class="form-label">付款方式</label><select id="payment_method" class="form-select" name="payment_method" onchange="togglePaymentDate()"><option value="现金" {% if payment_method=='现金' %}selected{% endif %}>现金</option><option value="银行过账" {% if payment_method=='银行过账' %}selected{% endif %}>银行过账</option></select></div>
-          <div id="payment_date_box"><label class="form-label">银行付款日期</label><input class="form-input" name="payment_date" type="date" value="{{ bank_payment_date }}"></div>
-          <div class="full"><label class="form-label">批量清单默认月费 RM</label><input id="default_amount" class="form-input" name="default_amount" type="number" step="50" min="50" value="50"><span class="field-help">清单只写编号或姓名时，默认使用 RM50。</span></div>
-        </div>
-        <div class="actions {% if not (preview_rows and not has_preview_error) %}single{% endif %}"><button class="preview-btn" type="submit" name="action" value="preview">👁️ 预览资料</button>{% if preview_rows and not has_preview_error %}<button class="confirm-btn" type="submit" name="action" value="confirm" onclick="return confirm('确定全部入账？')">✅ 确认全部入账</button>{% endif %}</div>
-      </section>
+                    <div class="form-group" style="margin-bottom:0;">
 
-      {% if preview_rows %}
-      <section class="panel preview-card"><h2 class="panel-title"><span class="badge">3</span>月费录入预览</h2><div class="table-responsive"><table class="record-table"><thead><tr><th>收条</th><th>日期</th><th>会员编号</th><th>姓名</th><th>金额</th><th>开始月份</th><th>缴费至</th><th>月数</th><th>检查</th></tr></thead><tbody>{% for r in preview_rows %}<tr><td>{{ r.receipt_no or '-' }}</td><td>{{ r.receipt_date or '-' }}</td><td><strong>{{ r.member_id or '-' }}</strong></td><td>{{ r.name or '-' }}</td><td>{% if r.amount %}RM {{ '%.2f'|format(r.amount) }}{% else %}-{% endif %}</td><td>{{ r.month_from or '-' }}</td><td>{{ r.month_to or '-' }}</td><td>{% if r.month_count %}{{ r.month_count }}个月{% else %}-{% endif %}</td><td>{% if r.error %}<span class="err">❌ {{ r.error }}</span>{% elif r.warning %}<span class="warn">⚠️ {{ r.warning }}</span>{% else %}<span class="ok">✅ 可以入账</span>{% endif %}</td></tr>{% endfor %}</tbody></table></div></section>
-      {% endif %}
+                        <label class="form-label">
+                            📒 当前 OR Book
+                        </label>
+
+                        <div style="
+                            display:flex;
+                            gap:12px;
+                            align-items:center;
+                        ">
+
+                            <input
+                                class="form-input"
+                                style="max-width:150px;"
+                                type="number"
+                                min="1"
+                                name="receipt_book_no"
+                                value="{{ current_book_no }}"
+                            >
+
+                            <span class="field-help" style="margin-top:0;">
+                                开始使用新的实体收条簿时才需要修改。
+                            </span>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+                <div class="settings-grid">
+                    <div class="form-group">
+                        <label class="form-label">收条开始号码</label>
+
+                        <div class="receipt-input-row">
+                            <div class="receipt-prefix">{{ branch }}</div>
+
+                            <input
+                                class="form-input"
+                                name="receipt_start"
+                                value="{{ receipt_start_raw }}"
+                                inputmode="numeric"
+                                placeholder="例如 1501"
+                                required
+                            >
+                        </div>
+
+                        <span class="field-help">
+                            系统建议下一张：<strong>{{ next_receipt_no }}</strong>
+                        </span>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">默认开收条日期</label>
+
+                        <input
+                            class="form-input"
+                            name="receipt_date"
+                            type="date"
+                            value="{{ default_receipt_date }}"
+                            required
+                        >
+
+                        <span class="field-help">
+                            没有写 @日期 的会员会使用这个日期。
+                        </span>
+                    </div>
+                </div>
+
+                <div style="border-top:1px solid #e2e8f0;margin:22px 0 18px;"></div>
+
+                <h3 class="entry-method-title" style="margin-bottom:12px;">
+                    👤 单笔快速加入
+                </h3>
+
+                <div class="quick-member-row">
+                    <div class="form-group">
+                        <label class="form-label">会员编号或姓名</label>
+                        <input
+                            class="form-input"
+                            id="quick_member_keyword"
+                            type="text"
+                            placeholder="例如：108、{{ branch }}-108、张三"
+                            autocomplete="off"
+                        >
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">本笔金额 RM</label>
+                        <div class="amount-panel">
+                            <button
+                                type="button"
+                                class="amount-step-btn"
+                                onclick="changeQuickAmount(-50)"
+                            >−</button>
+
+                            <input
+                                class="form-input"
+                                id="quick_amount"
+                                type="number"
+                                min="50"
+                                step="50"
+                                value="{{ default_amount }}"
+                            >
+
+                            <button
+                                type="button"
+                                class="amount-step-btn"
+                                onclick="changeQuickAmount(50)"
+                            >＋</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="amount-shortcuts">
+                    {% for amount in [50, 100, 150, 200, 250, 300] %}
+                        <button
+                            type="button"
+                            class="amount-chip"
+                            onclick="setQuickAmount({{ amount }})"
+                        >
+                            RM{{ amount }}
+                        </button>
+                    {% endfor %}
+                </div>
+
+                <button
+                    class="btn-tool btn-success quick-add-btn"
+                    type="button"
+                    onclick="addQuickMember()"
+                >
+                    ➕ 加入待录入清单
+                </button>
+            </div>
+
+            <div class="card">
+                <div class="step-title">
+                    <span class="step-badge">2</span>
+                    <h2 class="section-title">待录入清单与付款资料</h2>
+                </div>
+
+                <p class="page-subtitle" style="margin-top:-6px;">
+                    单笔加入会自动出现在这里，也可以直接贴上多位会员资料。
+                </p>
+
+                <textarea
+                    class="form-input batch-textarea"
+                    id="raw_text"
+                    name="raw_text"
+                    placeholder="例如：
+    @2026-07-10
+    108
+    张三
+    188 100
+
+    @2026-07-11
+    69
+    205 300"
+                >{{ raw_text }}</textarea>
+
+                <div class="batch-help-grid">
+                    <div class="batch-help-item">
+                        <strong>普通月费</strong>
+                        <code>108</code> 或 <code>张三</code>
+                    </div>
+
+                    <div class="batch-help-item">
+                        <strong>指定金额</strong>
+                        <code>188 100</code>
+                    </div>
+
+                    <div class="batch-help-item">
+                        <strong>切换收条日期</strong>
+                        <code>@2026-07-11</code>
+                    </div>
+                </div>
+
+                <div style="border-top:1px solid #e2e8f0;margin:22px 0 18px;"></div>
+
+                <div class="settings-grid">
+                    <div class="form-group">
+                        <label class="form-label">付款方式</label>
+
+                        <select
+                            class="form-input"
+                            name="payment_method"
+                            id="payment_method"
+                            onchange="togglePaymentDate()"
+                        >
+                            {% for method in ['现金', '银行过账', '支票'] %}
+                                <option
+                                    value="{{ method }}"
+                                    {% if payment_method == method %}selected{% endif %}
+                                >
+                                    {{ method }}
+                                </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div
+                        class="form-group payment-date-box"
+                        id="payment_date_box"
+                    >
+                        <label class="form-label">银行付款日期</label>
+
+                        <input
+                            class="form-input"
+                            name="payment_date"
+                            type="date"
+                            value="{{ bank_payment_date }}"
+                        >
+                    </div>
+
+                    <div class="form-group finance-full">
+                        <label class="form-label">批量清单默认月费 RM</label>
+
+                        <input
+                            class="form-input"
+                            name="default_amount"
+                            type="number"
+                            step="50"
+                            min="50"
+                            value="{{ default_amount }}"
+                            required
+                        >
+
+                        <span class="field-help">
+                            清单只写编号或姓名时使用；行内有金额时，以行内金额为准。
+                        </span>
+                    </div>
+                </div>
+
+                <div class="action-row {% if not (preview_rows and not has_preview_error) %}single{% endif %}">
+                    <button
+                        class="btn-tool btn-primary"
+                        type="submit"
+                        name="action"
+                        value="preview"
+                    >
+                        👁️ 预览资料
+                    </button>
+
+                    {% if preview_rows and not has_preview_error %}
+                        <button
+                            class="btn-tool btn-success"
+                            type="submit"
+                            name="action"
+                            value="confirm"
+                            onclick="return confirm('确定全部入账？');"
+                        >
+                            ✅ 确认全部入账
+                        </button>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if preview_rows %}
+                <div class="card">
+                    <div class="step-title">
+                        <span class="step-badge">3</span>
+                        <h2 class="section-title">月费录入预览</h2>
+                    </div>
+
+                    <div class="table-responsive">
+                        <table class="record-table">
+                            <thead>
+                                <tr>
+                                    <th>收条</th>
+                                    <th>收条日期</th>
+                                    <th>会员编号</th>
+                                    <th>姓名</th>
+                                    <th>电话</th>
+                                    <th>金额</th>
+                                    <th>开始月份</th>
+                                    <th>缴费至</th>
+                                    <th>月数</th>
+                                    <th>检查结果</th>
+                                </tr>
+                            </thead>
+
+                            <tbody>
+                                {% for r in preview_rows %}
+                                    <tr>
+                                        <td>{{ r.receipt_no or '-' }}</td>
+                                        <td class="preview-date">{{ r.receipt_date or '-' }}</td>
+                                        <td><strong>{{ r.member_id or '-' }}</strong></td>
+                                        <td>{{ r.name or '-' }}</td>
+                                        <td>{{ r.phone or '-' }}</td>
+                                        <td>
+                                            {% if r.amount %}
+                                                RM {{ '%.2f'|format(r.amount) }}
+                                            {% else %}
+                                                -
+                                            {% endif %}
+                                        </td>
+                                        <td>{{ r.month_from or '-' }}</td>
+                                        <td>{{ r.month_to or '-' }}</td>
+                                        <td>
+                                            {% if r.month_count %}
+                                                {{ r.month_count }} 个月
+                                            {% else %}
+                                                -
+                                            {% endif %}
+                                        </td>
+                                        <td>
+                                            {% if r.error %}
+                                                <span class="preview-error">
+                                                    ❌ {{ r.error }}
+                                                </span>
+
+                                            {% elif r.warning %}
+                                                <span class="preview-warning">
+                                                    ⚠️ {{ r.warning }}
+                                                </span>
+
+                                            {% else %}
+                                                <span class="preview-success">
+                                                    ✅ 可以入账
+                                                </span>
+                                            {% endif %}
+                                        </td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            {% endif %}
+
+        </form>
     </div>
-  </form>
-</div>
-<script>
-function iso(d){return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")}
-function changeBatchDate(days){const i=document.getElementById("batch_insert_date");const d=i.value?new Date(i.value+"T00:00:00"):new Date();d.setDate(d.getDate()+days);i.value=iso(d);updateDateStatus()}
-function updateDateStatus(text){const i=document.getElementById("batch_insert_date"),s=document.getElementById("batch_date_status");if(s)s.textContent=text||("当前选择："+(i.value||"未选择")+"；按 F2 插入日期。")}
-function appendBatchLine(line){
-    const t=document.getElementById("raw_text");
-    const clean=String(line||"").trim();
-    if(!clean)return;
-    const existing=t.value.trimEnd();
-    t.value=existing?existing+"\n"+clean:clean;
-    t.scrollTop=t.scrollHeight;
-}
-function insertBatchDate(){const i=document.getElementById("batch_insert_date"),t=document.getElementById("raw_text");if(!i.value)return alert("请先选择日期");const mark="@"+i.value,lines=t.value.split(/\r?\n/);let last="";for(let x=lines.length-1;x>=0;x--){if(lines[x].trim()){last=lines[x].trim();break}}if(last!==mark)appendBatchLine(mark);t.focus();updateDateStatus("✅ 已插入 "+mark);refreshReceiptCheck()}
-function changeQuickAmount(delta){const i=document.getElementById("quick_amount");i.value=Math.max(50,(Number(i.value)||50)+delta)}
-function setMonthMultiplier(n,btn){document.getElementById("quick_amount").value=n*50;document.querySelectorAll(".multi-btn").forEach(b=>b.classList.toggle("active",b===btn));document.getElementById("quick_member_keyword").focus()}
-function parseQuick(v){const text=(v||"").trim();let m=text.match(/^(.+?)[*,，]\s*(\d{1,2})$/);if(m)return{keyword:m[1].trim(),amount:Number(m[2])*50};m=text.match(/^(.+?)\s+(\d{1,2})$/);if(m&&Number(m[2])>=1&&Number(m[2])<=50)return{keyword:m[1].trim(),amount:Number(m[2])*50};return{keyword:text,amount:null}}
-function addQuickMember(){const k=document.getElementById("quick_member_keyword"),a=document.getElementById("quick_amount"),p=parseQuick(k.value);if(!p.keyword){alert("请输入会员编号或姓名");k.focus();return}const amount=p.amount!==null?p.amount:(Number(a.value)||50),line=p.keyword+" "+amount;appendBatchLine(line);k.value="";a.value="50";document.querySelectorAll(".multi-btn").forEach(b=>b.classList.toggle("active",b.dataset.months==="1"));k.focus();refreshReceiptCheck()}
-function receiptFormat(){const s="{{ next_receipt_no }}",m=s.match(/^(.*?)(\d+)$/);return m?{p:m[1],w:m[2].length}:{p:"{{ branch }}",w:7}}
-function receiptNo(n){const f=receiptFormat();return f.p+String(n).padStart(f.w,"0")}
-function refreshReceiptCheck(){const t=document.getElementById("raw_text"),startEl=document.querySelector('[name="receipt_start"]'),def=document.getElementById("default_amount"),body=document.getElementById("receipt_check_body"),empty=document.getElementById("receipt_check_empty"),sum=document.getElementById("receipt_check_summary"),next=document.getElementById("receipt_check_next");const start=parseInt(startEl.value,10),rows=[];let total=0;t.value.split(/\r?\n/).forEach(raw=>{const line=raw.trim();if(!line||line.startsWith("@"))return;let amount=Number(def.value)||50,m=line.match(/^(.+?)[*,，]\s*(\d{1,2})$/);if(m)amount=Number(m[2])*50;else{const parts=line.split(/\s+/),v=Number(parts[parts.length-1]);if(parts.length>1&&Number.isFinite(v))amount=(Number.isInteger(v)&&v>=1&&v<=49)?v*50:v}rows.push({line,amount});total+=amount});body.innerHTML="";if(Number.isFinite(start))rows.forEach((r,i)=>{const tr=document.createElement("tr");tr.innerHTML="<td>"+receiptNo(start+i)+"</td><td>"+r.line.replace(/</g,"&lt;").replace(/>/g,"&gt;")+"</td><td>RM "+r.amount.toFixed(2)+"</td>";body.appendChild(tr)});empty.style.display=rows.length?"none":"block";next.textContent="下一张："+(Number.isFinite(start)?receiptNo(start+rows.length):"—");sum.textContent="共 "+rows.length+" 张 · RM "+total.toFixed(2)}
-function togglePaymentDate(){const m=document.getElementById("payment_method"),b=document.getElementById("payment_date_box");b.style.display=m.value==="银行过账"?"block":"none"}
-document.addEventListener("DOMContentLoaded",()=>{const k=document.getElementById("quick_member_keyword"),status=document.getElementById("space_mode_status");let mode=false;function setMode(v){mode=v;status.classList.toggle("active",v);status.textContent=v?"金额快捷模式：请按 1～0（1=RM50，2=RM100…0=RM500）":"输入编号后按 Space，再按 1～0；例如 208 → Space → 2 → Enter = RM100"}k.addEventListener("keydown",e=>{if(e.key===" "&&k.value.trim()&&!mode){e.preventDefault();setMode(true);return}if(mode&&/^[0-9]$/.test(e.key)){e.preventDefault();const n=e.key==="0"?10:Number(e.key),btn=document.querySelector('.multi-btn[data-months="'+n+'"]');setMonthMultiplier(n,btn);setMode(false);return}if(e.key==="Enter"){e.preventDefault();setMode(false);addQuickMember()}if(e.key==="Escape"&&mode){e.preventDefault();setMode(false)}});document.getElementById("batch_insert_date").addEventListener("change",()=>updateDateStatus());document.getElementById("raw_text").addEventListener("input",refreshReceiptCheck);document.querySelector('[name="receipt_start"]').addEventListener("input",refreshReceiptCheck);document.getElementById("default_amount").addEventListener("input",refreshReceiptCheck);document.addEventListener("keydown",e=>{if(e.key==="F2"){e.preventDefault();insertBatchDate()}else if(e.ctrlKey&&e.key==="Enter"){e.preventDefault();document.querySelector('button[value="preview"]').click()}});togglePaymentDate();updateDateStatus();refreshReceiptCheck()});
-</script>
-</body>
-</html>
-""",
+
+    <script>
+    function changeQuickAmount(change){
+        const input = document.getElementById("quick_amount");
+
+        if(!input){
+            return;
+        }
+
+        let current = Number(input.value);
+
+        if(!Number.isFinite(current)){
+            current = 50;
+        }
+
+        current += change;
+
+        if(current < 50){
+            current = 50;
+        }
+
+        input.value = current;
+    }
+
+    function setQuickAmount(amount){
+        const input = document.getElementById("quick_amount");
+
+        if(input){
+            input.value = amount;
+        }
+    }
+
+    function addQuickMember(){
+        const keywordInput = document.getElementById("quick_member_keyword");
+        const amountInput = document.getElementById("quick_amount");
+        const textarea = document.getElementById("raw_text");
+
+        if(!keywordInput || !amountInput || !textarea){
+            return;
+        }
+
+        const keyword = keywordInput.value.trim();
+        const amount = amountInput.value.trim();
+
+        if(!keyword){
+            alert("请输入会员编号或姓名");
+            keywordInput.focus();
+            return;
+        }
+
+        const newLine = amount
+            ? keyword + " " + amount
+            : keyword;
+
+        const current = textarea.value.trim();
+
+        textarea.value = current
+            ? current + "\\n" + newLine
+            : newLine;
+
+        keywordInput.value = "";
+        keywordInput.focus();
+        textarea.scrollTop = textarea.scrollHeight;
+    }
+
+    function togglePaymentDate(){
+        const method = document.getElementById("payment_method");
+        const box = document.getElementById("payment_date_box");
+
+        if(!method || !box){
+            return;
+        }
+
+        box.style.display = method.value === "银行过账"
+            ? "block"
+            : "none";
+    }
+
+    document.addEventListener("DOMContentLoaded", function(){
+        const keywordInput = document.getElementById("quick_member_keyword");
+
+        if(keywordInput){
+            keywordInput.addEventListener("keydown", function(event){
+                if(event.key === "Enter"){
+                    event.preventDefault();
+                    addQuickMember();
+                }
+            });
+        }
+
+        togglePaymentDate();
+    });
+    </script>
+
+    </body>
+    </html>
+    """,
         branch=branch,
         message=message,
         raw_text=raw_text,
@@ -8202,1555 +8769,13 @@ document.addEventListener("DOMContentLoaded",()=>{const k=document.getElementByI
         bank_payment_date=bank_payment_date,
         current_book_no=current_book_no,
         payment_method=payment_method,
-        default_amount=50,
+        default_amount=default_amount,
         preview_rows=preview_rows,
-        has_preview_error=any(row.get("error") for row in preview_rows),
+        has_preview_error=any(
+            row.get("error")
+            for row in preview_rows
+        ),
     )
-
-STW_BANK_IMPORT_DIR = Path(
-    tempfile.gettempdir()
-) / "finance_stw_bank_import"
-
-STW_BANK_IMPORT_DIR.mkdir(
-    parents=True,
-    exist_ok=True,
-)
-
-
-def _stw_import_clean_text(value):
-    return str(value or "").strip()
-
-
-def _stw_import_normalize_header(value):
-    text = _stw_import_clean_text(value).lower()
-    text = re.sub(r"\s+", " ", text)
-    return text
-
-
-def _stw_import_excel_date(value):
-    if value is None or value == "":
-        return None
-
-    if isinstance(value, datetime):
-        return value.date()
-
-    if isinstance(value, date):
-        return value
-
-    text = str(value).strip()
-
-    for fmt in (
-        "%Y-%m-%d",
-        "%d/%b/%y",
-        "%d/%b/%Y",
-        "%d/%m/%Y",
-        "%d/%m/%y",
-    ):
-        try:
-            return datetime.strptime(
-                text,
-                fmt
-            ).date()
-        except ValueError:
-            continue
-
-    return None
-
-
-def _stw_import_member_id(value):
-    text = _stw_import_clean_text(value).upper()
-
-    if not text:
-        return ""
-
-    match = re.fullmatch(
-        r"(?:STW[\s\-]?)?0*(\d+)",
-        text,
-    )
-
-    if not match:
-        return ""
-
-    return f"STW-{int(match.group(1))}"
-
-
-def _stw_import_or_no(value):
-    """
-    保留 STW 原始 OR 编号，但统一大小写与空格。
-
-    支持：
-    STW-OR0002565
-    STW OR0002565
-    2565
-    """
-    text = _stw_import_clean_text(value).upper()
-    text = re.sub(r"\s+", "", text)
-
-    if not text:
-        return ""
-
-    if text.isdigit():
-        return f"STW-OR{int(text):07d}"
-
-    match = re.fullmatch(
-        r"STW-?OR0*(\d+)",
-        text,
-    )
-
-    if match:
-        return f"STW-OR{int(match.group(1)):07d}"
-
-    return text
-
-
-def _stw_import_month_number(month_text):
-    month_text = str(month_text or "").strip().upper()
-
-    month_map = {
-        "JAN": 1,
-        "FEB": 2,
-        "MAR": 3,
-        "APR": 4,
-        "MAY": 5,
-        "JUN": 6,
-        "JUL": 7,
-        "AUG": 8,
-        "SEP": 9,
-        "OCT": 10,
-        "NOV": 11,
-        "DEC": 12,
-    }
-
-    return month_map.get(month_text)
-
-
-def _stw_import_parse_period(details):
-    """
-    解析：
-    MEMBER FEE FOR MAR'26
-    MEMBER FEE FOR JAN-DEC'26
-    MEMBER FEE FOR NOV-FEB'26
-    MEMBER FEE FOR AUG-JUL'26
-
-    规则：
-    结束月份使用尾部年份；
-    若开始月份数字大于结束月份，开始年份为上一年。
-    """
-    text = _stw_import_clean_text(details).upper()
-
-    text = text.replace("’", "'")
-    text = text.replace("`", "'")
-    text = re.sub(r"\s+", " ", text)
-
-    single = re.search(
-        r"MEMBER\s+FEE\s+FOR\s+"
-        r"([A-Z]{3})\s*'?\s*(\d{2,4})",
-        text,
-    )
-
-    range_match = re.search(
-        r"MEMBER\s+FEE\s+FOR\s+"
-        r"([A-Z]{3})\s*-\s*([A-Z]{3})"
-        r"\s*'?\s*(\d{2,4})",
-        text,
-    )
-
-    if range_match:
-        start_month = _stw_import_month_number(
-            range_match.group(1)
-        )
-        end_month = _stw_import_month_number(
-            range_match.group(2)
-        )
-
-        year_text = range_match.group(3)
-        end_year = int(year_text)
-
-        if end_year < 100:
-            end_year += 2000
-
-        if not start_month or not end_month:
-            return None
-
-        start_year = (
-            end_year - 1
-            if start_month > end_month
-            else end_year
-        )
-
-    elif single:
-        start_month = _stw_import_month_number(
-            single.group(1)
-        )
-        end_month = start_month
-
-        year_text = single.group(2)
-        end_year = int(year_text)
-
-        if end_year < 100:
-            end_year += 2000
-
-        start_year = end_year
-
-        if not start_month:
-            return None
-
-    else:
-        return None
-
-    month_from = date(
-        start_year,
-        start_month,
-        1,
-    )
-
-    month_to = date(
-        end_year,
-        end_month,
-        1,
-    )
-
-    month_count = (
-        (month_to.year - month_from.year) * 12
-        + month_to.month
-        - month_from.month
-        + 1
-    )
-
-    if month_count <= 0:
-        return None
-
-    return {
-        "month_from": month_from,
-        "month_to": month_to,
-        "month_count": month_count,
-    }
-
-
-def _stw_import_find_header_map(sheet):
-    """
-    支持本次整理后的标准 Excel，
-    也兼容 STW 原始 Excel 常见栏名。
-    """
-    aliases = {
-        "batch_month": {
-            "batch month",
-            "month",
-            "月份",
-        },
-        "receipt_no": {
-            "receipt no",
-            "receipt no.",
-            "收据号码",
-            "收据号",
-        },
-        "or_no": {
-            "or no",
-            "or no.",
-            "or",
-        },
-        "receipt_date": {
-            "receipt date",
-            "收据日期",
-        },
-        "mapping": {
-            "cheras mapping",
-            "cheras no. (mapping)",
-            "cheras no.",
-            "mapping",
-        },
-        "stw_no": {
-            "stw no.",
-            "stw no",
-            "no",
-            "no.",
-        },
-        "name": {
-            "name",
-            "名字",
-            "姓名",
-        },
-        "details": {
-            "details",
-            "detail",
-            "明细",
-        },
-        "cash": {
-            "cash",
-        },
-        "bank": {
-            "bank",
-            "amount",
-            "金额",
-        },
-    }
-
-    best_row = None
-    best_map = {}
-
-    for row_no in range(
-        1,
-        min(sheet.max_row, 15) + 1,
-    ):
-        current = {}
-
-        for col_no in range(
-            1,
-            sheet.max_column + 1,
-        ):
-            header = _stw_import_normalize_header(
-                sheet.cell(
-                    row=row_no,
-                    column=col_no,
-                ).value
-            )
-
-            if not header:
-                continue
-
-            for key, names in aliases.items():
-                if header in names:
-                    current[key] = col_no
-                    break
-
-        required_found = sum(
-            1
-            for key in (
-                "or_no",
-                "receipt_date",
-                "stw_no",
-                "name",
-                "details",
-                "bank",
-            )
-            if key in current
-        )
-
-        if required_found > len(best_map):
-            best_row = row_no
-            best_map = current
-
-        if required_found == 6:
-            return row_no, current
-
-    return best_row, best_map
-
-
-def _stw_import_read_workbook(filepath):
-    workbook = load_workbook(
-        filepath,
-        data_only=True,
-    )
-
-    # 优先读取标准资料页
-    if "STW Bank 2026" in workbook.sheetnames:
-        sheet = workbook["STW Bank 2026"]
-    else:
-        sheet = workbook[workbook.sheetnames[0]]
-
-    header_row, header_map = (
-        _stw_import_find_header_map(sheet)
-    )
-
-    required = {
-        "or_no",
-        "receipt_date",
-        "stw_no",
-        "name",
-        "details",
-        "bank",
-    }
-
-    missing = sorted(
-        required - set(header_map)
-    )
-
-    if not header_row or missing:
-        raise ValueError(
-            "Excel 栏位不完整，缺少："
-            + "、".join(missing)
-        )
-
-    rows = []
-
-    for excel_row in range(
-        header_row + 1,
-        sheet.max_row + 1,
-    ):
-        def value(key):
-            col = header_map.get(key)
-
-            if not col:
-                return None
-
-            return sheet.cell(
-                row=excel_row,
-                column=col,
-            ).value
-
-        raw_or = value("or_no")
-        raw_stw_no = value("stw_no")
-        raw_name = value("name")
-        raw_details = value("details")
-        raw_bank = value("bank")
-
-        if all(
-            item in (None, "")
-            for item in (
-                raw_or,
-                raw_stw_no,
-                raw_name,
-                raw_details,
-                raw_bank,
-            )
-        ):
-            continue
-
-        receipt_no = _stw_import_or_no(
-            raw_or
-        )
-
-        member_id = _stw_import_member_id(
-            raw_stw_no
-        )
-
-        receipt_date = _stw_import_excel_date(
-            value("receipt_date")
-        )
-
-        excel_name = _stw_import_clean_text(
-            raw_name
-        )
-
-        excel_name = re.sub(
-            r"^\(CHERAS\)\s*",
-            "",
-            excel_name,
-            flags=re.IGNORECASE,
-        )
-
-        name = excel_name
-
-        details = _stw_import_clean_text(
-            raw_details
-        )
-
-        amount = money(
-            raw_bank or 0
-        )
-
-        period = _stw_import_parse_period(
-            details
-        )
-
-        error_messages = []
-        warning_messages = []
-
-        if not receipt_no:
-            error_messages.append(
-                "缺少 OR No."
-            )
-
-        if not receipt_date:
-            error_messages.append(
-                "收据日期无效"
-            )
-
-        if not member_id:
-            error_messages.append(
-                "STW 编号无效"
-            )
-
-        if not name:
-            error_messages.append(
-                "缺少姓名"
-            )
-
-        if amount <= 0:
-            error_messages.append(
-                "Bank 金额无效"
-            )
-
-        elif amount % 50 != 0:
-            error_messages.append(
-                "金额不是 RM50 的倍数"
-            )
-
-        if not period:
-            error_messages.append(
-                "无法从明细解析供养月份"
-            )
-
-        elif amount != money(
-            period["month_count"] * 50
-        ):
-            error_messages.append(
-                "金额与明细月份数量不一致"
-            )
-
-        member = None
-
-        if member_id:
-            member = db_query(
-                """
-                select
-                    member_id,
-                    name,
-                    english_name
-                from members
-                where member_id = %s
-                limit 1
-                """,
-                (member_id,),
-                fetchone=True,
-            )
-
-            if not member:
-
-                error_messages.append(
-                    f"找不到会员 {member_id}"
-                )
-
-            else:
-
-                # 会员编号是正式依据。
-                # Excel／截图姓名只保留供核对，
-                # 最终入账姓名一律采用 members 表姓名。
-                db_name = str(
-                    member.get("name") or ""
-                ).strip()
-
-                if db_name:
-                    name = db_name
-
-        duplicate_finance = None
-        duplicate_payment = None
-
-        if receipt_no:
-            duplicate_finance = db_query(
-                """
-                select id
-                from finance_records
-                where upper(coalesce(receipt_no, ''))
-                    = upper(%s)
-                limit 1
-                """,
-                (receipt_no,),
-                fetchone=True,
-            )
-
-            duplicate_payment = db_query(
-                """
-                select id
-                from member_payments
-                where upper(coalesce(receipt_no, ''))
-                    = upper(%s)
-                  and coalesce(status, 'active')
-                    = 'active'
-                limit 1
-                """,
-                (receipt_no,),
-                fetchone=True,
-            )
-
-        if duplicate_finance:
-            error_messages.append(
-                "OR No. 已存在于财政记录"
-            )
-
-        if duplicate_payment:
-            error_messages.append(
-                "OR No. 已存在于月费记录"
-            )
-
-        month_lock_error = None
-
-        if receipt_date:
-            month_lock_error = (
-                require_finance_month_open(
-                    receipt_date,
-                    get_fund_account(
-                        "月费",
-                        branch="STW",
-                        record_type="income",
-                    ),
-                )
-            )
-
-        if month_lock_error:
-            error_messages.append(
-                month_lock_error
-            )
-
-        rows.append({
-            "excel_row": excel_row,
-
-            "batch_month": (
-                _stw_import_clean_text(
-                    value("batch_month")
-                )
-                or (
-                    receipt_date.strftime("%Y-%m")
-                    if receipt_date
-                    else ""
-                )
-            ),
-
-            "receipt_no": receipt_no,
-
-            "receipt_date": (
-                receipt_date.isoformat()
-                if receipt_date
-                else ""
-            ),
-
-            "mapping": _stw_import_clean_text(
-                value("mapping")
-            ),
-
-            "member_id": member_id,
-
-            # 截图／Excel 原始姓名，仅供核对
-            "excel_name": excel_name,
-
-            # 正式入账姓名：
-            # 有会员资料就采用 members 表姓名
-            "name": (
-                str(member.get("name") or "").strip()
-                if member
-                else excel_name
-            ),
-
-            "details": details,
-
-            "amount": float(amount),
-
-            "month_from": (
-                period["month_from"].isoformat()
-                if period
-                else ""
-            ),
-
-            "month_to": (
-                period["month_to"].isoformat()
-                if period
-                else ""
-            ),
-
-            "month_count": (
-                period["month_count"]
-                if period
-                else 0
-            ),
-
-            "error": "；".join(
-                error_messages
-            ),
-
-            "warning": "；".join(
-                warning_messages
-            ),
-        })
-
-    return rows
-
-
-@finance_bp.route(
-    "/admin/stw-bank-monthly-import",
-    methods=["GET", "POST"],
-)
-@finance_admin_required
-def stw_bank_monthly_import():
-
-    message = ""
-    preview_rows = []
-    import_token = ""
-    action = request.form.get(
-        "action",
-        ""
-    ).strip()
-
-    if request.method == "POST":
-
-        if action == "preview":
-
-            upload = request.files.get(
-                "excel_file"
-            )
-
-            if (
-                not upload
-                or not upload.filename
-            ):
-                message = "请选择 STW 银行月费 Excel。"
-
-            elif not upload.filename.lower().endswith(
-                ".xlsx"
-            ):
-                message = "目前只接受 .xlsx 文件。"
-
-            else:
-                import_token = uuid.uuid4().hex
-
-                filepath = (
-                    STW_BANK_IMPORT_DIR
-                    / f"{import_token}.xlsx"
-                )
-
-                upload.save(filepath)
-
-                try:
-                    preview_rows = (
-                        _stw_import_read_workbook(
-                            filepath
-                        )
-                    )
-
-                    if not preview_rows:
-                        message = (
-                            "Excel 没有找到可导入资料。"
-                        )
-
-                except Exception as exc:
-                    message = (
-                        "无法读取 Excel："
-                        f"{exc}"
-                    )
-
-        elif action == "confirm":
-
-            import_token = request.form.get(
-                "import_token",
-                ""
-            ).strip()
-
-            if not re.fullmatch(
-                r"[a-f0-9]{32}",
-                import_token,
-            ):
-                message = "导入凭证无效，请重新上传。"
-
-            else:
-                filepath = (
-                    STW_BANK_IMPORT_DIR
-                    / f"{import_token}.xlsx"
-                )
-
-                if not filepath.exists():
-                    message = (
-                        "预览资料已经失效，"
-                        "请重新上传 Excel。"
-                    )
-
-                else:
-                    try:
-                        preview_rows = (
-                            _stw_import_read_workbook(
-                                filepath
-                            )
-                        )
-
-                        has_error = any(
-                            row["error"]
-                            for row in preview_rows
-                        )
-
-                        if has_error:
-                            message = (
-                                "仍有错误记录，"
-                                "不能确认导入。"
-                            )
-
-                        else:
-                            imported_count = 0
-                            imported_total = Decimal("0")
-
-                            with get_conn() as conn:
-                                with conn.cursor(
-                                    cursor_factory=RealDictCursor
-                                ) as cur:
-
-                                    for row in preview_rows:
-
-                                        receipt_date = (
-                                            date.fromisoformat(
-                                                row["receipt_date"]
-                                            )
-                                        )
-
-                                        month_from = (
-                                            date.fromisoformat(
-                                                row["month_from"]
-                                            )
-                                        )
-
-                                        month_to = (
-                                            date.fromisoformat(
-                                                row["month_to"]
-                                            )
-                                        )
-
-                                        amount = Decimal(
-                                            str(row["amount"])
-                                        )
-
-                                        cur.execute(
-                                            """
-                                            insert into finance_records
-                                            (
-                                                record_type,
-                                                fund_account,
-                                                record_date,
-                                                receipt_date,
-                                                category,
-                                                receipt_no,
-                                                member_id,
-                                                name,
-                                                amount,
-                                                payment_method,
-                                                month_from,
-                                                month_to,
-                                                remarks
-                                            )
-                                            values
-                                            (
-                                                'income',
-                                                %s,
-                                                %s,
-                                                %s,
-                                                '月费',
-                                                %s,
-                                                %s,
-                                                %s,
-                                                %s,
-                                                '银行过账',
-                                                %s,
-                                                %s,
-                                                %s
-                                            )
-                                            """,
-                                            (
-                                                get_fund_account(
-                                                    "月费",
-                                                    branch="STW",
-                                                    record_type="income",
-                                                ),
-                                                receipt_date,
-                                                receipt_date,
-                                                row["receipt_no"],
-                                                row["member_id"],
-                                                row["name"],
-                                                amount,
-                                                month_from,
-                                                month_to,
-                                                (
-                                                    "STW 银行月费批量导入；"
-                                                    + row["details"]
-                                                ),
-                                            ),
-                                        )
-
-                                        cur.execute(
-                                            """
-                                            insert into member_payments
-                                            (
-                                                payment_date,
-                                                receipt_date,
-                                                member_id,
-                                                name,
-                                                receipt_no,
-                                                amount,
-                                                start_month,
-                                                end_month,
-                                                month_count
-                                            )
-                                            values
-                                            (
-                                                %s,
-                                                %s,
-                                                %s,
-                                                %s,
-                                                %s,
-                                                %s,
-                                                %s,
-                                                %s,
-                                                %s
-                                            )
-                                            """,
-                                            (
-                                                receipt_date,
-                                                receipt_date,
-                                                row["member_id"],
-                                                row["name"],
-                                                row["receipt_no"],
-                                                amount,
-                                                month_from,
-                                                month_to,
-                                                row["month_count"],
-                                            ),
-                                        )
-
-                                        imported_count += 1
-                                        imported_total += amount
-
-                                    conn.commit()
-
-                            try:
-                                filepath.unlink()
-                            except OSError:
-                                pass
-
-                            flash(
-                                (
-                                    f"STW 银行月费导入完成："
-                                    f"{imported_count} 笔，"
-                                    f"RM {imported_total:,.2f}"
-                                ),
-                                "success",
-                            )
-
-                            return redirect(
-                                url_for(
-                                    "finance.stw_bank_monthly_import"
-                                )
-                            )
-
-                    except Exception as exc:
-                        message = (
-                            "确认导入失败："
-                            f"{exc}"
-                        )
-
-    preview_count = len(
-        preview_rows
-    )
-
-    preview_total = sum(
-        float(row.get("amount") or 0)
-        for row in preview_rows
-    )
-
-    error_count = sum(
-        1
-        for row in preview_rows
-        if row.get("error")
-    )
-
-    warning_count = sum(
-        1
-        for row in preview_rows
-        if row.get("warning")
-        and not row.get("error")
-    )
-
-    return render_template_string(
-        """
-<!doctype html>
-<html lang="zh">
-<head>
-    <meta charset="utf-8">
-
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1"
-    >
-
-    <title>STW 银行月费批量导入</title>
-
-    <link
-        rel="stylesheet"
-        href="{{ url_for(
-            'static',
-            filename='css/toolbox.css'
-        ) }}"
-    >
-
-    <style>
-        *{
-            box-sizing:border-box;
-        }
-
-        body{
-            margin:0;
-            background:#f5f7fb;
-            color:#172033;
-        }
-
-        .import-page{
-            width:min(1320px,calc(100% - 30px));
-            margin:0 auto;
-            padding:24px 0 50px;
-        }
-
-        .topbar{
-            display:flex;
-            justify-content:space-between;
-            align-items:center;
-            gap:12px;
-            margin-bottom:18px;
-        }
-
-        .back{
-            display:inline-flex;
-            padding:11px 16px;
-            border:1px solid #d9e0eb;
-            border-radius:13px;
-            background:#fff;
-            color:#263149;
-            text-decoration:none;
-            font-weight:900;
-        }
-
-        .hero{
-            padding:27px;
-            border:1px solid #f0d5d5;
-            border-radius:24px;
-            background:
-                linear-gradient(
-                    135deg,
-                    #fff0f0,
-                    #fff
-                );
-            box-shadow:
-                0 10px 28px
-                rgba(32,49,80,.06);
-        }
-
-        .hero h1{
-            margin:0;
-            font-size:32px;
-        }
-
-        .hero p{
-            margin:8px 0 0;
-            color:#758094;
-            line-height:1.6;
-        }
-
-        .upload-card,
-        .preview-card{
-            margin-top:18px;
-            padding:20px;
-            border:1px solid #e0e6ef;
-            border-radius:21px;
-            background:#fff;
-            box-shadow:
-                0 9px 25px
-                rgba(32,49,80,.05);
-        }
-
-        .upload-grid{
-            display:grid;
-            grid-template-columns:minmax(0,1fr) auto;
-            gap:12px;
-            align-items:end;
-        }
-
-        .form-label{
-            display:block;
-            margin-bottom:7px;
-            color:#314158;
-            font-size:15px;
-            font-weight:900;
-        }
-
-        .file-input{
-            width:100%;
-            min-height:52px;
-            padding:10px;
-            border:1px solid #cfd8e5;
-            border-radius:12px;
-            background:#fff;
-            font-size:16px;
-        }
-
-        .preview-btn,
-        .confirm-btn{
-            min-height:52px;
-            padding:0 22px;
-            border:0;
-            border-radius:13px;
-            color:#fff;
-            font-size:17px;
-            font-weight:950;
-            cursor:pointer;
-        }
-
-        .preview-btn{
-            background:#315fd1;
-        }
-
-        .confirm-btn{
-            width:100%;
-            margin-top:16px;
-            background:#1d9b56;
-        }
-
-        .message{
-            margin-top:16px;
-            padding:14px 16px;
-            border:1px solid #efcccc;
-            border-radius:14px;
-            background:#fff2f2;
-            color:#9d2d2d;
-            font-weight:800;
-        }
-
-        .summary-grid{
-            display:grid;
-            grid-template-columns:
-                repeat(4,minmax(0,1fr));
-            gap:12px;
-            margin-bottom:17px;
-        }
-
-        .summary-box{
-            padding:17px;
-            border:1px solid #e1e6ee;
-            border-radius:16px;
-            background:#fafbfd;
-        }
-
-        .summary-label{
-            color:#778194;
-            font-size:13px;
-        }
-
-        .summary-value{
-            margin-top:6px;
-            font-size:23px;
-            font-weight:950;
-        }
-
-        .summary-error{
-            color:#b83232;
-        }
-
-        .summary-warning{
-            color:#a66a00;
-        }
-
-        .table-wrap{
-            overflow:auto;
-            border:1px solid #e1e6ee;
-            border-radius:16px;
-        }
-
-        table{
-            width:100%;
-            min-width:1250px;
-            border-collapse:collapse;
-        }
-
-        th,
-        td{
-            padding:11px 12px;
-            border-bottom:1px solid #e8ecf2;
-            text-align:left;
-            vertical-align:top;
-            white-space:nowrap;
-        }
-
-        th{
-            position:sticky;
-            top:0;
-            z-index:1;
-            background:#eef3f9;
-            color:#34445b;
-            font-size:13px;
-        }
-
-        td{
-            font-size:14px;
-        }
-
-        tr.row-error{
-            background:#fff1f1;
-        }
-
-        tr.row-warning{
-            background:#fff9e8;
-        }
-
-        .receipt{
-            color:#315da7;
-            font-weight:900;
-        }
-
-        .amount{
-            color:#16803d;
-            font-weight:950;
-        }
-
-        .result{
-            max-width:330px;
-            white-space:normal;
-            line-height:1.5;
-        }
-
-        .ok{
-            color:#16803d;
-            font-weight:850;
-        }
-
-        .error{
-            color:#b83232;
-            font-weight:850;
-        }
-
-        .warning{
-            color:#a66a00;
-            font-weight:850;
-        }
-
-        @media(max-width:760px){
-            .import-page{
-                width:min(100% - 20px,1320px);
-                padding-top:14px;
-            }
-
-            .upload-grid{
-                grid-template-columns:1fr;
-            }
-
-            .preview-btn{
-                width:100%;
-            }
-
-            .summary-grid{
-                grid-template-columns:repeat(2,1fr);
-            }
-
-            .topbar{
-                align-items:flex-start;
-            }
-
-            .hero h1{
-                font-size:26px;
-            }
-        }
-    </style>
-</head>
-
-<body>
-
-<main class="import-page">
-
-    <div class="topbar">
-
-        <a
-            class="back"
-            href="{{ url_for(
-                'finance_v7.finance_v7_home'
-            ) }}"
-        >
-            ← V7 负责人中心
-        </a>
-
-    </div>
-
-    <section class="hero">
-
-        <h1>
-            🌏 STW 银行月费批量导入
-        </h1>
-
-        <p>
-            上传 STW 银行月费 Excel。
-            系统会检查会员、OR No.、金额、
-            供养月份及重复记录；
-            检查通过后才可一次确认入账。
-        </p>
-
-    </section>
-
-    {% with messages =
-        get_flashed_messages(
-            with_categories=true
-        )
-    %}
-
-        {% for category, text in messages %}
-
-            <div class="message"
-                 style="
-                    background:#edf9f1;
-                    border-color:#cde9d6;
-                    color:#346544;
-                 ">
-                ✅ {{ text }}
-            </div>
-
-        {% endfor %}
-
-    {% endwith %}
-
-    {% if message %}
-
-        <div class="message">
-            ⚠️ {{ message }}
-        </div>
-
-    {% endif %}
-
-    <section class="upload-card">
-
-        <form
-            method="post"
-            enctype="multipart/form-data"
-        >
-
-            <div class="upload-grid">
-
-                <div>
-
-                    <label class="form-label">
-                        选择 STW 银行月费 Excel
-                    </label>
-
-                    <input
-                        class="file-input"
-                        type="file"
-                        name="excel_file"
-                        accept=".xlsx"
-                        required
-                    >
-
-                </div>
-
-                <button
-                    class="preview-btn"
-                    type="submit"
-                    name="action"
-                    value="preview"
-                >
-                    🔎 上传并检查
-                </button>
-
-            </div>
-
-        </form>
-
-    </section>
-
-    {% if preview_rows %}
-
-        <section class="preview-card">
-
-            <div class="summary-grid">
-
-                <div class="summary-box">
-
-                    <div class="summary-label">
-                        资料笔数
-                    </div>
-
-                    <div class="summary-value">
-                        {{ preview_count }}
-                    </div>
-
-                </div>
-
-                <div class="summary-box">
-
-                    <div class="summary-label">
-                        Bank 总额
-                    </div>
-
-                    <div class="summary-value">
-                        RM {{
-                            "%.2f"|format(
-                                preview_total
-                            )
-                        }}
-                    </div>
-
-                </div>
-
-                <div class="summary-box">
-
-                    <div class="summary-label">
-                        错误
-                    </div>
-
-                    <div class="
-                        summary-value
-                        summary-error
-                    ">
-                        {{ error_count }}
-                    </div>
-
-                </div>
-
-                <div class="summary-box">
-
-                    <div class="summary-label">
-                        提醒
-                    </div>
-
-                    <div class="
-                        summary-value
-                        summary-warning
-                    ">
-                        {{ warning_count }}
-                    </div>
-
-                </div>
-
-            </div>
-
-            <div class="table-wrap">
-
-                <table>
-
-                    <thead>
-
-                        <tr>
-                            <th>Excel 行</th>
-                            <th>STW 编号</th>
-                            <th>会员姓名</th>
-                            <th>截图姓名</th>
-                            <th>月份</th>
-                            <th>OR No.</th>
-                            <th>收据日期</th>
-                            <th>明细</th>
-                            <th>金额</th>
-                            <th>供养月份</th>
-                            <th>检查结果</th>
-                        </tr>
-
-                    </thead>
-
-                    <tbody>
-
-                        {% for row in preview_rows %}
-
-                            <tr class="
-                            {% if row.error %}
-                                row-error
-                            {% elif row.warning %}
-                                row-warning
-                            {% endif %}
-                        ">
-
-                            <td>{{ row.excel_row }}</td>
-
-                            <td>
-                                <strong>{{ row.member_id }}</strong>
-                            </td>
-
-                            <td>
-                                <strong>{{ row.name }}</strong>
-                            </td>
-
-                            <td style="color:#7c8698;">
-                                {{ row.excel_name or '-' }}
-                            </td>
-
-                            <td>{{ row.batch_month }}</td>
-
-                            <td class="receipt">
-                                {{ row.receipt_no }}
-                            </td>
-
-                            <td>{{ row.receipt_date }}</td>
-
-                            <td>{{ row.details }}</td>
-
-                            <td class="amount">
-                                RM {{ "%.2f"|format(row.amount) }}
-                            </td>
-
-                            <td>
-                                {{ row.month_from[:7] }}
-                                ～
-                                {{ row.month_to[:7] }}
-                                （{{ row.month_count }}个月）
-                            </td>
-
-                            <td class="result">
-
-                                {% if row.error %}
-
-                                    <span class="error">
-                                        ❌ {{ row.error }}
-                                    </span>
-
-                                {% elif row.warning %}
-
-                                    <span class="warning">
-                                        ⚠️ {{ row.warning }}
-                                    </span>
-
-                                {% else %}
-
-                                    <span class="ok">
-                                        ✅ 编号有效，可以导入
-                                    </span>
-
-                                {% endif %}
-
-                            </td>
-
-                        </tr>
-
-                        {% endfor %}
-
-                    </tbody>
-
-                </table>
-
-            </div>
-
-            {% if not error_count %}
-
-                <form method="post">
-
-                    <input
-                        type="hidden"
-                        name="import_token"
-                        value="{{ import_token }}"
-                    >
-
-                    <button
-                        class="confirm-btn"
-                        type="submit"
-                        name="action"
-                        value="confirm"
-                        onclick="
-                            return confirm(
-                                '确定导入全部 '
-                                + '{{ preview_count }}'
-                                + ' 笔 STW 银行月费？'
-                            );
-                        "
-                    >
-                        ✅ 确认导入全部
-                        {{ preview_count }} 笔
-                    </button>
-
-                </form>
-
-            {% endif %}
-
-        </section>
-
-    {% endif %}
-
-</main>
-
-</body>
-</html>
-""",
-        message=message,
-        preview_rows=preview_rows,
-        preview_count=preview_count,
-        preview_total=preview_total,
-        error_count=error_count,
-        warning_count=warning_count,
-        import_token=import_token,
-    )
-
 
 def get_recent_donors(category=None):
     if category:
@@ -10930,128 +9955,6 @@ def income_batch(category):
                     width:100%;
                 }
             }
-
-
-            .finance-header-row{
-                display:flex;
-                justify-content:space-between;
-                align-items:flex-start;
-                gap:14px;
-            }
-
-            .finance-help-btn{
-                flex:0 0 auto;
-                min-height:42px;
-                padding:9px 14px;
-                border:1px solid rgba(255,255,255,.55);
-                border-radius:12px;
-                background:rgba(255,255,255,.16);
-                color:#fff;
-                font-size:15px;
-                font-weight:800;
-                cursor:pointer;
-            }
-
-            .batch-date-tool{
-                margin:14px 0 16px;
-                padding:16px;
-                border:1px solid #cfe0f1;
-                border-radius:16px;
-                background:#f7fbff;
-            }
-
-            .batch-date-title{
-                margin-bottom:10px;
-                color:#27425d;
-                font-size:17px;
-                font-weight:850;
-            }
-
-            .batch-date-row{
-                display:grid;
-                grid-template-columns:minmax(190px,1fr) auto auto auto auto;
-                gap:8px;
-                align-items:stretch;
-            }
-
-            .batch-date-row .form-input{
-                width:100%;
-                min-width:0;
-                margin:0;
-            }
-
-            .batch-date-btn{
-                min-height:50px;
-                padding:10px 14px;
-                border:1px solid #b7c9dc;
-                border-radius:11px;
-                background:#fff;
-                color:#244764;
-                font-size:15px;
-                font-weight:850;
-                cursor:pointer;
-            }
-
-            .batch-date-btn.primary{
-                border-color:#1769aa;
-                background:#1769aa;
-                color:#fff;
-            }
-
-            .batch-date-status{
-                margin-top:9px;
-                color:#52677b;
-                font-size:14px;
-                font-weight:750;
-            }
-
-            .finance-help-modal{
-                position:fixed;
-                inset:0;
-                z-index:9999;
-                display:none;
-                align-items:center;
-                justify-content:center;
-                padding:18px;
-                background:rgba(15,23,42,.58);
-            }
-
-            .finance-help-modal.show{display:flex;}
-
-            .finance-help-card{
-                width:min(720px,100%);
-                max-height:88vh;
-                overflow:auto;
-                border-radius:22px;
-                background:#fff;
-                box-shadow:0 24px 70px rgba(0,0,0,.28);
-            }
-
-            .finance-help-head{
-                display:flex;
-                justify-content:space-between;
-                align-items:center;
-                gap:12px;
-                padding:20px 22px;
-                border-bottom:1px solid #e5e7eb;
-            }
-
-            .finance-help-head h2{margin:0;font-size:23px;color:#1f3347;}
-            .finance-help-close{border:0;background:#eef2f7;border-radius:10px;width:40px;height:40px;font-size:22px;cursor:pointer;}
-            .finance-help-body{padding:22px;color:#334155;line-height:1.7;}
-            .finance-help-body h3{margin:18px 0 8px;color:#1f3347;font-size:18px;}
-            .finance-help-body h3:first-child{margin-top:0;}
-            .finance-help-body table{width:100%;border-collapse:collapse;font-size:15px;}
-            .finance-help-body th,.finance-help-body td{padding:10px;border-bottom:1px solid #e5e7eb;text-align:left;}
-            .finance-help-body kbd{display:inline-block;padding:3px 7px;border:1px solid #cbd5e1;border-bottom-width:2px;border-radius:6px;background:#f8fafc;font-weight:800;}
-
-            @media(max-width:760px){
-                .finance-header-row{align-items:stretch;}
-                .finance-help-btn{white-space:nowrap;}
-                .batch-date-row{grid-template-columns:1fr 1fr;}
-                .batch-date-row .form-input{grid-column:1 / -1;}
-                .batch-date-btn.primary{grid-column:1 / -1;}
-            }
         </style>
     </head>
 
@@ -11069,7 +9972,6 @@ def income_batch(category):
         </div>
 
         <div class="card finance-header-card">
-            <div class="finance-header-row"><div>
 
             <h1 class="page-title">
                 💵 {{ category }}
@@ -11079,8 +9981,6 @@ def income_batch(category):
                 可批量录入多笔，并在同一批中使用不同收条日期
             </p>
 
-        
-            </div><button class="finance-help-btn" type="button" onclick="openFinanceHelp()">❓ 使用说明</button></div>
         </div>
 
         {% if message %}
@@ -11089,7 +9989,7 @@ def income_batch(category):
             </div>
         {% endif %}
 
-        <form method="post" id="financeEntryForm">
+        <form method="post">
 
             <input
                 type="hidden"
@@ -11323,21 +10223,8 @@ def income_batch(category):
 
                 </div>
 
-                <div class="batch-date-tool">
-                    <div class="batch-date-title">📅 批量日期快捷工具</div>
-                    <div class="batch-date-row">
-                        <input class="form-input" id="batch_insert_date" type="date" value="{{ receipt_date }}">
-                        <button class="batch-date-btn" type="button" onclick="changeBatchDate(-1)">−1 天</button>
-                        <button class="batch-date-btn" type="button" onclick="setBatchDateToday()">今天</button>
-                        <button class="batch-date-btn" type="button" onclick="changeBatchDate(1)">＋1 天</button>
-                        <button class="batch-date-btn primary" type="button" onclick="insertBatchDate()">F2 插入日期</button>
-                    </div>
-                    <div class="batch-date-status" id="batch_date_status">选好日期后按 F2，系统会自动加入 @日期。</div>
-                </div>
-
                 <textarea
                     class="form-input batch-textarea"
-                    id="raw_text"
                     name="raw_text"
                     placeholder="例如：
 @2026-07-10
@@ -11542,45 +10429,7 @@ def income_batch(category):
 
     </div>
 
-    <div class="finance-help-modal" id="finance_help_modal" onclick="closeFinanceHelp(event)">
-        <div class="finance-help-card" role="dialog" aria-modal="true">
-            <div class="finance-help-head"><h2>{{ category }} 录入说明</h2><button class="finance-help-close" type="button" onclick="closeFinanceHelp()">×</button></div>
-            <div class="finance-help-body">
-                <h3>最快录入流程</h3><p>先设定收条资料，搜索或输入布施人，加入批量清单，预览确认后再入账。</p>
-                <h3>批量日期</h3><p>先选择日期，再按 F2 自动加入 <code>@YYYY-MM-DD</code>。相同日期不会重复加入。</p>
-                <h3>快捷键</h3>
-                <table><tr><th>按键</th><th>功能</th></tr><tr><td><kbd>F2</kbd></td><td>插入已选择日期</td></tr><tr><td><kbd>F3</kbd></td><td>今天并插入</td></tr><tr><td><kbd>Alt</kbd> + <kbd>←</kbd>/<kbd>→</kbd></td><td>日期前后一天</td></tr><tr><td><kbd>Ctrl</kbd> + <kbd>Enter</kbd></td><td>预览资料</td></tr></table>
-            </div>
-        </div>
-    </div>
-
     <script>
-function openFinanceHelp(){ document.getElementById("finance_help_modal").classList.add("show"); }
-function closeFinanceHelp(event){ const modal=document.getElementById("finance_help_modal"); if(!event || event.target===modal || event.target.classList.contains("finance-help-close")){ modal.classList.remove("show"); } }
-function formatLocalISO(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
-function changeBatchDate(days){ const input=document.getElementById("batch_insert_date"); const d=input.value?new Date(input.value+"T00:00:00"):new Date(); d.setDate(d.getDate()+days); input.value=formatLocalISO(d); updateBatchDateStatus(); }
-function setBatchDateToday(){ const input=document.getElementById("batch_insert_date"); input.value=formatLocalISO(new Date()); updateBatchDateStatus(); }
-function updateBatchDateStatus(text){ const input=document.getElementById("batch_insert_date"); const status=document.getElementById("batch_date_status"); if(status) status.textContent=text || (input&&input.value?`当前选择：${input.value}；按 F2 插入日期。`:"请先选择日期。"); }
-function insertBatchDate(){
-    const input=document.getElementById("batch_insert_date"); const textarea=document.getElementById("raw_text");
-    if(!input||!input.value||!textarea){ alert("请先选择批量日期"); return; }
-    const marker="@"+input.value; const lines=textarea.value.split(/\\r?\\n/); let last="";
-    for(let i=lines.length-1;i>=0;i--){ if(lines[i].trim()){ last=lines[i].trim(); break; } }
-    if(last===marker){ updateBatchDateStatus("✅ 清单最后已经是 "+marker+"，没有重复加入。"); textarea.focus(); return; }
-    textarea.value=textarea.value.trim()?textarea.value.replace(/\\s+$/,"")+"\\n"+marker+"\\n":marker+"\\n";
-    textarea.focus(); textarea.scrollTop=textarea.scrollHeight; updateBatchDateStatus("✅ 已插入 "+marker+"，可以继续输入资料。");
-}
-document.addEventListener("DOMContentLoaded",function(){
-    const input=document.getElementById("batch_insert_date"); if(input) input.addEventListener("change",updateBatchDateStatus); updateBatchDateStatus();
-    document.addEventListener("keydown",function(event){
-        if(event.key==="F2"){event.preventDefault();insertBatchDate();}
-        else if(event.key==="F3"){event.preventDefault();setBatchDateToday();insertBatchDate();}
-        else if(event.altKey&&event.key==="ArrowLeft"){event.preventDefault();changeBatchDate(-1);}
-        else if(event.altKey&&event.key==="ArrowRight"){event.preventDefault();changeBatchDate(1);}
-        else if(event.ctrlKey&&event.key==="Enter"){event.preventDefault();const btn=document.querySelector('#financeEntryForm button[name="action"][value="preview"]');if(btn)btn.click();}
-        else if(event.key==="Escape"){const modal=document.getElementById("finance_help_modal");if(modal)modal.classList.remove("show");}
-    });
-});
 const donorSearchInput =
     document.getElementById("donor_search_input");
 
@@ -13577,7 +12426,6 @@ def bank_pending():
 
     form_data = {
         "raw_text": "",
-        "branch": "CHE",
         "member_id": "",
         "name": "",
         "amount": "",
@@ -13591,14 +12439,6 @@ def bank_pending():
     if request.method == "POST":
 
         raw_text = request.form.get("raw_text", "").strip()
-
-        selected_branch = request.form.get(
-            "branch",
-            "CHE"
-        ).strip().upper()
-
-        if selected_branch not in ("CHE", "STW"):
-            selected_branch = "CHE"
 
         member_id_raw = request.form.get(
             "member_id",
@@ -13648,23 +12488,14 @@ def bank_pending():
                 re.IGNORECASE
             )
 
-            if member_match:
+            if member_match and not member_id_raw:
 
-                detected_member = (
+                member_id_raw = (
                     member_match
                     .group(0)
                     .replace(" ", "-")
                     .upper()
                 )
-
-                selected_branch = (
-                    "STW"
-                    if detected_member.startswith("STW")
-                    else "CHE"
-                )
-
-                if not member_id_raw:
-                    member_id_raw = detected_member
 
             amount_match = re.search(
                 r"(RM|MYR)\s*([0-9]+(?:\.[0-9]{1,2})?)",
@@ -13709,39 +12540,11 @@ def bank_pending():
             if not remarks:
                 remarks = raw_text[:1000]
 
-        member_text = str(member_id_raw or "").strip().upper()
-
-        if member_text:
-            full_match = re.fullmatch(
-                r"(CHE|STW)[\s\-]?0*(\d+)",
-                member_text
-            )
-
-            if full_match:
-                selected_branch = full_match.group(1)
-                member_id = (
-                    f"{selected_branch}-"
-                    f"{int(full_match.group(2))}"
-                )
-
-            elif member_text.isdigit():
-                member_id = (
-                    f"{selected_branch}-"
-                    f"{int(member_text)}"
-                )
-
-            else:
-                try:
-                    member_id = normalize_member_id(
-                        member_text,
-                        default_branch=selected_branch
-                    )
-                except TypeError:
-                    member_id = normalize_member_id(
-                        member_text
-                    )
-        else:
-            member_id = ""
+        member_id = (
+            normalize_member_id(member_id_raw)
+            if member_id_raw
+            else ""
+        )
 
         amount = money(amount_raw)
 
@@ -13763,17 +12566,9 @@ def bank_pending():
                     or name
                 )
 
-        member_number_value = re.sub(
-            r"^(CHE|STW)[\s\-]?",
-            "",
-            str(member_id_raw or "").strip(),
-            flags=re.IGNORECASE
-        )
-
         form_data = {
             "raw_text": raw_text,
-            "branch": selected_branch,
-            "member_id": member_number_value,
+            "member_id": member_id_raw,
             "name": name,
             "amount": amount_raw,
             "payment_date": str(payment_date),
@@ -13866,380 +12661,858 @@ def bank_pending():
     )
 
     return render_template_string(FINANCE_DATE_COMPONENT + """
-<!doctype html>
-<html lang="zh">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>银行待确认中心</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/toolbox.css') }}">
+    <!doctype html>
+    <html lang="zh">
+    <head>
 
-    <style>
-        *{box-sizing:border-box}
-        body{margin:0;background:#f5f7fb;color:#172033}
-        .bank-page{width:min(1180px,calc(100% - 30px));margin:0 auto;padding:24px 0 48px}
+        <meta charset="utf-8">
 
-        .topbar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px}
-        .heading{display:flex;align-items:center;gap:14px}
-        .heading-icon{width:58px;height:58px;display:grid;place-items:center;border-radius:18px;background:#edf3ff;font-size:30px}
-        .heading h1{margin:0;font-size:30px}
-        .heading p{margin:5px 0 0;color:#758094;font-size:15px}
-        .back{padding:11px 16px;border:1px solid #d9e0eb;border-radius:13px;background:#fff;color:#263149;text-decoration:none;font-weight:900;white-space:nowrap}
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1"
+        >
 
-        .hero{background:linear-gradient(135deg,#eef4ff,#fff);border:1px solid #d9e5fb;border-radius:24px;padding:24px;box-shadow:0 10px 28px rgba(32,49,80,.06);margin-bottom:16px}
-        .hero-label{color:#62708a;font-size:15px;font-weight:800}
-        .hero-total{margin-top:7px;font-size:43px;font-weight:950;letter-spacing:-1px;color:#163d88}
-        .hero-meta{margin-top:7px;color:#6f7889;font-size:15px}
-        .status-box{margin-top:18px;display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:15px;font-weight:850;line-height:1.5}
-        .status-pending{background:#fff8e8;border:1px solid #f1d99f;color:#715c28}
-        .status-done{background:#edf9f1;border:1px solid #cde9d6;color:#346544}
+        <title>银行过账中心</title>
 
-        .stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-bottom:18px}
-        .stat{background:#fff;border:1px solid #e0e6ef;border-radius:18px;padding:18px;box-shadow:0 8px 22px rgba(32,49,80,.05)}
-        .stat-label{color:#778194;font-size:14px}
-        .stat-value{margin-top:7px;font-size:25px;font-weight:950}
-        .stat-money .stat-value{color:#16803d}
+        <link
+            rel="stylesheet"
+            href="{{ url_for(
+                'static',
+                filename='css/toolbox.css'
+            ) }}"
+        >
 
-        .message{margin-bottom:16px;padding:14px 16px;border-radius:15px;background:#fff2f2;border:1px solid #efcccc;color:#9d2d2d;font-weight:800}
+        <style>
 
-        .entry-grid{
-            display:grid;
-            grid-template-columns:repeat(2,minmax(0,1fr));
-            gap:18px;
-            align-items:start;
-        }
-        .card{background:#fff;border:1px solid #e0e6ef;border-radius:21px;padding:20px;box-shadow:0 9px 25px rgba(32,49,80,.05)}
-        .card-title{display:flex;align-items:center;gap:10px;margin:0;font-size:21px}
-        .card-help{margin:6px 0 16px;color:#7c8698;font-size:14px;line-height:1.55}
-        .smart-note{margin-bottom:15px;padding:13px 14px;border-radius:14px;background:#eef5ff;border:1px solid #cfe0ff;color:#315a94;font-size:14px;line-height:1.55}
+            .bank-page {
+                max-width: 1450px;
+            }
 
-        .form-group{margin-bottom:14px}
-        .form-label{display:block;margin-bottom:7px;color:#314158;font-size:15px;font-weight:900}
-        .form-input{width:100%;min-height:48px;border:1px solid #cfd8e5;border-radius:12px;background:#fff;padding:10px 12px;font-size:16px;color:#172033}
-        .form-input:focus{outline:none;border-color:#5d88dc;box-shadow:0 0 0 4px rgba(59,101,190,.10)}
-        textarea.form-input{resize:vertical;line-height:1.55}
-        .receipt-textarea{min-height:282px}
-        .form-help{margin-top:6px;color:#7c8698;font-size:13px;line-height:1.45}
-        .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}
-        .full-width{grid-column:1/-1}
-        .branch-picker{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-bottom:9px}
-        .branch-btn{min-height:48px;border:2px solid transparent;border-radius:13px;font-size:17px;font-weight:950;cursor:pointer;transition:.16s ease}
-        .branch-btn-che{border-color:#bbebca;background:#effaf3;color:#17713c}
-        .branch-btn-che.active{border-color:#1e9a52;background:#1e9a52;color:#fff;box-shadow:0 7px 16px rgba(30,154,82,.20)}
-        .branch-btn-stw{border-color:#f2c4c4;background:#fff1f1;color:#a83333}
-        .branch-btn-stw.active{border-color:#d94c4c;background:#d94c4c;color:#fff;box-shadow:0 7px 16px rgba(217,76,76,.20)}
-        .member-input-wrap{display:grid;grid-template-columns:78px minmax(0,1fr);gap:8px}
-        .member-prefix{display:flex;align-items:center;justify-content:center;border-radius:12px;background:#e9f8ef;color:#17713c;font-weight:950}
-        .member-prefix.stw{background:#fff0f0;color:#a83333}
+            .bank-header {
+                background:
+                    linear-gradient(
+                        135deg,
+                        #2563eb,
+                        #1d4ed8
+                    );
 
-        .submit-btn{width:100%;min-height:52px;border:0;border-radius:13px;background:linear-gradient(135deg,#2f66d6,#315dd0);color:#fff;font-size:18px;font-weight:950;cursor:pointer;box-shadow:0 9px 20px rgba(47,102,214,.22)}
-        .submit-btn:hover{transform:translateY(-1px)}
+                color: white;
+                padding: 28px;
+                border-radius: 22px;
+                margin-bottom: 20px;
 
-        .records-card{padding:0;overflow:hidden}
-        .records-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:20px;border-bottom:1px solid #e6eaf0;background:#fbfcfe}
-        .records-title{margin:0;font-size:22px}
-        .record-count{color:#6f7889;font-size:14px;font-weight:800}
-        .pending-list{display:grid;gap:12px;padding:18px}
-        .pending-item{display:grid;grid-template-columns:minmax(0,1fr) 210px;gap:16px;padding:17px;border:1px solid #e1e6ee;border-radius:17px;background:#fafbfd}
-        .pending-main{min-width:0}
-        .pending-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
-        .pending-name{font-size:19px;font-weight:950}
-        .pending-id{margin-top:3px;color:#315da7;font-weight:850}
-        .pending-amount{font-size:22px;font-weight:950;color:#16803d;white-space:nowrap}
-        .pending-meta{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px}
-        .chip{display:inline-flex;padding:6px 9px;border-radius:999px;background:#eef2f7;color:#536174;font-size:12px;font-weight:850}
-        .pending-remarks{margin-top:11px;color:#6f7889;font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+                box-shadow:
+                    0 12px 30px
+                    rgba(37, 99, 235, 0.18);
+            }
 
-        .confirm-panel{padding:13px;border:1px solid #dfe6f0;border-radius:14px;background:#fff}
-        .confirm-panel .form-group{margin-bottom:10px}
-        .confirm-panel .form-label{font-size:13px;margin-bottom:5px}
-        .confirm-panel .form-input{min-height:41px;padding:8px 10px;font-size:14px}
-        .confirm-btn,.delete-btn{width:100%;min-height:42px;border:0;border-radius:10px;font-weight:900;cursor:pointer}
-        .confirm-btn{background:#1da15a;color:#fff;margin-top:2px}
-        .delete-btn{background:#fff0f0;color:#b73737;border:1px solid #efcaca;margin-top:9px}
+            .bank-header h1 {
+                margin: 0 0 8px;
+                font-size: 30px;
+            }
 
-        .empty-bank{text-align:center;padding:55px 20px;color:#64748b}
-        .empty-bank-icon{font-size:48px;margin-bottom:10px}
-        .empty-bank h3{margin:0 0 8px;color:#334155}
-        .form-grid .finance-date-control{
-            width:100%;
-        }
+            .bank-header p {
+                margin: 0;
+                opacity: 0.92;
+                line-height: 1.6;
+            }
 
-        .form-grid .finance-date-main{
-            grid-template-columns:52px minmax(220px,1fr) 52px;
-        }
+            .bank-summary {
+                display: grid;
+                grid-template-columns:
+                    repeat(2, minmax(0, 1fr));
+                gap: 16px;
+                margin-bottom: 20px;
+            }
 
-        .form-grid .finance-date-main input{
-            width:100%;
-            min-width:0;
-            font-size:17px;
-        }
+            .bank-summary .summary-box {
+                min-height: 125px;
+                text-align: center;
 
-        .form-grid .finance-date-shortcuts{
-            grid-template-columns:repeat(3,minmax(0,1fr));
-        }
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+            }
 
-        .form-grid .finance-date-quick{
-            min-height:44px;
-        }
-        @media(max-width:1050px){
-            .entry-grid{grid-template-columns:1fr}
-            .pending-item{grid-template-columns:1fr}
-        }
-        @media(max-width:650px){
-            .bank-page{width:min(100% - 20px,1180px);padding-top:14px}
-            .topbar{align-items:flex-start}
-            .heading-icon{width:50px;height:50px;font-size:26px}
-            .heading h1{font-size:24px}
-            .heading p{font-size:13px}
-            .back{padding:9px 11px;font-size:13px}
-            .hero{padding:20px}
-            .hero-total{font-size:36px}
-            .stats{grid-template-columns:1fr;gap:10px}
-            .form-grid{grid-template-columns:1fr}
-            .full-width{grid-column:auto}
-            .pending-top{display:block}
-            .pending-amount{margin-top:9px}
-            .records-head{align-items:flex-start;flex-direction:column}
-        }
-    </style>
-</head>
-<body>
-<main class="bank-page">
+            .summary-icon {
+                font-size: 30px;
+                margin-bottom: 6px;
+            }
 
-    <div class="topbar">
-        <div class="heading">
-            <div class="heading-icon">🏦</div>
-            <div>
-                <h1>银行待确认</h1>
-                <p>CHE 与 STW 共用；登记银行转账资料，确认后正式写入财政记录</p>
-            </div>
+            .summary-label {
+                color: #64748b;
+                font-size: 16px;
+                margin-bottom: 6px;
+            }
+
+            .summary-value {
+                font-size: 28px;
+                font-weight: 800;
+                color: #0f172a;
+            }
+
+            .summary-value.money-value {
+                color: #15803d;
+            }
+
+            .entry-grid {
+                display: grid;
+                grid-template-columns:
+                    minmax(0, 1.2fr)
+                    minmax(360px, 0.8fr);
+                gap: 20px;
+                align-items: start;
+            }
+
+            .form-grid {
+                display: grid;
+                grid-template-columns:
+                    repeat(2, minmax(0, 1fr));
+                gap: 16px;
+            }
+
+            .form-grid .full-width {
+                grid-column: 1 / -1;
+            }
+
+            .receipt-textarea {
+                width: 100%;
+                min-height: 245px;
+                resize: vertical;
+                line-height: 1.6;
+            }
+
+            .form-help {
+                margin-top: 7px;
+                color: #64748b;
+                font-size: 14px;
+                line-height: 1.5;
+            }
+
+            .smart-note {
+                background: #eff6ff;
+                border: 1px solid #bfdbfe;
+                color: #1e40af;
+                border-radius: 14px;
+                padding: 14px 16px;
+                margin-bottom: 16px;
+                line-height: 1.6;
+            }
+
+            .records-card {
+                margin-top: 20px;
+            }
+
+            .table-topbar {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 12px;
+                flex-wrap: wrap;
+                margin-bottom: 14px;
+            }
+
+            .record-count {
+                color: #64748b;
+                font-size: 16px;
+            }
+
+            .pending-table {
+                min-width: 1400px;
+            }
+
+            .pending-table td {
+                vertical-align: middle;
+            }
+
+            .member-id {
+                font-weight: 800;
+                color: #1d4ed8;
+                white-space: nowrap;
+            }
+
+            .member-name {
+                font-weight: 700;
+                color: #1e293b;
+                min-width: 90px;
+            }
+
+            .money-cell {
+                color: #15803d;
+                font-weight: 800;
+                white-space: nowrap;
+                text-align: right;
+            }
+
+            .reference-cell {
+                font-family: Consolas, monospace;
+                font-size: 14px;
+                white-space: nowrap;
+            }
+
+            .remarks-cell {
+                min-width: 180px;
+                max-width: 320px;
+                white-space: normal;
+                line-height: 1.5;
+                overflow-wrap: anywhere;
+            }
+
+            .confirm-box {
+                min-width: 285px;
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 14px;
+                padding: 12px;
+            }
+
+            .confirm-grid {
+                display: grid;
+                gap: 10px;
+            }
+
+            .confirm-box .form-group {
+                margin: 0;
+            }
+
+            .confirm-box .form-label {
+                font-size: 14px;
+            }
+
+            .confirm-box .form-input {
+                min-height: 41px;
+                padding: 8px 10px;
+                font-size: 14px;
+                margin: 0;
+            }
+
+            .confirm-box .btn-tool {
+                width: 100%;
+                min-height: 42px;
+                font-size: 14px;
+                padding: 9px 12px;
+            }
+
+            .delete-form .btn-tool {
+                min-height: 42px;
+                padding: 9px 13px;
+                font-size: 14px;
+                white-space: nowrap;
+            }
+
+            .empty-bank {
+                text-align: center;
+                padding: 55px 20px;
+                color: #64748b;
+            }
+
+            .empty-bank-icon {
+                font-size: 48px;
+                margin-bottom: 10px;
+            }
+
+            .empty-bank h3 {
+                margin: 0 0 8px;
+                color: #334155;
+            }
+
+            .bottom-actions {
+                margin-top: 20px;
+            }
+
+            @media (max-width: 950px) {
+
+                .entry-grid {
+                    grid-template-columns: 1fr;
+                }
+
+            }
+
+            @media (max-width: 700px) {
+
+                .bank-page {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                }
+
+                .bank-header {
+                    padding: 22px 18px;
+                    border-radius: 18px;
+                }
+
+                .bank-header h1 {
+                    font-size: 26px;
+                }
+
+                .bank-summary {
+                    grid-template-columns: 1fr;
+                }
+
+                .bank-summary .summary-box {
+                    min-height: 105px;
+                }
+
+                .form-grid {
+                    grid-template-columns: 1fr;
+                }
+
+                .form-grid .full-width {
+                    grid-column: auto;
+                }
+
+                .entry-grid {
+                    display: block;
+                }
+
+                .entry-grid .card + .card {
+                    margin-top: 20px;
+                }
+
+                .bottom-actions .btn-tool {
+                    width: 100%;
+                }
+
+            }
+
+        </style>
+
+    </head>
+
+    <body>
+
+    <div class="page bank-page">
+
+        <div class="bank-header">
+
+            <h1>🏦 银行过账中心</h1>
+
+            <p>
+                先登记银行转账资料，财政确认后再填写收条号码并正式入账。
+            </p>
+
         </div>
-        <a class="back" href="{{ url_for('finance.finance_home') }}">← 财政首页</a>
-    </div>
 
-    <section class="hero">
-        <div class="hero-label">目前待确认银行资料</div>
-        <div class="hero-total">{{ pending_count }} 笔</div>
-        <div class="hero-meta">待确认总额 RM {{ "%.2f"|format(pending_total) }}</div>
-        {% if pending_count %}
-            <div class="status-box status-pending"><span style="font-size:22px">⏳</span><span>还有 {{ pending_count }} 笔银行资料等待财政确认。</span></div>
-        {% else %}
-            <div class="status-box status-done"><span style="font-size:22px">✅</span><span>目前没有待确认银行资料。</span></div>
-        {% endif %}
-    </section>
+        {% if message %}
 
-    <section class="stats">
-        <div class="stat"><div class="stat-label">⏳ 待确认笔数</div><div class="stat-value">{{ pending_count }} 笔</div></div>
-        <div class="stat stat-money"><div class="stat-label">💰 待确认金额</div><div class="stat-value">RM {{ "%.2f"|format(pending_total) }}</div></div>
-    </section>
-
-    {% if message %}<div class="message">⚠️ {{ message }}</div>{% endif %}
-
-    <form method="post" id="bankPendingForm">
-        <input type="hidden" id="selected_branch" name="branch" value="{{ form_data.branch }}">
-        <section class="entry-grid">
-            <div class="card">
-                <h2 class="card-title">📄 银行资料智能识别</h2>
-                <p class="card-help">粘贴 WhatsApp 或银行 Receipt 文字，系统会尝试识别会员编号、金额、银行及 Reference。</p>
-                <div class="smart-note">识别完成后，请在右边检查并补齐资料，再加入待确认列表。</div>
-
-                <div class="form-group">
-                    <label class="form-label">项目</label>
-                    <select class="form-input" name="category">
-                        {% set categories = ['月费','财布施','观音村','膳食结缘','观音堂纯檀香布施',special_donation_title,'临时特别布施'] %}
-                        {% for category_item in categories %}
-                            <option value="{{ category_item }}" {% if form_data.category == category_item %}selected{% endif %}>{{ category_item }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">粘贴 WhatsApp／银行 Receipt 文字</label>
-                    <textarea class="form-input receipt-textarea" name="raw_text" placeholder="例如：\n\nCHE-108\nRM50.00\nMaybank\nReference：ABC123456">{{ form_data.raw_text }}</textarea>
-                    <div class="form-help">系统无法辨认的内容，可在右边手动填写。</div>
-                </div>
+            <div class="alert alert-danger">
+                ⚠️ {{ message }}
             </div>
 
-            <div class="card">
-                <h2 class="card-title">✏️ 补充与修正资料</h2>
-                <p class="card-help">确认会员、金额、付款日期、Reference 与银行资料。</p>
+        {% endif %}
 
-                <div class="form-grid">
-                    <div class="form-group full-width">
-                        <label class="form-label">分会与会员编号</label>
+        <div class="bank-summary">
 
-                        <div class="branch-picker">
-                            <button type="button" id="branch_che"
-                                    class="branch-btn branch-btn-che {{ 'active' if form_data.branch == 'CHE' else '' }}"
-                                    onclick="selectBankBranch('CHE')">
-                                🟢 CHE
-                            </button>
+            <div class="summary-box">
 
-                            <button type="button" id="branch_stw"
-                                    class="branch-btn branch-btn-stw {{ 'active' if form_data.branch == 'STW' else '' }}"
-                                    onclick="selectBankBranch('STW')">
-                                🔴 STW
-                            </button>
-                        </div>
+                <div class="summary-icon">
+                    ⏳
+                </div>
 
-                        <div class="member-input-wrap">
-                            <div id="member_prefix" class="member-prefix">{{ form_data.branch }}-</div>
-                            <input id="member_number" class="form-input" name="member_id"
-                                   value="{{ form_data.member_id }}" placeholder="例如 108"
-                                   inputmode="numeric" autocomplete="off">
-                        </div>
+                <div class="summary-label">
+                    待确认笔数
+                </div>
 
-                        <div class="form-help">
-                            选择 CHE 或 STW 后，只需输入编号数字。
-                        </div>
+                <div class="summary-value">
+                    {{ pending_count }}
+                </div>
+
+            </div>
+
+            <div class="summary-box">
+
+                <div class="summary-icon">
+                    💰
+                </div>
+
+                <div class="summary-label">
+                    待确认总额
+                </div>
+
+                <div class="summary-value money-value">
+                    RM {{ "%.2f"|format(pending_total) }}
+                </div>
+
+            </div>
+
+        </div>
+
+        <form method="post">
+
+            <div class="entry-grid">
+
+                <div class="card">
+
+                    <div class="section-title">
+                        📄 银行资料智能识别
                     </div>
+
+                    <div class="smart-note">
+                        可以直接粘贴 WhatsApp 信息或银行转账
+                        Receipt 文字。系统会尝试识别会员编号、
+                        金额、银行及 Reference。
+                    </div>
+
                     <div class="form-group">
-                        <label class="form-label">姓名</label>
-                        <input class="form-input" name="name" value="{{ form_data.name }}" placeholder="非月费或找不到会员时填写" autocomplete="off">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">金额 RM</label>
-                        <input class="form-input" name="amount" type="number" step="0.01" min="0.01" value="{{ form_data.amount }}" placeholder="例如 50.00" required>
-                    </div>
-                    <div class="form-group full-width">
 
                         <label class="form-label">
-                            付款日期
+                            项目
                         </label>
 
-                        <input
+                        <select
                             class="form-input"
-                            name="payment_date"
-                            type="date"
-                            value="{{ form_data.payment_date }}"
-                            required
+                            name="category"
                         >
 
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">银行 Reference</label>
-                        <input class="form-input" name="bank_ref" value="{{ form_data.bank_ref }}" placeholder="Transaction Reference" autocomplete="off">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">银行</label>
-                        <select class="form-input" name="bank_name">
-                            <option value="">请选择银行</option>
-                            {% for bank in bank_names %}<option value="{{ bank }}" {% if form_data.bank_name == bank %}selected{% endif %}>{{ bank }}</option>{% endfor %}
+                            {% set categories = [
+                                '月费',
+                                '财布施',
+                                '观音村',
+                                '膳食结缘',
+                                '观音堂纯檀香布施',
+                                special_donation_title,
+                                '临时特别布施'
+                            ] %}
+
+                            {% for category_item in categories %}
+
+                                <option
+                                    value="{{ category_item }}"
+                                    {% if
+                                        form_data.category
+                                        == category_item
+                                    %}
+                                        selected
+                                    {% endif %}
+                                >
+                                    {{ category_item }}
+                                </option>
+
+                            {% endfor %}
+
                         </select>
+
                     </div>
-                    <div class="form-group full-width">
-                        <label class="form-label">备注</label>
-                        <textarea class="form-input" name="remarks" rows="4" placeholder="填写补充说明或保留银行转账文字">{{ form_data.remarks }}</textarea>
+
+                    <div class="form-group">
+
+                        <label class="form-label">
+                            粘贴 WhatsApp／银行 Receipt 文字
+                        </label>
+
+                        <textarea
+                            class="form-input receipt-textarea"
+                            name="raw_text"
+                            placeholder="例如：
+
+CHE-108
+RM50.00
+Maybank
+Reference：ABC123456"
+                        >{{ form_data.raw_text }}</textarea>
+
+                        <div class="form-help">
+                            系统识别后，仍可在右边检查和修改资料。
+                        </div>
+
                     </div>
+
                 </div>
 
-                <button class="submit-btn" type="submit">➕ 加入待确认</button>
-            </div>
-        </section>
-    </form>
+                <div class="card">
 
-    <section class="card records-card">
-        <div class="records-head">
-            <div>
-                <h2 class="records-title">📋 待确认列表</h2>
-                <div class="card-help" style="margin-bottom:0">逐笔填写收条号码及开收条日期后确认入账</div>
+                    <div class="section-title">
+                        ✏️ 手动补充／修正资料
+                    </div>
+
+                    <div class="form-grid">
+
+                        <div class="form-group">
+
+                            <label class="form-label">
+                                会员编号
+                            </label>
+
+                            <input
+                                class="form-input"
+                                name="member_id"
+                                value="{{ form_data.member_id }}"
+                                placeholder="CHE-108 / STW-108 / 108"
+                                autocomplete="off"
+                            >
+
+                        </div>
+
+                        <div class="form-group">
+
+                            <label class="form-label">
+                                姓名
+                            </label>
+
+                            <input
+                                class="form-input"
+                                name="name"
+                                value="{{ form_data.name }}"
+                                placeholder="非月费或找不到会员时填写"
+                                autocomplete="off"
+                            >
+
+                        </div>
+
+                        <div class="form-group">
+
+                            <label class="form-label">
+                                金额 RM
+                            </label>
+
+                            <input
+                                class="form-input"
+                                name="amount"
+                                type="number"
+                                step="0.01"
+                                min="0.01"
+                                value="{{ form_data.amount }}"
+                                placeholder="例如 50.00"
+                                required
+                            >
+
+                        </div>
+
+                        <div class="form-group">
+
+                            <label class="form-label">
+                                付款日期
+                            </label>
+
+                            <input
+                                class="form-input"
+                                name="payment_date"
+                                type="date"
+                                value="{{ form_data.payment_date }}"
+                                required
+                            >
+
+                        </div>
+
+                        <div class="form-group">
+
+                            <label class="form-label">
+                                银行 Reference
+                            </label>
+
+                            <input
+                                class="form-input"
+                                name="bank_ref"
+                                value="{{ form_data.bank_ref }}"
+                                placeholder="Transaction Reference"
+                                autocomplete="off"
+                            >
+
+                        </div>
+
+                        <div class="form-group">
+
+                            <label class="form-label">
+                                银行
+                            </label>
+
+                            <select
+                                class="form-input"
+                                name="bank_name"
+                            >
+
+                                <option value="">
+                                    请选择银行
+                                </option>
+
+                                {% for bank in bank_names %}
+
+                                    <option
+                                        value="{{ bank }}"
+                                        {% if
+                                            form_data.bank_name == bank
+                                        %}
+                                            selected
+                                        {% endif %}
+                                    >
+                                        {{ bank }}
+                                    </option>
+
+                                {% endfor %}
+
+                            </select>
+
+                        </div>
+
+                        <div class="form-group full-width">
+
+                            <label class="form-label">
+                                备注
+                            </label>
+
+                            <textarea
+                                class="form-input"
+                                name="remarks"
+                                rows="4"
+                                placeholder="填写补充说明或保留银行转账文字"
+                            >{{ form_data.remarks }}</textarea>
+
+                        </div>
+
+                    </div>
+
+                    <button
+                        class="btn-tool btn-primary"
+                        type="submit"
+                        style="width:100%;"
+                    >
+                        ➕ 加入待确认
+                    </button>
+
+                </div>
+
             </div>
-            <div class="record-count">共 {{ pending_count }} 笔</div>
+
+        </form>
+
+        <div class="card records-card">
+
+            <div class="table-topbar">
+
+                <div
+                    class="section-title"
+                    style="margin-bottom:0;"
+                >
+                    📋 待确认列表
+                </div>
+
+                <div class="record-count">
+                    共
+                    <strong>{{ pending_count }}</strong>
+                    笔待确认记录
+                </div>
+
+            </div>
+
+            {% if rows %}
+
+                <div class="table-responsive">
+
+                    <table class="record-table pending-table">
+
+                        <thead>
+
+                            <tr>
+                                <th>付款日期</th>
+                                <th>编号</th>
+                                <th>姓名</th>
+                                <th>项目</th>
+                                <th>金额</th>
+                                <th>Reference</th>
+                                <th>银行</th>
+                                <th>备注</th>
+                                <th>确认入账</th>
+                                <th>删除</th>
+                            </tr>
+
+                        </thead>
+
+                        <tbody>
+
+                            {% for r in rows %}
+
+                                <tr>
+
+                                    <td style="white-space:nowrap;">
+                                        {{ r.payment_date }}
+                                    </td>
+
+                                    <td>
+                                        <span class="member-id">
+                                            {{ r.member_id or "-" }}
+                                        </span>
+                                    </td>
+
+                                    <td>
+                                        <span class="member-name">
+                                            {{ r.name or "-" }}
+                                        </span>
+                                    </td>
+
+                                    <td>
+                                        {{ r.category or "-" }}
+                                    </td>
+
+                                    <td class="money-cell">
+                                        RM
+                                        {{ "%.2f"|format(
+                                            r.amount or 0
+                                        ) }}
+                                    </td>
+
+                                    <td class="reference-cell">
+                                        {{ r.bank_ref or "-" }}
+                                    </td>
+
+                                    <td style="white-space:nowrap;">
+                                        {{ r.bank_name or "-" }}
+                                    </td>
+
+                                    <td class="remarks-cell">
+                                        {{ r.remarks or "-" }}
+                                    </td>
+
+                                    <td>
+
+                                        <div class="confirm-box">
+
+                                            <form
+                                                method="post"
+                                                action="{{ url_for(
+                                                    'finance.confirm_bank',
+                                                    pending_id=r.id
+                                                ) }}"
+                                                onsubmit="
+                                                    return confirm(
+                                                        '确定确认入账？'
+                                                    );
+                                                "
+                                            >
+
+                                                <div class="confirm-grid">
+
+                                                    <div class="form-group">
+
+                                                        <label
+                                                            class="form-label"
+                                                        >
+                                                            收条号码
+                                                        </label>
+
+                                                        <input
+                                                            class="form-input"
+                                                            name="receipt_no"
+                                                            placeholder="CHE0000001"
+                                                            autocomplete="off"
+                                                            required
+                                                        >
+
+                                                    </div>
+
+                                                    <div class="form-group">
+
+                                                        <label
+                                                            class="form-label"
+                                                        >
+                                                            开收条日期
+                                                        </label>
+
+                                                        <input
+                                                            class="form-input"
+                                                            name="receipt_date"
+                                                            type="date"
+                                                            value="{{ today }}"
+                                                            required
+                                                        >
+
+                                                    </div>
+
+                                                    <button
+                                                        class="
+                                                            btn-tool
+                                                            btn-success
+                                                        "
+                                                        type="submit"
+                                                    >
+                                                        ✅ 确认入账
+                                                    </button>
+
+                                                </div>
+
+                                            </form>
+
+                                        </div>
+
+                                    </td>
+
+                                    <td>
+
+                                        <form
+                                            class="delete-form"
+                                            method="post"
+                                            action="{{ url_for(
+                                                'finance.delete_bank_pending',
+                                                pending_id=r.id
+                                            ) }}"
+                                            onsubmit="
+                                                return confirm(
+                                                    '确定删除这笔待确认记录？'
+                                                );
+                                            "
+                                        >
+
+                                            <button
+                                                class="
+                                                    btn-tool
+                                                    btn-danger
+                                                "
+                                                type="submit"
+                                            >
+                                                🗑️ 删除
+                                            </button>
+
+                                        </form>
+
+                                    </td>
+
+                                </tr>
+
+                            {% endfor %}
+
+                        </tbody>
+
+                    </table>
+
+                </div>
+
+            {% else %}
+
+                <div class="empty-bank">
+
+                    <div class="empty-bank-icon">
+                        ✅
+                    </div>
+
+                    <h3>目前没有待确认记录</h3>
+
+                    <p>
+                        所有银行转账记录都已经处理完成。
+                    </p>
+
+                </div>
+
+            {% endif %}
+
         </div>
 
-        {% if rows %}
-            <div class="pending-list">
-                {% for r in rows %}
-                    <article class="pending-item">
-                        <div class="pending-main">
-                            <div class="pending-top">
-                                <div>
-                                    <div class="pending-name">{{ r.name or '未填写姓名' }}</div>
-                                    <div class="pending-id">{{ r.member_id or '未填写编号' }}</div>
-                                </div>
-                                <div class="pending-amount">RM {{ "%.2f"|format(r.amount or 0) }}</div>
-                            </div>
+        <div class="bottom-actions">
 
-                            {% set row_branch = 'STW' if (r.member_id or '').startswith('STW-') else 'CHE' %}
-                            <div class="pending-meta">
-                                <span class="chip">{{ '🔴 STW' if row_branch == 'STW' else '🟢 CHE' }}</span>
-                                <span class="chip">📅 {{ r.payment_date }}</span>
-                                <span class="chip">{{ r.category or '-' }}</span>
-                                <span class="chip">🏦 {{ r.bank_name or '未选择银行' }}</span>
-                                <span class="chip">Ref：{{ r.bank_ref or '-' }}</span>
-                            </div>
+            <a
+                class="btn-tool btn-secondary"
+                href="{{ url_for(
+                    'finance.finance_home'
+                ) }}"
+            >
+                ← 返回财政首页
+            </a>
 
-                            {% if r.remarks %}<div class="pending-remarks">备注：{{ r.remarks }}</div>{% endif %}
-                        </div>
+        </div>
 
-                        <div class="confirm-panel">
-                            <form method="post" action="{{ url_for('finance.confirm_bank', pending_id=r.id) }}" onsubmit="return confirm('确定确认入账？');">
-                                <div class="form-group">
-                                    <label class="form-label">收条号码</label>
-                                    <input class="form-input" name="receipt_no" placeholder="{{ row_branch }}0000001" autocomplete="off" required>
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">开收条日期</label>
-                                    <input class="form-input" name="receipt_date" type="date" value="{{ today }}" required>
-                                </div>
-                                <button class="confirm-btn" type="submit">✅ 确认入账</button>
-                            </form>
+    </div>
 
-                            <form method="post" action="{{ url_for('finance.delete_bank_pending', pending_id=r.id) }}" onsubmit="return confirm('确定删除这笔待确认记录？');">
-                                <button class="delete-btn" type="submit">🗑️ 删除</button>
-                            </form>
-                        </div>
-                    </article>
-                {% endfor %}
-            </div>
-        {% else %}
-            <div class="empty-bank">
-                <div class="empty-bank-icon">✅</div>
-                <h3>目前没有待确认记录</h3>
-                <p>所有银行转账记录都已经处理完成。</p>
-            </div>
-        {% endif %}
-    </section>
-
-</main>
-<script>
-function selectBankBranch(branch){
-    const hidden = document.getElementById("selected_branch");
-    const che = document.getElementById("branch_che");
-    const stw = document.getElementById("branch_stw");
-    const prefix = document.getElementById("member_prefix");
-    const input = document.getElementById("member_number");
-
-    hidden.value = branch;
-    che.classList.toggle("active", branch === "CHE");
-    stw.classList.toggle("active", branch === "STW");
-    prefix.textContent = branch + "-";
-    prefix.classList.toggle("stw", branch === "STW");
-    input.placeholder = branch === "CHE" ? "例如 108" : "例如 162";
-}
-
-document.addEventListener("DOMContentLoaded", function(){
-    selectBankBranch(
-        document.getElementById("selected_branch").value || "CHE"
-    );
-
-    const input = document.getElementById("member_number");
-
-    input.addEventListener("input", function(){
-        const value = this.value.trim().toUpperCase();
-        const match = value.match(/^(CHE|STW)[\s\-]?0*(\d+)$/);
-
-        if(match){
-            selectBankBranch(match[1]);
-            this.value = String(parseInt(match[2], 10));
-        }
-    });
-});
-</script>
-</body>
-</html>
-""",
+    </body>
+    </html>
+    """,
         rows=rows,
         summary=summary,
         message=message,
@@ -17205,9 +16478,9 @@ def dashboard():
 
             <a
                 class="btn-tool btn-secondary"
-                href="/finance/v7/reports"
+                href="{{ url_for('finance.finance_admin_home') }}"
             >
-                ← 返回财政报表
+                ← 返回负责人中心
             </a>
 
             <a
@@ -20248,46 +19521,23 @@ def expense(category):
         <title>{{ category }}支出录入</title>
         <link rel="stylesheet" href="{{ url_for('static', filename='css/toolbox.css') }}">
         <style>
-            body{margin:0;background:#f4f7fb;color:#172033}
-            .expense-page{width:min(1120px,calc(100% - 28px));margin:0 auto;padding:18px 0 42px}
-            .expense-header{background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff;padding:18px 22px;border-radius:20px;margin-bottom:14px;box-shadow:0 10px 28px rgba(185,28,28,.16)}
-            .expense-title-row{display:flex;justify-content:space-between;align-items:center;gap:14px}
-            .expense-header h1{margin:0 0 4px;font-size:25px}.expense-header p{margin:0;opacity:.9;font-size:14px}
-            .expense-help-btn{border:1px solid rgba(255,255,255,.55);background:rgba(255,255,255,.14);color:#fff;border-radius:11px;padding:8px 12px;font-weight:850;cursor:pointer;white-space:nowrap}
-            .card{background:#fff;border:1px solid #dfe6ef;border-radius:20px;padding:18px;box-shadow:0 9px 26px rgba(32,49,80,.06)}
-            .voucher-box{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:end;background:#eff6ff;border:1px solid #bfdbfe;border-radius:15px;padding:14px;margin-bottom:15px}
-            .voucher-box .form-help{grid-column:1/-1}
-            .voucher-suggestion{font-size:13px;color:#5d6c82;white-space:nowrap;padding-bottom:11px}
-            .pv-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:start}
-            .pv-column{display:grid;gap:13px}.form-group{display:grid;gap:6px}.form-label{font-weight:900;color:#1d2939}
-            .form-input{box-sizing:border-box;width:100%;min-height:46px;border:1px solid #ccd6e3;border-radius:12px;padding:10px 12px;font-size:16px;background:#fff}
-            textarea.form-input{min-height:96px;resize:vertical}
-            .cash-box{min-height:46px;box-sizing:border-box;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:12px;padding:11px 12px;font-weight:800;color:#166534;display:flex;align-items:center;line-height:1.4}
-            .amount-wrap{position:relative}.amount-wrap::before{content:'RM';position:absolute;left:13px;top:50%;transform:translateY(-50%);font-weight:950;color:#7b8494}.amount-input{padding-left:48px;font-size:22px;font-weight:950}
-            .vendor-line{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center}.mini-add{min-height:46px;border:1px solid #d3dae5;border-radius:12px;background:#eef2f7;color:#334155;padding:0 13px;font-weight:950;cursor:pointer;white-space:nowrap}
-            .form-help{color:#748096;font-size:12px;line-height:1.45}
-            .inline-add{display:none;background:#fff7ed;border:1px solid #fed7aa;border-radius:15px;padding:14px;margin-top:4px}.inline-add.show{display:block}
-            .inline-grid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:9px}.inline-add h3{margin:0 0 10px;font-size:17px}
-            .balance-preview{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:2px;padding-top:15px;border-top:1px solid #e7ebf1}
-            .balance-box{background:#f6f8fb;border-radius:13px;padding:12px 13px}.balance-box span{display:block;color:#778194;font-size:12px}.balance-box strong{display:block;margin-top:5px;font-size:18px}
-            .expense-actions{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:2px;padding-top:15px;border-top:1px solid #e7ebf1}
-            .expense-actions .btn-tool{min-width:180px}
-            .expense-help-modal{position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(15,23,42,.58)}.expense-help-modal.show{display:flex}
-            .expense-help-card{width:min(650px,100%);background:#fff;border-radius:20px;padding:22px;box-shadow:0 24px 70px rgba(0,0,0,.28)}.expense-help-card h2{margin-top:0}.expense-help-card kbd{padding:3px 7px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc;font-weight:800}
-            @media(max-width:820px){.pv-layout{grid-template-columns:1fr}.balance-preview{grid-template-columns:1fr 1fr}.voucher-box{grid-template-columns:1fr}.voucher-suggestion{padding:0}.inline-grid{grid-template-columns:1fr}.expense-actions{display:grid}.expense-actions .btn-tool{width:100%}}
-            @media(max-width:560px){.expense-page{width:min(100% - 16px,1120px);padding-top:10px}.expense-header{padding:15px 16px}.expense-title-row{align-items:flex-start}.expense-header h1{font-size:22px}.expense-header p{font-size:12px}.card{padding:14px}.vendor-line{grid-template-columns:1fr}.mini-add{width:100%}.balance-preview{grid-template-columns:1fr}.expense-help-btn{font-size:12px;padding:7px 9px}}
+            .expense-page{max-width:860px}
+            .expense-header{background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff;padding:28px;border-radius:22px;margin-bottom:20px}
+            .expense-header h1{margin:0 0 8px}.expense-header p{margin:0;opacity:.92}
+            .expense-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.full-width{grid-column:1/-1}
+            .voucher-box{background:#eff6ff;border:1px solid #bfdbfe;border-radius:14px;padding:16px;margin-bottom:18px}
+            .cash-box{background:#ecfdf5;border:1px solid #a7f3d0;border-radius:14px;padding:14px;font-weight:700;color:#166534}
+            .inline-add{display:none;background:#fff7ed;border:1px solid #fed7aa;border-radius:16px;padding:16px;margin-top:12px}
+            .inline-grid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px}
+            .expense-actions{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:22px}
+            @media(max-width:700px){.expense-form-grid,.inline-grid{grid-template-columns:1fr}.full-width{grid-column:auto}.expense-actions{display:grid}.expense-actions .btn-tool{width:100%}}
         </style>
     </head>
     <body>
     <div class="page expense-page">
         <div class="expense-header">
-            <div class="expense-title-row">
-                <div>
-                    <h1>💸 {{ category }}</h1>
-                    <p>选择公司、填写金额并保存 Payment Voucher。</p>
-                </div>
-                <button class="expense-help-btn" type="button" onclick="document.getElementById('expense_help_modal').classList.add('show')">❓ 使用说明</button>
-            </div>
+            <h1>💸 {{ category }}</h1>
+            <p>普通财政组员可在这里选择公司、即时新增公司并保存 PV。</p>
         </div>
 
         {% if success_message %}
@@ -20295,8 +19545,14 @@ def expense(category):
             ✅ {{ success_message }}
             {% if saved_id %}
             <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;">
-                <a class="btn-tool btn-primary" target="_blank" href="{{ url_for('finance.payment_voucher_pdf', record_id=saved_id) }}">👁️ 预览／打印 PV</a>
-                <a class="btn-tool btn-success" href="{{ url_for('finance.payment_voucher_pdf', record_id=saved_id, download=1) }}">📥 下载 PV PDF</a>
+                <a class="btn-tool btn-primary" target="_blank"
+                   href="{{ url_for('finance.payment_voucher_pdf', record_id=saved_id) }}">
+                    👁️ 预览／打印 PV
+                </a>
+                <a class="btn-tool btn-success"
+                   href="{{ url_for('finance.payment_voucher_pdf', record_id=saved_id, download=1) }}">
+                    📥 下载 PV PDF
+                </a>
             </div>
             {% endif %}
         </div>
@@ -20308,127 +19564,97 @@ def expense(category):
                 <input type="hidden" name="action" id="formAction" value="save_expense">
 
                 <div class="voucher-box">
-                    <div>
-                        <label class="form-label">Payment Voucher No.</label>
-                        <input class="form-input" name="payment_voucher_no" value="{{ form_data.payment_voucher_no }}" required>
-                    </div>
-                    <div class="voucher-suggestion">系统建议：<strong>{{ suggested_payment_voucher_no }}</strong></div>
+                    <label class="form-label">Payment Voucher No.</label>
+                    <input class="form-input" name="payment_voucher_no" value="{{ form_data.payment_voucher_no }}" required>
+                    <div class="form-help">系统建议：{{ suggested_payment_voucher_no }}</div>
                 </div>
 
-                <div class="pv-layout">
-                    <section class="pv-column">
-                        <div class="form-group">
-                            <label class="form-label">支出日期</label>
-                            <input class="form-input" name="record_date" type="date" value="{{ form_data.record_date }}" required>
-                        </div>
-
-                        <div class="form-group">
-                            <label class="form-label">费用明细／单位</label>
-                            <select class="form-input" name="sub_category" id="subCategory" onchange="toggleCustomSubCategory()" required>
-                                <option value="">请选择费用明细</option>
-                                {% for item in sub_category_options %}<option value="{{ item }}" {% if form_data.sub_category == item %}selected{% endif %}>{{ item }}</option>{% endfor %}
-                                <option value="__custom__" {% if form_data.sub_category == '__custom__' %}selected{% endif %}>其它／手动输入</option>
-                            </select>
-                            <div id="customSubCategoryBox" style="display:none"><input class="form-input" name="sub_category_custom" value="{{ form_data.sub_category_custom }}" placeholder="填写费用明细／单位"></div>
-                        </div>
-
-                        <div class="form-group">
-                            <label class="form-label">付款对象／公司名称 *</label>
-                            <div class="vendor-line">
-                                <select class="form-input" name="vendor_id" id="vendorSelect" required>
-                                    <option value="">请选择 {{ category }} 的付款对象</option>
-                                    {% for v in vendors %}<option value="{{ v.id }}" {% if form_data.vendor_id == v.id|string %}selected{% endif %}>{{ v.company_name }}{% if v.phone %} — {{ v.phone }}{% endif %}</option>{% endfor %}
-                                </select>
-                                <button class="mini-add" type="button" onclick="toggleNewVendor()">＋ 新公司</button>
-                            </div>
-                            <div class="form-help">这里只显示适用于“{{ category }}”的公司。</div>
-
-                            <div class="inline-add" id="newVendorBox">
-                                <h3>新增 {{ category }} 付款对象</h3>
-                                <div class="inline-grid">
-                                    <input class="form-input" name="new_company_name" placeholder="完整公司名称">
-                                    <input class="form-input" name="new_vendor_phone" placeholder="电话（可选）">
-                                    <input class="form-input" name="new_vendor_contact_person" placeholder="联络人（可选）">
-                                </div>
-                                <button class="btn-tool btn-primary" type="submit" onclick="document.getElementById('formAction').value='add_vendor'" style="margin-top:10px">保存公司并自动选择</button>
-                            </div>
-                        </div>
-
-                        <div class="form-group">
-                            <label class="form-label">支出金额</label>
-                            <div class="amount-wrap"><input class="form-input amount-input" name="amount" type="number" step="0.01" min="0.01" value="{{ form_data.amount }}" required></div>
-                        </div>
-                    </section>
-
-                    <section class="pv-column">
-                        <div class="form-group">
-                            <label class="form-label">付款方式</label>
-                            <div class="cash-box">💵 现金（固定）— 从 Petty Cash 扣除</div>
-                        </div>
-
-                        <div class="form-group">
-                            <label class="form-label">Invoice／Reference No.（可选）</label>
-                            <input class="form-input" name="reference_no" value="{{ form_data.reference_no }}" placeholder="Invoice／Receipt／Bill 编号">
-                        </div>
-
-                        <div class="form-group">
-                            <label class="form-label">Prepared By</label>
-                            <select class="form-input" name="prepared_by">
-                                <option value="陈柔霓" {% if form_data.prepared_by == '陈柔霓' %}selected{% endif %}>陈柔霓（默认）</option>
-                                <option value="黄薈菏" {% if form_data.prepared_by == '黄薈菏' %}selected{% endif %}>黄薈菏</option>
-                                <option value="" {% if not form_data.prepared_by %}selected{% endif %}>（空白）</option>
-                            </select>
-                            <div class="form-help">选择空白时，PV 保留签名线供现场填写。</div>
-                        </div>
-
-                        <div class="form-group">
-                            <label class="form-label">备注（可选）</label>
-                            <textarea class="form-input" name="remarks" rows="4" placeholder="如有填写，会显示在 Payment Voucher；没有可留空">{{ form_data.remarks }}</textarea>
-                        </div>
-                    </section>
-
-                    <div class="expense-actions">
-                        <a class="btn-tool btn-secondary" href="{{ url_for('finance.finance_expense_menu') }}">← 返回支出项目</a>
-                        <button class="btn-tool btn-danger" type="submit" onclick="document.getElementById('formAction').value='save_expense';return confirm('确定保存这笔现金支出？')">💾 保存 Payment Voucher</button>
+                <div class="expense-form-grid">
+                    <div class="form-group">
+                        <label class="form-label">支出日期</label>
+                        <input class="form-input" name="record_date" type="date" value="{{ form_data.record_date }}" required>
                     </div>
+                    <div class="form-group">
+                        <label class="form-label">付款方式</label>
+                        <div class="cash-box">💵 现金（固定）— 从 Petty Cash 扣除，不直接扣银行余额</div>
+                    </div>
+
+                    <div class="form-group full-width">
+                        <label class="form-label">费用明细／单位</label>
+                        <select class="form-input" name="sub_category" id="subCategory" onchange="toggleCustomSubCategory()" required>
+                            <option value="">请选择费用明细</option>
+                            {% for item in sub_category_options %}<option value="{{ item }}" {% if form_data.sub_category == item %}selected{% endif %}>{{ item }}</option>{% endfor %}
+                            <option value="__custom__" {% if form_data.sub_category == '__custom__' %}selected{% endif %}>其它／手动输入</option>
+                        </select>
+                        <div id="customSubCategoryBox" style="display:none;margin-top:10px"><input class="form-input" name="sub_category_custom" value="{{ form_data.sub_category_custom }}" placeholder="填写费用明细／单位"></div>
+                    </div>
+
+                    <div class="form-group full-width">
+                        <label class="form-label">付款对象／公司名称 *</label>
+                        <select class="form-input" name="vendor_id" id="vendorSelect" required>
+                            <option value="">请选择 {{ category }} 的付款对象</option>
+                            {% for v in vendors %}<option value="{{ v.id }}" {% if form_data.vendor_id == v.id|string %}selected{% endif %}>{{ v.company_name }}{% if v.phone %} — {{ v.phone }}{% endif %}</option>{% endfor %}
+                        </select>
+                        <div class="form-help">这里只显示适用于“{{ category }}”的公司。</div>
+                        <button class="btn-tool btn-secondary" type="button" onclick="toggleNewVendor()" style="margin-top:10px">＋ 添加新付款对象／公司</button>
+
+                        <div class="inline-add" id="newVendorBox">
+                            <h3 style="margin-top:0">新增 {{ category }} 付款对象</h3>
+                            <div class="inline-grid">
+                                <input class="form-input" name="new_company_name" placeholder="完整公司名称">
+                                <input class="form-input" name="new_vendor_phone" placeholder="电话（可选）">
+                                <input class="form-input" name="new_vendor_contact_person" placeholder="联络人（可选）">
+                            </div>
+                            <button class="btn-tool btn-primary" type="submit" onclick="document.getElementById('formAction').value='add_vendor'" style="margin-top:12px">保存公司并自动选择</button>
+                        </div>
+                    </div>
+
+                    <div class="form-group full-width">
+                        <label class="form-label">支出金额 RM</label>
+                        <input class="form-input" name="amount" type="number" step="0.01" min="0.01" value="{{ form_data.amount }}" required>
+                    </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Reference No.（可选）</label>
+                        <input class="form-input" name="reference_no" value="{{ form_data.reference_no }}" placeholder="Invoice／Receipt／Bill 编号">
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Prepared By</label>
+                        <select class="form-input" name="prepared_by">
+                            <option value="陈柔霓" {% if form_data.prepared_by == '陈柔霓' %}selected{% endif %}>陈柔霓（默认）</option>
+                            <option value="黄薈菏" {% if form_data.prepared_by == '黄薈菏' %}selected{% endif %}>黄薈菏</option>
+                            <option value="" {% if not form_data.prepared_by %}selected{% endif %}>（空白）</option>
+                        </select>
+                        <div class="form-help">选择空白时，PV 会保留签名线供现场填写。</div>
+                    </div>
+
+                    <div class="form-group full-width">
+                        <label class="form-label">备注（可选）</label>
+                        <textarea class="form-input" name="remarks" rows="2" placeholder="如有填写，会显示在 Payment Voucher；没有可留空">{{ form_data.remarks }}</textarea>
+                    </div>
+                </div>
+
+                <div class="expense-actions">
+                    <a class="btn-tool btn-secondary" href="{{ url_for('finance.finance_expense_menu') }}">← 返回支出项目</a>
+                    <button class="btn-tool btn-danger" type="submit" onclick="document.getElementById('formAction').value='save_expense';return confirm('确定保存这笔现金支出？')">💾 保存支出</button>
                 </div>
             </form>
         </div>
     </div>
 
-    <div class="expense-help-modal" id="expense_help_modal" onclick="if(event.target===this)this.classList.remove('show')">
-        <div class="expense-help-card">
-            <h2>{{ category }} 支出录入说明</h2>
-            <p>依照纸本 PV 输入日期、付款对象、金额与说明，核对后保存。</p>
-            <p><kbd>Ctrl</kbd> + <kbd>Enter</kbd>：快速保存；<kbd>Esc</kbd>：关闭说明。</p>
-            <button class="btn-tool btn-secondary" type="button" onclick="document.getElementById('expense_help_modal').classList.remove('show')">关闭</button>
-        </div>
-    </div>
-
     <script>
-        document.addEventListener("keydown",function(event){
-            if(event.ctrlKey&&event.key==="Enter"){
-                event.preventDefault();
-                const f=document.getElementById("expenseForm");
-                if(f)f.requestSubmit();
-            }else if(event.key==="Escape"){
-                const m=document.getElementById("expense_help_modal");
-                if(m)m.classList.remove("show");
-            }
-        });
-
         function toggleCustomSubCategory(){
             const select=document.getElementById('subCategory');
             document.getElementById('customSubCategoryBox').style.display=select.value==='__custom__'?'block':'none';
         }
-
         function toggleNewVendor(){
             const box=document.getElementById('newVendorBox');
-            box.classList.toggle('show');
+            box.style.display=box.style.display==='block'?'none':'block';
         }
-
         toggleCustomSubCategory();
-        {% if message and request.form.get('action') == 'add_vendor' %}document.getElementById('newVendorBox').classList.add('show');{% endif %}
+        {% if message and request.form.get('action') == 'add_vendor' %}document.getElementById('newVendorBox').style.display='block';{% endif %}
     </script>
     </body>
     </html>

@@ -252,27 +252,73 @@ def _reference_text(row: Any) -> str | date | None:
     )
 
 
-def _monthly_phone_reference_text(row: Any) -> str | date | None:
+def _monthly_reference_text(row: Any) -> str | None:
     """
-    月费旧模板没有独立电话号码栏。
-    为了不破坏原模板列位，把电话与原 REF. 资料合并写入 G 栏。
+    月费报表 G 栏 REF. 固定按供养月份生成，贴近财政原装 Excel：
+    Jan-26、Jan_Mar26、Jan_Dec26、Nov25_Dec26。
 
-    例：
-        0123456789 | ABC123
+    收条簿备注、BT／ATM、Bank holder 不再塞进 G 栏。
     """
-    phone = str(_first_value(row, "phone", default="") or "").strip()
-    reference = _reference_text(row)
+    month_from = _month_date(_first_value(row, "month_from", "start_month"))
+    month_to = _month_date(_first_value(row, "month_to", "end_month"))
 
-    parts = []
+    if not month_from and not month_to:
+        return None
+    if month_from and not month_to:
+        return month_from.strftime("%b-%y")
+    if month_to and not month_from:
+        return month_to.strftime("%b-%y")
+    if month_from == month_to:
+        return month_from.strftime("%b-%y")
 
-    if phone:
-        parts.append(phone)
+    start_text = month_from.strftime("%b")
+    end_text = month_to.strftime("%b%y")
+    if month_from.year != month_to.year:
+        start_text = month_from.strftime("%b%y")
 
-    if reference not in (None, ""):
-        parts.append(str(reference))
+    return f"{start_text}_{end_text}"
 
-    return " | ".join(parts) or None
 
+def _monthly_bank_details(row: Any) -> tuple[str | None, str | None]:
+    """返回原装 Excel 右侧辅助栏的付款类型与 Bank holder。"""
+    method_raw = str(_first_value(row, "payment_method", default="") or "").strip()
+    method_norm = _normalise_payment_method(method_raw)
+
+    # 历史导入资料有时把 BT／ATM 与 Bank holder 放在 bank_ref，
+    # 有时放在 remarks，因此两处都要检查。
+    bank_ref = str(_first_value(row, "bank_ref", default="") or "").strip()
+    remarks = str(_first_value(row, "remarks", default="") or "").strip()
+    detail_text = bank_ref or remarks
+    detail_norm = _normalise_payment_method(detail_text)
+
+    if "atm" in method_norm or "atm" in detail_norm:
+        method = "ATM"
+    elif (
+        "bt" in method_norm
+        or "banktransfer" in method_norm
+        or "online" in method_norm
+        or "网上" in method_norm
+        or "bt" in detail_norm
+    ):
+        method = "BT"
+    elif _is_cheque(row):
+        method = "CHEQUE"
+    else:
+        # “银行过账”只是系统分类，不是财政 Excel 要显示的付款类型。
+        method = None if method_raw in {"银行过账", "bank in", "bankin"} else (method_raw or None)
+
+    holder = str(_first_value(row, "bank_holder", "bank_name", default="") or "").strip()
+
+    match = re.search(r"bank\s*holder\s*:\s*(.+)$", detail_text, flags=re.I)
+    if match:
+        holder = match.group(1).strip()
+
+    if not method and detail_text:
+        prefix = re.split(r"[；;]", detail_text, maxsplit=1)[0].strip().upper()
+        if prefix in {"BT", "ATM", "CHEQUE"}:
+            method = prefix
+
+    return method, (holder or None)
 
 def _month_unit_amount(row: Any) -> float:
     """
@@ -388,11 +434,11 @@ def _ensure_capacity(ws, cash_count: int, bank_count: int) -> tuple[int, int, in
 
     total_row = TOTAL_ROW + extra_cash + extra_bank
 
-    # 插入行后明确恢复合计公式，避免 Excel 的公式范围没有跟着扩展。
-    ws.cell(total_row, 10).value = f"=SUM(J8:J{bank_end_row + 3})"
-    ws.cell(total_row, 11).value = f"=SUM(K8:K{bank_end_row + 3})"
-    ws.cell(total_row, 12).value = f"=SUM(L8:L{bank_end_row + 3})"
-    ws.cell(total_row, 14).value = f"=SUM(N8:N{bank_end_row + 3})"
+    # 合计严格按各自区块计算，避免把旧模板残留行或其他付款区重复算入。
+    ws.cell(total_row, 10).value = f"=SUM(J{CASH_START_ROW}:J{cash_end_row})"
+    ws.cell(total_row, 11).value = f"=SUM(K{bank_start_row}:K{bank_end_row})"
+    ws.cell(total_row, 12).value = f"=SUM(L{bank_start_row}:L{bank_end_row})"
+    ws.cell(total_row, 14).value = f"=SUM(N{CASH_START_ROW}:N{cash_end_row})"
 
     return cash_end_row, bank_start_row, bank_end_row
 
@@ -402,11 +448,9 @@ def _ensure_capacity(ws, cash_count: int, bank_count: int) -> tuple[int, int, in
 # -----------------------------------------------------------------------------
 
 def _clear_data_row(ws, row_no: int) -> None:
-    """清除旧输入资料，保留全部格式；D 栏姓名稍后由数据库写入。"""
-    for col in (1, 2, 3, 4, 5, 6, 7, 13, 14, 15):
+    """清除旧输入资料并保留格式；未使用的空白行不能残留 RM50 或旧月份。"""
+    for col in range(1, ws.max_column + 1):
         ws.cell(row_no, col).value = None
-
-    ws.cell(row_no, 9).value = 50
 
 
 def _prepare_formula_row(ws, row_no: int, payment_column: int) -> None:
@@ -435,12 +479,12 @@ def _write_monthly_fee_row(ws, row_no: int, record: Any, is_cash_section: bool) 
     month_to = _month_date(_first_value(record, "month_to", "end_month"))
 
     ws.cell(row_no, 1).value = record_date
-    ws.cell(row_no, 2).value = receipt_no if is_cash_section else None
+    ws.cell(row_no, 2).value = receipt_no
     ws.cell(row_no, 3).value = _excel_member_no(member_id)
     ws.cell(row_no, 4).value = name
     ws.cell(row_no, 5).value = month_from
     ws.cell(row_no, 6).value = month_to
-    ws.cell(row_no, 7).value = _monthly_phone_reference_text(record)
+    ws.cell(row_no, 7).value = _monthly_reference_text(record)
     ws.cell(row_no, 9).value = _month_unit_amount(record)
 
     payment_column = 10 if is_cash_section else (11 if _is_cheque(record) else 12)
@@ -465,6 +509,32 @@ def _write_monthly_fee_row(ws, row_no: int, record: Any, is_cash_section: bool) 
     ws.cell(row_no, 9).number_format = '#,##0.00'
     ws.cell(row_no, payment_column).number_format = '#,##0.00'
 
+    # P 栏保留真正备注。现金区最重要的是 OR Book，必须清楚可见。
+    remarks = str(_first_value(record, "remarks", default="") or "").strip()
+    if remarks.lower() in {"历史excel导入", "历史 excel 导入", "历史资料"}:
+        remarks = ""
+
+    if is_cash_section:
+        ws.cell(row_no, 16).value = remarks or None
+        if remarks and re.search(r"\b(?:OR|O)\s*Book\b", remarks, flags=re.I):
+            ws.cell(row_no, 16).font = copy(ws.cell(row_no, 16).font)
+            ws.cell(row_no, 16).font = Font(
+                name=ws.cell(row_no, 16).font.name,
+                size=ws.cell(row_no, 16).font.sz,
+                bold=True,
+                italic=ws.cell(row_no, 16).font.italic,
+                color=ws.cell(row_no, 16).font.color,
+            )
+    else:
+        # BT／ATM；Bank holder 属于结构化银行资料，不重复塞进 Remark。
+        bank_metadata = bool(re.search(r"bank\s*holder\s*:\s*", remarks, flags=re.I))
+        ws.cell(row_no, 16).value = None if bank_metadata else (remarks or None)
+
+        # 原装月费表右侧辅助栏：Q=BT/ATM/CHEQUE，R=Bank holder。
+        method, holder = _monthly_bank_details(record)
+        ws.cell(row_no, 17).value = method
+        ws.cell(row_no, 18).value = holder
+
 
 def _set_report_title(
     ws,
@@ -483,6 +553,108 @@ def _sheet_name(year: int, month: int) -> str:
         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     )[month - 1]
     return f"{month_name}-{str(year)[-2:]}"
+
+
+
+
+def _query_monthly_cdm_batches(record_ids: Iterable[Any]) -> list[dict[str, Any]]:
+    """
+    查询指定月费现金记录所属的 CDM 批次。
+
+    注意：
+    - 以 finance_bank_deposit_items 的实际连接关系为准；
+    - 不按 deposit_date 的月份过滤，因此 1 月收条在 2 月才存入银行，
+      仍会正确写回 1 月月费收纳表；
+    - linked_amount 只合计本次报表内的收条，避免跨月份批次重复计算。
+    """
+    ids = []
+
+    for value in record_ids:
+        try:
+            record_id = int(value)
+        except (TypeError, ValueError):
+            continue
+
+        if record_id not in ids:
+            ids.append(record_id)
+
+    if not ids:
+        return []
+
+    return db_query(
+        """
+        select
+            d.id as deposit_id,
+            d.reference_no,
+            d.cdm_sequence,
+            d.deposit_date,
+            coalesce(sum(i.amount), 0) as linked_amount,
+            array_agg(
+                i.finance_record_id
+                order by i.id
+            ) as finance_record_ids
+        from finance_bank_deposit_items i
+        join finance_bank_deposits d
+          on d.id = i.deposit_id
+        where i.finance_record_id = any(%s)
+        group by
+            d.id,
+            d.reference_no,
+            d.cdm_sequence,
+            d.deposit_date
+        order by
+            d.deposit_date,
+            d.id
+        """,
+        (ids,),
+        fetchall=True,
+    ) or []
+
+
+def _monthly_cdm_sequence_value(batch: Any) -> int | str | None:
+    """月费旧表的 CDM SEQ 使用纯序号 1、2、3；无法解析时才保留文字。"""
+    sequence = _first_value(batch, "cdm_sequence", default=None)
+
+    if sequence in (None, ""):
+        sequence = _first_value(batch, "reference_no", default=None)
+
+    if sequence in (None, ""):
+        return None
+
+    text = str(sequence).strip()
+    match = re.search(r"(\d+)", text)
+    if match:
+        return int(match.group(1))
+
+    return text or None
+
+def _write_monthly_cdm_summary(ws, row_no: int, batch: Any) -> None:
+    """把一个 CDM 批次写在该批次最后一张现金收条的 M:N:O 栏。"""
+    sequence_value = _monthly_cdm_sequence_value(batch)
+    deposit_date = _as_date(
+        _first_value(batch, "deposit_date", default=None)
+    )
+
+    raw_amount = _first_value(batch, "linked_amount", default=0) or 0
+    try:
+        amount = float(raw_amount)
+    except (TypeError, ValueError):
+        amount = 0.0
+
+    ws.cell(row_no, 13).value = sequence_value
+    ws.cell(row_no, 14).value = amount
+    ws.cell(row_no, 15).value = deposit_date
+
+    ws.cell(row_no, 13).alignment = Alignment(
+        horizontal="center",
+        vertical="center",
+    )
+    ws.cell(row_no, 14).number_format = '#,##0.00'
+    ws.cell(row_no, 15).number_format = "dd/mm/yyyy"
+    ws.cell(row_no, 15).alignment = Alignment(
+        horizontal="center",
+        vertical="center",
+    )
 
 
 def build_monthly_fee_workbook(records: Iterable[Any], ym: str, branch: str = "CHE"):
@@ -519,14 +691,14 @@ def build_monthly_fee_workbook(records: Iterable[Any], ym: str, branch: str = "C
 
     target_sheet_name = _sheet_name(year, month)
 
-    # 不能使用 copy_worksheet()：openpyxl 不会复制图片、Logo 和 drawing。
-    # 若模板已有该月份，直接使用该月份工作表；否则直接使用 Blank_Master。
-    # 这是独立导出副本，因此可以安全地清空和改名，同时完整保留图片。
-    if target_sheet_name in wb.sheetnames:
-        ws = wb[target_sheet_name]
-    else:
-        ws = wb[TEMPLATE_SHEET]
-        ws.title = target_sheet_name
+    # 每次都从干净的 Blank_Master 生成。
+    # 旧模板若已经包含 Jan-26 等历史月份，直接使用会把旧资料、#N/A、假收据
+    # 和旧 Total 一起带进新报表，因此先删除同名旧页，再把 Blank_Master 改名。
+    if target_sheet_name in wb.sheetnames and target_sheet_name != TEMPLATE_SHEET:
+        del wb[target_sheet_name]
+
+    ws = wb[TEMPLATE_SHEET]
+    ws.title = target_sheet_name
 
     ws.sheet_view.showGridLines = False
     _set_report_title(ws, year, month, branch)
@@ -540,22 +712,108 @@ def build_monthly_fee_workbook(records: Iterable[Any], ym: str, branch: str = "C
     # 先清除整个两区的旧输入资料。
     for row_no in range(CASH_START_ROW, cash_end_row + 1):
         _clear_data_row(ws, row_no)
-        _prepare_formula_row(ws, row_no, 10)
 
     for row_no in range(bank_start_row, bank_end_row + 1):
         _clear_data_row(ws, row_no)
-        _prepare_formula_row(ws, row_no, 12)
 
-    # 写入现金记录。
+    # 写入现金记录，并记录 finance_record_id 对应的 Excel 行号。
+    cash_record_row_map = {}
+
     for row_no, record in enumerate(cash_records, start=CASH_START_ROW):
         _write_monthly_fee_row(ws, row_no, record, is_cash_section=True)
+
+        record_id = _first_value(record, "id", default=None)
+        try:
+            record_id = int(record_id)
+        except (TypeError, ValueError):
+            record_id = None
+
+        if record_id is not None:
+            cash_record_row_map[record_id] = row_no
+
+    # 按实际 CDM 连接关系：每张现金收条写 CDM SEQ，批次最后一张
+    # 再写 CDM 金额与存款日期。即使实际存款日期落在下个月，仍写回
+    # 收条所属月份的月费收纳表。
+    cdm_batches = _query_monthly_cdm_batches(
+        cash_record_row_map.keys()
+    )
+
+    for batch in cdm_batches:
+        linked_ids = _first_value(
+            batch,
+            "finance_record_ids",
+            default=[],
+        ) or []
+
+        linked_rows = []
+        for record_id in linked_ids:
+            try:
+                record_id = int(record_id)
+            except (TypeError, ValueError):
+                continue
+
+            row_no = cash_record_row_map.get(record_id)
+            if row_no is not None:
+                linked_rows.append(row_no)
+
+        if linked_rows:
+            sequence_value = _monthly_cdm_sequence_value(batch)
+
+            # 原装财政 Excel 会在该批次每一张现金收据写入 CDM SEQ。
+            for linked_row in linked_rows:
+                ws.cell(linked_row, 13).value = sequence_value
+                ws.cell(linked_row, 13).alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                )
+
+            # CDM 金额与 Bank-in 日期只写在该批次最后一张收据。
+            _write_monthly_cdm_summary(
+                ws,
+                max(linked_rows),
+                batch,
+            )
 
     # 写入银行／支票记录。
     for row_no, record in enumerate(bank_records, start=bank_start_row):
         _write_monthly_fee_row(ws, row_no, record, is_cash_section=False)
 
+    # 清除模板右侧旧月份清单。Q/R 保留付款类型与 Bank holder，S 以后全部清空。
+    for row_no in range(1, ws.max_row + 1):
+        for col in range(19, ws.max_column + 1):
+            ws.cell(row_no, col).value = None
+
     # BANK IN 标题行是插行后 bank_start_row - 1。
-    ws.cell(bank_start_row - 1, 2).value = "BANK IN"
+    bank_title_cell = ws.cell(bank_start_row - 1, 2)
+    bank_title_cell.value = "BANK IN"
+    bank_title_cell.font = copy(bank_title_cell.font)
+    bank_title_cell.font = Font(
+        name=bank_title_cell.font.name,
+        size=bank_title_cell.font.sz,
+        bold=True,
+        italic=bank_title_cell.font.italic,
+        color=bank_title_cell.font.color,
+    )
+
+    # 清除 BANK IN 区末端与 Total 之间的模板残留公式。
+    # 旧模板在空白行的 I/L 栏可能仍有 RM50 公式，导致底部上方出现孤立 50.00。
+    extra_cash = max(0, len(cash_records) - (CASH_END_ROW - CASH_START_ROW + 1))
+    extra_bank = max(0, len(bank_records) - (BANK_END_ROW - BANK_START_ROW + 1))
+    total_row = TOTAL_ROW + extra_cash + extra_bank
+
+    for row_no in range(bank_end_row + 1, total_row):
+        for col_no in range(1, 19):
+            ws.cell(row_no, col_no).value = None
+
+    # Total 行只保留四个正确合计公式，避免模板其他金额格残留。
+    for col_no in range(1, 19):
+        if col_no not in {10, 11, 12, 14}:
+            ws.cell(total_row, col_no).value = None
+
+    ws.cell(total_row, 10).value = f"=SUM(J{CASH_START_ROW}:J{cash_end_row})"
+    ws.cell(total_row, 11).value = f"=SUM(K{bank_start_row}:K{bank_end_row})"
+    ws.cell(total_row, 12).value = f"=SUM(L{bank_start_row}:L{bank_end_row})"
+    ws.cell(total_row, 14).value = f"=SUM(N{CASH_START_ROW}:N{cash_end_row})"
 
     # 只保留本次生成月份工作表 + 原始资料表。
     # 若你希望导出文件继续包含过去所有月份，可删除这一段。
@@ -581,6 +839,12 @@ def build_monthly_fee_workbook(records: Iterable[Any], ym: str, branch: str = "C
         "J": 12.0,
         "K": 12.0,
         "L": 15.0,
+        "M": 11.0,
+        "N": 15.0,
+        "O": 14.0,
+        "P": 24.0,
+        "Q": 11.0,
+        "R": 34.0,
     }.items():
         current_width = ws.column_dimensions[column].width or 0
         if current_width < minimum_width:
@@ -640,13 +904,17 @@ def export_monthly_fee_excel():
             fr.remarks,
             mp.month_count
         from finance_records fr
-        left join member_payments mp
-          on mp.member_id = fr.member_id
-         and coalesce(mp.receipt_no, '') = coalesce(fr.receipt_no, '')
-         and mp.amount = fr.amount
-         and mp.payment_date = fr.record_date
+        left join lateral (
+            select max(mp0.month_count) as month_count
+            from member_payments mp0
+            where mp0.member_id = fr.member_id
+              and coalesce(mp0.receipt_no, '') = coalesce(fr.receipt_no, '')
+              and mp0.amount = fr.amount
+              and mp0.payment_date = fr.record_date
+        ) mp on true
         where fr.record_type = 'income'
           and fr.category = '月费'
+          and coalesce(fr.status, 'active') <> 'cancelled'
           and to_char(fr.record_date, 'YYYY-MM') = %s
           and {branch_condition}
         order by
@@ -1937,13 +2205,17 @@ def _query_monthly_records(ym: str, branch: str):
             fr.remarks,
             mp.month_count
         from finance_records fr
-        left join member_payments mp
-          on mp.member_id = fr.member_id
-         and coalesce(mp.receipt_no, '') = coalesce(fr.receipt_no, '')
-         and mp.amount = fr.amount
-         and mp.payment_date = fr.record_date
+        left join lateral (
+            select max(mp0.month_count) as month_count
+            from member_payments mp0
+            where mp0.member_id = fr.member_id
+              and coalesce(mp0.receipt_no, '') = coalesce(fr.receipt_no, '')
+              and mp0.amount = fr.amount
+              and mp0.payment_date = fr.record_date
+        ) mp on true
         where fr.record_type = 'income'
           and fr.category = '月费'
+          and coalesce(fr.status, 'active') <> 'cancelled'
           and to_char(fr.record_date, 'YYYY-MM') = %s
           and {branch_condition}
         order by fr.record_date, fr.receipt_no nulls last, fr.id
@@ -2220,8 +2492,8 @@ FINANCE_EXPORT_CENTER_HTML = """
 
 <div class="btn-row" style="margin-top:22px;">
     <a class="btn-tool btn-secondary"
-       href="/finance">
-        ← 返回财政首页
+       href="/finance/v7/reports">
+        ← 返回财政报表
     </a>
 </div>
 
