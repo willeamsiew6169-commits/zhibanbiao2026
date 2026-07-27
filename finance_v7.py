@@ -1373,6 +1373,346 @@ def finance_v7_home():
 # V7 Reports / System Management
 # =========================================================
 
+# =========================================================
+# V7 Expense Intelligence
+# =========================================================
+
+def _v7_expense_analysis(branch="CHE", history_months=6):
+    """分析本月 CHE 支出，并与上月及过去完整月份平均比较。"""
+    branch = (branch or "CHE").strip().upper()
+    history_months = max(1, int(history_months or 6))
+    today = date.today()
+    current_start = today.replace(day=1)
+
+    def add_months(value, offset):
+        index = value.year * 12 + (value.month - 1) + offset
+        return date(index // 12, index % 12 + 1, 1)
+
+    current_end = add_months(current_start, 1)
+    previous_start = add_months(current_start, -1)
+    history_start = add_months(current_start, -history_months)
+
+    # 当前月、上月及前 history_months 个完整月份的分类支出。
+    rows = _v7_all("""
+        select
+            coalesce(category, '其它支出') as category,
+            date_trunc('month', record_date)::date as month_start,
+            count(*) as record_count,
+            coalesce(sum(amount), 0) as total
+        from finance_records
+        where record_type = 'expense'
+          and coalesce(status, 'confirmed') <> 'cancelled'
+          and record_date >= %s and record_date < %s
+          and coalesce(fund_account, '观音堂日常户口')
+              in ('观音堂日常户口', 'CHE 日常户口')
+        group by coalesce(category, '其它支出'), date_trunc('month', record_date)::date
+        order by category, month_start
+    """, (history_start, current_end))
+
+    by_category = {}
+    for row in rows:
+        category = row.get("category") or "其它支出"
+        month_start = row.get("month_start")
+        if hasattr(month_start, "date"):
+            month_start = month_start.date()
+        by_category.setdefault(category, {})[month_start] = {
+            "total": _v7_money(row.get("total")),
+            "count": int(row.get("record_count") or 0),
+        }
+
+    standard_categories = _v7_expense_categories_list()
+    categories = sorted(
+        set(standard_categories) | set(by_category.keys()),
+        key=lambda name: (
+            standard_categories.index(name)
+            if name in standard_categories
+            else 999,
+            name,
+        ),
+    )
+
+    duplicate_rows = _v7_all("""
+        select
+            coalesce(category, '其它支出') as category,
+            record_date,
+            coalesce(vendor_name, name, '') as vendor_name,
+            amount,
+            count(*) as duplicate_count
+        from finance_records
+        where record_type = 'expense'
+          and coalesce(status, 'confirmed') <> 'cancelled'
+          and record_date >= %s and record_date < %s
+          and coalesce(fund_account, '观音堂日常户口')
+              in ('观音堂日常户口', 'CHE 日常户口')
+        group by coalesce(category, '其它支出'), record_date,
+                 coalesce(vendor_name, name, ''), amount
+        having count(*) > 1
+    """, (current_start, current_end))
+    duplicate_by_category = {}
+    for row in duplicate_rows:
+        category = row.get("category") or "其它支出"
+        duplicate_by_category[category] = duplicate_by_category.get(category, 0) + int(row.get("duplicate_count") or 0)
+
+    items = []
+    for category in categories:
+        month_map = by_category.get(category, {})
+        current_data = month_map.get(current_start, {"total": 0.0, "count": 0})
+        previous_data = month_map.get(previous_start, {"total": 0.0, "count": 0})
+
+        history_values = []
+        for offset in range(-history_months, 0):
+            month_key = add_months(current_start, offset)
+            history_values.append(month_map.get(month_key, {"total": 0.0})["total"])
+
+        average = sum(history_values) / history_months
+        current_total = current_data["total"]
+        previous_total = previous_data["total"]
+        difference = current_total - average
+        percent_vs_average = (
+            difference / average * 100
+            if average > 0
+            else (100.0 if current_total > 0 else 0.0)
+        )
+        percent_vs_previous = (
+            (current_total - previous_total) / previous_total * 100
+            if previous_total > 0
+            else (100.0 if current_total > 0 else 0.0)
+        )
+
+        duplicate_count = duplicate_by_category.get(category, 0)
+        if current_total <= 0:
+            level, icon, label = "none", "⚪", "本月无支出"
+        elif average <= 0:
+            level, icon, label = "new", "🔵", "新出现支出"
+        elif percent_vs_average >= 40:
+            level, icon, label = "danger", "🔴", "建议立即检查"
+        elif percent_vs_average >= 20:
+            level, icon, label = "watch", "🟡", "需要留意"
+        else:
+            level, icon, label = "normal", "🟢", "正常范围"
+
+        notes = []
+        if duplicate_count:
+            notes.append(f"发现 {duplicate_count} 笔同日、同付款对象、同金额的疑似重复记录")
+        if level == "danger":
+            notes.append("检查是否重复输入、补缴上期账单、日期写错或出现特别维修")
+        elif level == "watch":
+            notes.append("建议核对账单月份、付款对象及本月是否有一次性活动")
+        elif level == "new":
+            notes.append("过去完整月份没有同类支出，建议确认是否属于新项目或分类变化")
+        elif level == "normal" and current_total > 0:
+            notes.append("金额仍在历史正常波动范围内")
+        elif current_total <= 0:
+            notes.append("本月暂时没有这类支出")
+
+        items.append({
+            "category": category,
+            "current": round(current_total, 2),
+            "previous": round(previous_total, 2),
+            "average": round(average, 2),
+            "difference": round(difference, 2),
+            "percent_vs_average": round(percent_vs_average, 1),
+            "percent_vs_previous": round(percent_vs_previous, 1),
+            "record_count": current_data["count"],
+            "duplicate_count": duplicate_count,
+            "level": level,
+            "icon": icon,
+            "status_label": label,
+            "note": "；".join(notes),
+        })
+
+    severity_order = {"danger": 0, "watch": 1, "new": 2, "normal": 3, "none": 4}
+    items.sort(key=lambda row: (severity_order.get(row["level"], 9), -row["current"], row["category"]))
+
+    total_current = sum(row["current"] for row in items)
+    total_previous = sum(row["previous"] for row in items)
+    total_average = sum(row["average"] for row in items)
+    total_percent = (
+        (total_current - total_average) / total_average * 100
+        if total_average > 0
+        else (100.0 if total_current > 0 else 0.0)
+    )
+
+    danger_count = sum(1 for row in items if row["level"] == "danger")
+    watch_count = sum(1 for row in items if row["level"] == "watch")
+    duplicate_count = sum(row["duplicate_count"] for row in items)
+
+    if danger_count:
+        summary_icon = "🔴"
+        summary_title = f"发现 {danger_count} 个明显异常类别"
+        summary_text = "请先检查红色项目，再核对疑似重复记录与一次性支出。"
+    elif watch_count:
+        summary_icon = "🟡"
+        summary_title = f"有 {watch_count} 个类别需要留意"
+        summary_text = "整体没有严重异常，但建议核对黄色项目的账单月份与用途。"
+    else:
+        summary_icon = "🟢"
+        summary_title = "本月支出整体正常"
+        summary_text = "各分类暂时没有明显超过历史范围的异常。"
+
+    return {
+        "current_month": current_start.strftime("%Y-%m"),
+        "previous_month": previous_start.strftime("%Y-%m"),
+        "history_months": history_months,
+        "total_current": round(total_current, 2),
+        "total_previous": round(total_previous, 2),
+        "total_average": round(total_average, 2),
+        "total_percent": round(total_percent, 1),
+        "danger_count": danger_count,
+        "watch_count": watch_count,
+        "duplicate_count": duplicate_count,
+        "summary_icon": summary_icon,
+        "summary_title": summary_title,
+        "summary_text": summary_text,
+        "items": items,
+    }
+
+
+@finance_v7_bp.route("/finance/v7/reports/expense-analysis")
+def finance_v7_expense_analysis():
+    data = _v7_expense_analysis("CHE", 6)
+
+    items = data.get("items", [])
+    data["focus_items"] = [
+        row for row in items
+        if row.get("level") in ("danger", "watch", "new")
+        or row.get("duplicate_count", 0) > 0
+    ]
+    data["normal_items"] = [
+        row for row in items
+        if row.get("level") == "normal" and row.get("current", 0) > 0
+    ]
+    data["zero_items"] = [
+        row for row in items
+        if row.get("current", 0) <= 0
+    ]
+    data["active_category_count"] = sum(
+        1 for row in items if row.get("current", 0) > 0
+    )
+    data["normal_count"] = len(data["normal_items"])
+    data["focus_count"] = len(data["focus_items"])
+
+    if data["focus_count"]:
+        data["ai_opening"] = (
+            f"本月共有 {data['active_category_count']} 类支出，"
+            f"系统发现 {data['focus_count']} 类需要优先检查。"
+        )
+    elif data["active_category_count"]:
+        data["ai_opening"] = (
+            f"本月共有 {data['active_category_count']} 类支出，"
+            "暂时没有发现明显异常。"
+        )
+    else:
+        data["ai_opening"] = "本月尚未录入支出，暂时没有可分析的项目。"
+
+    return render_template_string(r"""
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI 支出分析</title>
+<link rel="stylesheet" href="{{ url_for('static',filename='css/toolbox.css') }}">
+<style>
+body{margin:0;background:#f4f7fb;color:#162033}.page{width:min(1080px,calc(100% - 24px));margin:auto;padding:22px 0 52px}.top{display:flex;justify-content:space-between;gap:15px;align-items:flex-start}.top h1{margin:0;font-size:30px}.sub{margin-top:7px;color:#6e798c;line-height:1.6}.back{background:#fff;border:1px solid #dbe3ee;border-radius:13px;padding:10px 14px;text-decoration:none;color:#263149;font-weight:900;white-space:nowrap}.ai-card{margin-top:17px;background:linear-gradient(135deg,#eef4ff,#fff);border:1px solid #dce6f5;border-radius:25px;padding:23px;box-shadow:0 10px 28px rgba(38,64,105,.07)}.ai-row{display:flex;justify-content:space-between;gap:20px;align-items:center}.ai-badge{display:inline-flex;align-items:center;gap:8px;background:#fff;border:1px solid #dce5f1;border-radius:999px;padding:8px 12px;font-weight:950}.ai-title{font-size:23px;font-weight:950;margin-top:13px}.ai-text{margin-top:8px;color:#52627a;line-height:1.75}.ai-total{text-align:right}.ai-total strong{display:block;font-size:36px}.ai-total span{color:#748094;font-size:13px}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:14px}.stat{background:#fff;border:1px solid #e0e6ef;border-radius:18px;padding:17px}.stat-label{color:#758093;font-size:13px}.stat-value{font-size:23px;font-weight:950;margin-top:7px}.section{margin-top:16px;background:#fff;border:1px solid #e0e6ef;border-radius:22px;padding:20px}.section h2{margin:0 0 6px;font-size:21px}.help{color:#748094;line-height:1.55;margin-bottom:15px}.list{display:grid;gap:12px}.item{border:1px solid #e5e9f0;border-left:7px solid #c1c8d2;border-radius:18px;padding:16px;background:#fff}.item.danger{border-left-color:#d94f4f;background:#fff9f9}.item.watch{border-left-color:#d3a326;background:#fffdf5}.item.new{border-left-color:#3978db;background:#f7fbff}.item.normal{border-left-color:#2f9b68}.item-top{display:flex;justify-content:space-between;gap:15px}.category{font-size:20px;font-weight:950}.status{margin-top:5px;font-weight:900}.amount{font-size:24px;font-weight:950;text-align:right;white-space:nowrap}.count{text-align:right;color:#808a9b;font-size:12px;margin-top:4px}.compare{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:14px}.compare-box{background:#f4f7fa;border-radius:13px;padding:12px}.compare-label{font-size:12px;color:#778194}.compare-value{font-size:17px;font-weight:950;margin-top:5px}.up{color:#b54343}.down{color:#25734e}.advice{margin-top:13px;border-radius:13px;padding:13px 14px;background:#f0f4f9;color:#526178;line-height:1.65}.duplicate{background:#fff0ef;color:#96362f;font-weight:850}.ok-box{background:#eef8f3;border-radius:16px;padding:15px;color:#286746;line-height:1.65}.chips{display:flex;flex-wrap:wrap;gap:9px}.chip{background:#f1f4f8;border-radius:999px;padding:8px 11px;color:#5d687b;font-weight:850}details{margin-top:13px}summary{cursor:pointer;font-weight:950;color:#315b93}.normal-list{display:grid;gap:9px;margin-top:13px}.normal-row{display:flex;justify-content:space-between;gap:12px;background:#f7f9fc;border-radius:13px;padding:12px 14px}.normal-row strong{white-space:nowrap}.legend{display:flex;gap:9px;flex-wrap:wrap;margin-top:14px;color:#687387;font-size:13px}.legend span{background:#f2f5f8;border-radius:999px;padding:7px 10px}@media(max-width:800px){.stats{grid-template-columns:1fr 1fr}.compare{grid-template-columns:1fr 1fr}.compare-box:last-child{grid-column:1/-1}}@media(max-width:560px){.top h1{font-size:24px}.ai-row,.item-top{flex-direction:column;align-items:flex-start}.ai-total,.amount,.count{text-align:left}.stats{grid-template-columns:1fr 1fr}.compare{grid-template-columns:1fr}.compare-box:last-child{grid-column:auto}}
+</style>
+</head>
+<body>
+<main class="page">
+<header class="top">
+  <div>
+    <h1>🤖 AI 支出分析</h1>
+    <div class="sub">系统自动比较 {{ data.current_month }}、上月及过去 {{ data.history_months }} 个完整月份，只把需要关注的项目放在前面。</div>
+  </div>
+  <a class="back" href="{{ url_for('finance_v7.finance_v7_reports_center') }}">← 财政报表</a>
+</header>
+
+<section class="ai-card">
+  <div class="ai-row">
+    <div>
+      <div class="ai-badge">🤖 AI 财政秘书</div>
+      <div class="ai-title">{{ data.summary_icon }} {{ data.summary_title }}</div>
+      <div class="ai-text">{{ data.ai_opening }} {{ data.summary_text }}</div>
+    </div>
+    <div class="ai-total">
+      <strong>RM {{ '%.2f'|format(data.total_current) }}</strong>
+      <span>本月总支出 · 较历史平均 {% if data.total_percent >= 0 %}+{% endif %}{{ '%.1f'|format(data.total_percent) }}%</span>
+    </div>
+  </div>
+</section>
+
+<section class="stats">
+  <div class="stat"><div class="stat-label">本月支出</div><div class="stat-value">RM {{ '%.2f'|format(data.total_current) }}</div></div>
+  <div class="stat"><div class="stat-label">上月支出</div><div class="stat-value">RM {{ '%.2f'|format(data.total_previous) }}</div></div>
+  <div class="stat"><div class="stat-label">过去 {{ data.history_months }} 月平均</div><div class="stat-value">RM {{ '%.2f'|format(data.total_average) }}</div></div>
+  <div class="stat"><div class="stat-label">需要关注</div><div class="stat-value">{{ data.focus_count }} 类</div></div>
+</section>
+
+<section class="section">
+  <h2>⚠️ 本月优先检查</h2>
+  <div class="help">这里只显示明显异常、轻微偏高、新出现支出，或发现疑似重复的类别。</div>
+  {% if data.focus_items %}
+  <div class="list">
+    {% for row in data.focus_items %}
+    <article class="item {{ row.level }}">
+      <div class="item-top">
+        <div>
+          <div class="category">{{ row.icon }} {{ row.category }}</div>
+          <div class="status">{{ row.status_label }}{% if row.average > 0 and row.percent_vs_average >= 0 %} · 高于平均 {{ '%.1f'|format(row.percent_vs_average) }}%{% elif row.average > 0 %} · 低于平均 {{ '%.1f'|format(-row.percent_vs_average) }}%{% endif %}</div>
+        </div>
+        <div>
+          <div class="amount">RM {{ '%.2f'|format(row.current) }}</div>
+          <div class="count">本月 {{ row.record_count }} 笔</div>
+        </div>
+      </div>
+      <div class="compare">
+        <div class="compare-box"><div class="compare-label">上月</div><div class="compare-value">RM {{ '%.2f'|format(row.previous) }}</div></div>
+        <div class="compare-box"><div class="compare-label">过去 {{ data.history_months }} 月平均</div><div class="compare-value">RM {{ '%.2f'|format(row.average) }}</div></div>
+        <div class="compare-box"><div class="compare-label">与平均差额</div><div class="compare-value {% if row.difference > 0 %}up{% elif row.difference < 0 %}down{% endif %}">{% if row.difference >= 0 %}+{% endif %}RM {{ '%.2f'|format(row.difference) }}</div></div>
+      </div>
+      <div class="advice {% if row.duplicate_count %}duplicate{% endif %}">💡 {{ row.note }}</div>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="ok-box">✅ 本月没有发现需要优先处理的支出异常。财政只需按正常流程核对单据即可。</div>
+  {% endif %}
+</section>
+
+<section class="section">
+  <h2>✅ 正常项目</h2>
+  {% if data.normal_items %}
+  <div class="ok-box">共有 {{ data.normal_count }} 类支出仍在历史正常波动范围内，不需要逐项展开检查。</div>
+  <details>
+    <summary>查看正常项目</summary>
+    <div class="normal-list">
+      {% for row in data.normal_items %}
+      <div class="normal-row"><span>🟢 {{ row.category }} · 本月 {{ row.record_count }} 笔</span><strong>RM {{ '%.2f'|format(row.current) }}</strong></div>
+      {% endfor %}
+    </div>
+  </details>
+  {% else %}
+  <div class="help">本月暂时没有可归入正常范围的支出项目。</div>
+  {% endif %}
+</section>
+
+{% if data.zero_items %}
+<section class="section">
+  <h2>○ 本月没有支出的分类</h2>
+  <div class="help">这些类别只作完整性提示，不再逐张显示 RM0 卡片。</div>
+  <div class="chips">
+    {% for row in data.zero_items %}<span class="chip">{{ row.category }}</span>{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<div class="legend"><span>🔴 高于平均 ≥40%</span><span>🟡 高于平均 20%–39.9%</span><span>🔵 历史没有同类支出</span><span>🟢 正常范围</span></div>
+</main>
+</body>
+</html>
+""", data=data)
+
+
 @finance_v7_bp.route("/finance/v7/reports/monthly-fee-health")
 def finance_v7_monthly_fee_health():
     data = _v7_monthly_fee_health("CHE", 6)
@@ -1414,6 +1754,7 @@ def finance_v7_reports_center():
     </div>
     <section class="grid">
       <a class="card" href="{{ url_for('finance_v7.finance_v7_monthly_fee_health') }}"><div class="icon">❤️</div><div><div class="title">月费健康分析</div><div class="desc">判断月费能否维持支出、会员安全目标及还需增加多少会员。</div></div></a>
+      <a class="card" href="{{ url_for('finance_v7.finance_v7_expense_analysis') }}"><div class="icon">⚠️</div><div><div class="title">支出异常分析</div><div class="desc">比较本月、上月与历史平均，自动找出突然升高及疑似重复的支出。</div></div></a>
       <a class="card" href="/finance/dashboard"><div class="icon">📈</div><div><div class="title">Dashboard</div><div class="desc">查看收入、支出与月份统计。</div></div></a>
       <a class="card" href="/finance/reports/excel"><div class="icon">📥</div><div><div class="title">Excel 下载中心</div><div class="desc">下载 CHE、STW、布施、支出及 Petty Cash 报表。</div></div></a>
     </section></main></body></html>

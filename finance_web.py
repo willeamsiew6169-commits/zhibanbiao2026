@@ -2729,6 +2729,11 @@ def finance_admin_login():
     if not session.get("finance_login"):
         return redirect(url_for("finance.finance_login"))
 
+    if session.get("finance_admin"):
+        return redirect(
+            url_for("finance_v7.finance_v7_home")
+        )
+
     error = ""
     next_url = request.values.get("next", "").strip()
 
@@ -4093,9 +4098,9 @@ def finance_admin_home():
             ← 返回录入工作台
         </a>
 
-        <a class="btn-tool btn-danger"
-           href="{{ url_for('finance.finance_admin_logout') }}">
-            退出负责人
+        <a class="btn-tool btn-secondary"
+        href="{{ url_for('finance.finance_home') }}">
+            ← 返回录入工作台
         </a>
 
     </div>
@@ -5026,18 +5031,20 @@ def finance_basic_records():
         .ledger-stat.income .ledger-stat-value{color:#15803d;}
         .ledger-stat.expense .ledger-stat-value{color:#b91c1c;}
         .ledger-stat.cancelled .ledger-stat-value{color:#475569;}
-        .filter-card{background:white;border-radius:20px;padding:18px;margin-bottom:18px;box-shadow:0 8px 24px rgba(15,23,42,.06);}
-        .quick-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;}
-        .quick-btn{border:1px solid #dbe4ee;background:#f8fafc;color:#334155;border-radius:999px;padding:9px 15px;text-decoration:none;font-weight:700;}
+        .filter-card{background:white;border-radius:22px;padding:26px;margin-bottom:20px;box-shadow:0 10px 28px rgba(15,23,42,.07);}
+        .quick-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px;}
+        .quick-btn{border:1px solid #dbe4ee;background:#f8fafc;color:#334155;border-radius:999px;padding:11px 18px;text-decoration:none;font-size:16px;font-weight:800;}
         .quick-btn.active{background:#1769aa;color:white;border-color:#1769aa;}
-        .filter-grid{display:grid;grid-template-columns:2fr repeat(5,minmax(120px,1fr));gap:10px;align-items:end;}
-        .filter-grid label{display:block;font-size:13px;color:#64748b;margin:0 0 5px 4px;font-weight:700;}
-        .filter-actions{display:flex;gap:12px;margin-top:16px;justify-content:flex-end;align-items:center;}
-        .filter-actions .btn-tool{min-width:150px;min-height:52px;border-radius:14px;font-size:17px;font-weight:800;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;}
-        .filter-actions .btn-primary{min-width:190px;background:linear-gradient(135deg,#1769aa,#238fcb);border:none;box-shadow:0 10px 22px rgba(23,105,170,.24);}
+        .filter-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;align-items:end;}
+        .filter-grid label{display:block;font-size:16px;color:#475569;margin:0 0 8px 4px;font-weight:800;}
+        .filter-grid > div:first-child{grid-column:span 2;}
+        .filter-grid .form-input{width:100%;min-height:56px;padding:12px 14px;border-radius:12px;font-size:17px;}
+        .filter-actions{display:flex;gap:14px;margin-top:22px;justify-content:flex-end;align-items:center;}
+        .filter-actions .btn-tool{min-width:170px;min-height:56px;border-radius:15px;font-size:18px;font-weight:850;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;}
+        .filter-actions .btn-primary{min-width:220px;background:linear-gradient(135deg,#1769aa,#238fcb);border:none;box-shadow:0 10px 22px rgba(23,105,170,.24);}
         .filter-actions .btn-primary:hover{transform:translateY(-1px);box-shadow:0 13px 26px rgba(23,105,170,.30);}
         .ledger-list{display:grid;gap:10px;}
-        .ledger-item{background:white;border-radius:18px;padding:15px 18px;display:grid;grid-template-columns:minmax(210px,1.2fr) minmax(220px,1.5fr) minmax(120px,.7fr) 150px;gap:18px;align-items:center;box-shadow:0 7px 20px rgba(15,23,42,.06);border-left:7px solid #94a3b8;transition:.18s ease;}
+        .ledger-item{background:white;border-radius:18px;padding:15px 18px;display:grid;grid-template-columns:minmax(190px,1.05fr) minmax(220px,1.35fr) minmax(105px,.55fr) 145px minmax(210px,.95fr);gap:14px;align-items:center;box-shadow:0 7px 20px rgba(15,23,42,.06);border-left:7px solid #94a3b8;transition:.18s ease;}
         .ledger-item:hover{transform:translateY(-1px);box-shadow:0 10px 25px rgba(15,23,42,.09);}
         .ledger-item.income{border-left-color:#22a447;}
         .ledger-item.expense{border-left-color:#dc4c4c;}
@@ -5051,10 +5058,12 @@ def finance_basic_records():
         .income .record-amount{color:#15803d;}.expense .record-amount{color:#b91c1c;}
         .status-pill{display:inline-block;padding:5px 10px;border-radius:999px;font-size:12px;font-weight:800;background:#e2e8f0;color:#475569;margin-top:6px;}
         .status-pill.confirmed{background:#dcfce7;color:#166534;}.status-pill.cancelled{background:#e2e8f0;color:#475569;}
+        .record-actions{display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end}.record-actions .mini-action{display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:7px 10px;border-radius:9px;text-decoration:none;border:1px solid #d7e0ea;background:#f8fafc;color:#334155;font-size:12px;font-weight:800;cursor:pointer}.record-actions .edit{background:#eff6ff;color:#1d4ed8;border-color:#bfdbfe}.record-actions .pv{background:#f5f3ff;color:#6d28d9;border-color:#ddd6fe}.record-actions .cancel{background:#fff1f2;color:#be123c;border-color:#fecdd3}.cancel-form{display:flex;gap:5px}.cancel-reason{width:92px;min-height:36px;border:1px solid #d7e0ea;border-radius:9px;padding:6px 8px;font-size:12px}
         .empty-box{background:white;border-radius:20px;padding:44px;text-align:center;color:#64748b;}
         @media(max-width:900px){
             .ledger-summary{grid-template-columns:repeat(2,1fr)}
             .filter-grid{grid-template-columns:1fr 1fr}
+            .filter-grid > div:first-child{grid-column:1/-1}
             .ledger-item{grid-template-columns:1fr 1fr;gap:12px}
             .record-amount{text-align:left}
         }
@@ -5062,6 +5071,7 @@ def finance_basic_records():
             .ledger-summary{grid-template-columns:1fr 1fr;gap:9px}
             .ledger-stat{padding:14px}.ledger-stat-value{font-size:19px}
             .filter-grid{grid-template-columns:1fr}
+            .filter-grid > div:first-child{grid-column:auto}
             .filter-actions{display:grid;grid-template-columns:1fr;margin-top:14px}
             .filter-actions .btn-tool,.filter-actions .btn-primary{width:100%;min-width:0}
             .ledger-item{grid-template-columns:1fr;padding:15px}
@@ -5137,6 +5147,17 @@ def finance_basic_records():
                         <span class="status-pill {{ display_status }}">{{ '已确认' if display_status == 'confirmed' else ('已作废' if display_status == 'cancelled' else display_status) }}</span>
                     </div>
                     <div class="record-amount">{{ '+' if r.record_type == 'income' else '-' }} RM {{ '%.2f'|format(r.amount or 0) }}</div>
+                    <div class="record-actions">
+                        <a class="mini-action" href="{{ url_for('finance.record_detail', record_id=r.id) }}">👁 查看</a>
+                        {% if r.record_type == 'expense' and display_status != 'cancelled' %}
+                            <a class="mini-action edit" href="{{ url_for('finance.edit_expense_record', record_id=r.id) }}">✏ 修改</a>
+                            <a class="mini-action pv" href="{{ url_for('finance.payment_voucher', record_id=r.id) }}">📄 PV</a>
+                            <form class="cancel-form" method="post" action="{{ url_for('finance.cancel_record', record_id=r.id) }}" onsubmit="return confirm('确定作废这笔支出？');">
+                                <input class="cancel-reason" name="cancel_reason" placeholder="作废原因" required>
+                                <button class="mini-action cancel" type="submit">🗑 作废</button>
+                            </form>
+                        {% endif %}
+                    </div>
                 </div>
             {% else %}
                 <div class="empty-box">没有找到符合条件的财政记录</div>
@@ -6486,91 +6507,9 @@ def receipt_range_summary():
 
 @finance_bp.route("/menu/expense")
 def finance_expense_menu():
+    """支出入口直接进入统一支出工作台。"""
+    return redirect(url_for("finance.expense"))
 
-    expense_items = [
-
-        ("🌸", "供花", "鲜花及供花相关支出"),
-
-        ("🍎", "供果", "水果及供品相关支出"),
-
-        ("🪔", "供油", "灯油及油品相关支出"),
-
-        ("🛕", "佛台用品", "佛具、佛台及佛堂用品"),
-
-        ("⚡", "电费", "TNB 20-1、TNB 20-2"),
-
-        ("💧", "水费", "Air Selangor、Indah Water"),
-
-        ("📶", "电话及网络费", "Celcom、Digi、Unifi"),
-
-        ("🛠️", "维修保养", "维修及保养费用"),
-
-        ("🏗️", "装修", "GYT、观音堂及活动中心装修"),
-
-        ("🛒", "日常采购", "文具、厨房及日常用品"),
-
-        ("📄", "执照及行政费", "License、政府及行政费用"),
-
-        ("🧾", "其它支出", "印刷、交通及其它杂项费用"),
-
-    ]
-
-    return render_template_string(
-        FINANCE_V5_STYLE
-        + FINANCE_DATE_COMPONENT
-        + """
-<div class="finance-v5">
-
-    <div class="v5-topbar">
-
-        <a class="v5-back"
-        href="{{ url_for('finance.finance_home') }}">
-            ← 返回财政首页
-        </a>
-
-    </div>
-
-    <div class="v5-header">
-
-        <h1>🧾 支出录入</h1>
-
-        <p>请选择支出项目</p>
-
-    </div>
-
-    <div class="v5-menu-grid">
-
-        {% for icon, category, desc in expense_items %}
-
-        <a class="v5-menu-btn v5-expense"
-           href="{{ url_for('finance.expense', category=category) }}">
-
-            <div class="v5-icon">
-                {{ icon }}
-            </div>
-
-            <div class="v5-menu-text">
-
-                <div class="v5-menu-title">
-                    {{ category }}
-                </div>
-
-                <div class="v5-menu-desc">
-                    {{ desc }}
-                </div>
-
-            </div>
-
-        </a>
-
-        {% endfor %}
-
-    </div>
-
-</div>
-""",
-        expense_items=expense_items,
-    )
 
 @finance_bp.route("/menu/member")
 @finance_admin_required
@@ -17235,7 +17174,7 @@ def dashboard():
 
         <a
             class="finance-float-btn finance-float-back"
-            href="{{ url_for('finance.finance_admin_home') }}"
+            href="/finance/v7/reports"
             title="返回负责人中心"
             aria-label="返回负责人中心"
         >←</a>
@@ -19104,7 +19043,7 @@ def ensure_finance_vendor_schema():
 
 
 def get_finance_vendors_for_category(category, include_inactive=False):
-    ensure_finance_vendor_schema()
+    """读取指定类别公司；页面热路径不再重复执行 DDL。"""
 
     active_sql = "" if include_inactive else "and is_active = true"
 
@@ -19320,7 +19259,7 @@ def finance_vendors():
             {% else %}<p>还没有付款对象。</p>{% endfor %}
         </div>
 
-        <div class="btn-row"><a class="btn-tool btn-secondary" href="{{ url_for('finance.finance_expense_menu') }}">← 返回支出项目</a></div>
+        <div class="btn-row"><a class="btn-tool btn-secondary" href="{{ url_for('finance.finance_home') }}">← 返回财政首页</a></div>
     </div>
     </body>
     </html>
@@ -19629,12 +19568,13 @@ def _draw_single_payment_voucher(pdf, row, bottom_y, voucher_height, logo_path=N
 
     # ---------------------------- Signatures ----------------------------
     sig_title_y = table_bottom - 7.2 * mm
-    col_width = usable_width / 4
+    col_width = usable_width / 5
     columns = [
         (left + col_width * 0, "Prepared By:"),
         (left + col_width * 1, "Witness By:"),
         (left + col_width * 2, "Witness By:"),
-        (left + col_width * 3, "Received By:"),
+        (left + col_width * 3, "Witness By:"),
+        (left + col_width * 4, "Received By:"),
     ]
 
     pdf.setFont("Helvetica-Bold", 10.1)
@@ -19659,8 +19599,6 @@ def _draw_single_payment_voucher(pdf, row, bottom_y, voucher_height, logo_path=N
 def payment_voucher_pdf(record_id):
     if not session.get("finance_login"):
         return redirect(url_for("finance.finance_login"))
-
-    ensure_finance_vendor_schema()
 
     row = db_query("""
         select
@@ -20031,14 +19969,176 @@ def delete_payment_voucher(record_id):
     return redirect(url_for("finance.expense", category=row.get("category") or "其它支出"))
 
 
-@finance_bp.route("/expense/<category>", methods=["GET", "POST"])
-def expense(category):
-    """普通 key-in 组员使用的独立支出录入页。"""
-    ensure_finance_vendor_schema()
+
+@finance_bp.route("/expense-record/<int:record_id>/edit", methods=["GET", "POST"])
+@finance_admin_required
+def edit_expense_record(record_id):
+    """修改已保存的支出，并允许稍后补上 PV 编号。"""
+    row = db_query("""
+        select *
+        from finance_records
+        where id = %s
+          and record_type = 'expense'
+        limit 1
+    """, (record_id,), fetchone=True)
+
+    if not row:
+        abort(404)
+
+    message = ""
+    category_options = list(EXPENSE_SUB_CATEGORY_OPTIONS.keys())
+
+    if request.method == "POST":
+        payment_voucher_no = request.form.get("payment_voucher_no", "").strip().upper()
+        record_date = request.form.get("record_date", "").strip()
+        category = request.form.get("category", "").strip()
+        sub_category = request.form.get("sub_category", "").strip()
+        vendor_name = request.form.get("vendor_name", "").strip()
+        reference_no = request.form.get("reference_no", "").strip()
+        prepared_by = request.form.get("prepared_by", "").strip()
+        remarks = request.form.get("remarks", "").strip()
+
+        try:
+            amount = Decimal(request.form.get("amount", "0") or "0")
+        except Exception:
+            amount = Decimal("0")
+
+        duplicate = None
+        if payment_voucher_no:
+            duplicate = db_query("""
+                select id
+                from finance_records
+                where upper(payment_voucher_no) = upper(%s)
+                  and id <> %s
+                  and coalesce(status, 'confirmed') <> 'cancelled'
+                limit 1
+            """, (payment_voucher_no, record_id), fetchone=True)
+
+        if payment_voucher_no and not re.fullmatch(r"PV\d+", payment_voucher_no):
+            message = "Payment Voucher 格式错误；也可以先留空。"
+        elif duplicate:
+            message = "这个 Payment Voucher 编号已被其它记录使用。"
+        elif category not in category_options:
+            message = "请选择正确的支出类别。"
+        elif not sub_category:
+            message = "请填写费用明细／单位。"
+        elif not vendor_name:
+            message = "请填写付款对象／公司名称。"
+        elif amount <= 0:
+            message = "请输入正确的支出金额。"
+        else:
+            lock_error = require_finance_month_open(
+                record_date,
+                row.get("fund_account") or "观音堂日常户口",
+            )
+            if lock_error:
+                message = lock_error
+            else:
+                db_query("""
+                    update finance_records
+                    set payment_voucher_no = %s,
+                        record_date = %s,
+                        category = %s,
+                        sub_category = %s,
+                        vendor_name = %s,
+                        vendor = %s,
+                        name = %s,
+                        amount = %s,
+                        reference_no = %s,
+                        prepared_by = %s,
+                        remarks = %s
+                    where id = %s
+                """, (
+                    payment_voucher_no or None,
+                    record_date,
+                    category,
+                    sub_category,
+                    vendor_name,
+                    vendor_name,
+                    vendor_name,
+                    amount,
+                    reference_no or None,
+                    prepared_by or None,
+                    remarks or None,
+                    record_id,
+                ))
+                flash("支出记录已更新。", "success")
+                return redirect(url_for("finance.finance_basic_records", type="expense"))
+
+        row = dict(row)
+        row.update({
+            "payment_voucher_no": payment_voucher_no,
+            "record_date": record_date,
+            "category": category,
+            "sub_category": sub_category,
+            "vendor_name": vendor_name,
+            "amount": amount,
+            "reference_no": reference_no,
+            "prepared_by": prepared_by,
+            "remarks": remarks,
+        })
+
+    return render_template_string(r"""
+    <!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>修改支出记录</title><link rel="stylesheet" href="{{ url_for('static', filename='css/toolbox.css') }}">
+    <style>body{background:#f4f7fb}.edit-page{max-width:900px}.edit-hero{background:linear-gradient(135deg,#b91c1c,#dc2626);color:#fff;padding:24px;border-radius:20px;margin-bottom:18px}.edit-hero h1{margin:0 0 6px}.edit-grid{display:grid;grid-template-columns:1fr 1fr;gap:15px}.full{grid-column:1/-1}.form-input{width:100%;box-sizing:border-box}.actions{display:flex;gap:12px;justify-content:space-between;margin-top:20px}@media(max-width:650px){.edit-grid{grid-template-columns:1fr}.full{grid-column:auto}.actions{display:grid}.actions .btn-tool{width:100%}}</style>
+    </head><body><div class="page edit-page">
+      <section class="edit-hero"><h1>✏️ 修改支出记录</h1><div>记录 ID {{ row.id }} · PV 编号可以留空，之后再补上。</div></section>
+      {% if message %}<div class="alert alert-danger">⚠️ {{ message }}</div>{% endif %}
+      <div class="card"><form method="post"><div class="edit-grid">
+        <div class="full"><label class="form-label">Payment Voucher No.</label><input class="form-input" name="payment_voucher_no" value="{{ row.payment_voucher_no or '' }}" placeholder="可留空"></div>
+        <div><label class="form-label">支出日期</label><input class="form-input" type="date" name="record_date" value="{{ row.record_date }}" required></div>
+        <div><label class="form-label">类别</label><select class="form-input" name="category" required>{% for item in category_options %}<option value="{{ item }}" {% if row.category == item %}selected{% endif %}>{{ item }}</option>{% endfor %}</select></div>
+        <div><label class="form-label">费用明细／单位</label><input class="form-input" name="sub_category" value="{{ row.sub_category or '' }}" required></div>
+        <div><label class="form-label">付款对象／公司</label><input class="form-input" name="vendor_name" value="{{ row.vendor_name or row.vendor or row.name or '' }}" required></div>
+        <div><label class="form-label">金额</label><input class="form-input" type="number" step="0.01" min="0.01" name="amount" value="{{ row.amount }}" required></div>
+        <div><label class="form-label">Invoice／Reference No.</label><input class="form-input" name="reference_no" value="{{ row.reference_no or '' }}"></div>
+        <div><label class="form-label">Prepared By</label><select class="form-input" name="prepared_by"><option value="陈柔霓" {% if row.prepared_by == '陈柔霓' %}selected{% endif %}>陈柔霓</option><option value="黄薈菏" {% if row.prepared_by == '黄薈菏' %}selected{% endif %}>黄薈菏</option><option value="" {% if not row.prepared_by %}selected{% endif %}>（空白）</option></select></div>
+        <div class="full"><label class="form-label">备注</label><textarea class="form-input" name="remarks" rows="4">{{ row.remarks or '' }}</textarea></div>
+      </div><div class="actions"><a class="btn-tool btn-secondary" href="{{ url_for('finance.finance_basic_records', type='expense') }}">← 返回记录</a><button class="btn-tool btn-danger" type="submit" onclick="return confirm('确定保存修改？')">💾 保存修改</button></div></form></div>
+    </div></body></html>
+    """, row=row, message=message, category_options=category_options)
+
+
+@finance_bp.route("/expense/<category>", methods=["GET"])
+def expense_legacy(category):
+    """兼容旧网址，并统一转到单一支出工作台。"""
+    allowed_categories = set(EXPENSE_SUB_CATEGORY_OPTIONS.keys())
+    if category not in allowed_categories:
+        return "Invalid expense category", 400
+    return redirect(url_for("finance.expense", category=category))
+
+
+@finance_bp.route("/expense", methods=["GET", "POST"])
+def expense():
+    """统一支出工作台：所有类别由同一个页面和同一个 Controller 处理。"""
+
+    category = (
+        request.form.get("category", "").strip()
+        or request.args.get("category", "").strip()
+        or "供花"
+    )
 
     allowed_categories = set(EXPENSE_SUB_CATEGORY_OPTIONS.keys())
     if category not in allowed_categories:
         return "Invalid expense category", 400
+
+    # 顶部快速切换：保留稳定的 /expense/<category> 路由，
+    # 但财政无需返回菜单，可直接在同一工作台切换类别。
+    category_items = [
+        ("🌸", "供花"),
+        ("🍎", "供果"),
+        ("🪔", "供油"),
+        ("🛕", "佛台用品"),
+        ("⚡", "电费"),
+        ("💧", "水费"),
+        ("📶", "电话及网络费"),
+        ("🛠️", "维修保养"),
+        ("🏗️", "装修"),
+        ("🛒", "日常采购"),
+        ("📄", "执照及行政费"),
+        ("🧾", "其它支出"),
+    ]
 
     message = ""
     success_message = request.args.get("success", "")
@@ -20048,7 +20148,7 @@ def expense(category):
     sub_category_options = EXPENSE_SUB_CATEGORY_OPTIONS.get(category, ["其它"])
 
     form_data = {
-        "payment_voucher_no": suggested_payment_voucher_no,
+        "payment_voucher_no": "",
         "record_date": date.today().isoformat(),
         "sub_category": "",
         "sub_category_custom": "",
@@ -20168,11 +20268,9 @@ def expense(category):
                     limit 1
                 """, (int(form_data["vendor_id"]),), fetchone=True)
 
-            if not payment_voucher_no:
-                message = "请填写 Payment Voucher 编号。"
-            elif not re.match(r"^PV\d+$", payment_voucher_no):
-                message = "Payment Voucher 格式错误，例如 PV000001。"
-            elif existing_voucher:
+            if payment_voucher_no and not re.match(r"^PV\d+$", payment_voucher_no):
+                message = "Payment Voucher 格式错误，例如 PV000001；也可以先留空。"
+            elif payment_voucher_no and existing_voucher:
                 message = "这个 Payment Voucher 编号已经存在。"
             elif not sub_category:
                 message = "请选择或填写费用明细／单位。"
@@ -20216,7 +20314,7 @@ def expense(category):
                         )
                         returning id
                     """, (
-                        payment_voucher_no,
+                        payment_voucher_no or None,
                         record_date,
                         category,
                         sub_category,
@@ -20274,12 +20372,42 @@ def expense(category):
             .expense-actions .btn-tool{min-width:180px}
             .expense-help-modal{position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(15,23,42,.58)}.expense-help-modal.show{display:flex}
             .expense-help-card{width:min(650px,100%);background:#fff;border-radius:20px;padding:22px;box-shadow:0 24px 70px rgba(0,0,0,.28)}.expense-help-card h2{margin-top:0}.expense-help-card kbd{padding:3px 7px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc;font-weight:800}
+            .expense-switch-card{margin:0 0 16px;padding:14px;border:1px solid #e2e8f0;border-radius:18px;background:#fff;box-shadow:0 6px 18px rgba(15,23,42,.06)}
+            .expense-switch-title{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px;color:#475569;font-size:14px;font-weight:800}
+            .expense-switch-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}
+            .expense-switch-btn{display:flex;align-items:center;justify-content:center;gap:7px;min-height:45px;padding:8px 9px;border:1px solid #dbe3ec;border-radius:12px;background:#f8fafc;color:#334155;text-decoration:none;font-size:14px;font-weight:850;transition:.16s ease;white-space:nowrap}
+            .expense-switch-btn:hover{transform:translateY(-1px);border-color:#ef9a9a;background:#fff5f5;color:#b91c1c}
+            .expense-switch-btn.active{border-color:#dc2626;background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff;box-shadow:0 7px 16px rgba(185,28,28,.20)}
+            .expense-switch-icon{font-size:18px}
+            @media(max-width:980px){.expense-switch-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+            @media(max-width:700px){.expense-switch-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.expense-switch-title{align-items:flex-start;flex-direction:column}}
+            @media(max-width:480px){.expense-switch-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.expense-switch-btn{font-size:13px}}
+
             @media(max-width:820px){.pv-layout{grid-template-columns:1fr}.balance-preview{grid-template-columns:1fr 1fr}.voucher-box{grid-template-columns:1fr}.voucher-suggestion{padding:0}.inline-grid{grid-template-columns:1fr}.expense-actions{display:grid}.expense-actions .btn-tool{width:100%}}
             @media(max-width:560px){.expense-page{width:min(100% - 16px,1120px);padding-top:10px}.expense-header{padding:15px 16px}.expense-title-row{align-items:flex-start}.expense-header h1{font-size:22px}.expense-header p{font-size:12px}.card{padding:14px}.vendor-line{grid-template-columns:1fr}.mini-add{width:100%}.balance-preview{grid-template-columns:1fr}.expense-help-btn{font-size:12px;padding:7px 9px}}
         </style>
     </head>
     <body>
     <div class="page expense-page">
+        <section class="expense-switch-card">
+            <div class="expense-switch-title">
+                <span>选择支出类别</span>
+                <span>当前：{{ category }}</span>
+            </div>
+            <div class="expense-switch-grid">
+                {% for icon, item_category in category_items %}
+                <a
+                    class="expense-switch-btn {% if item_category == category %}active{% endif %}"
+                    href="{{ url_for('finance.expense') }}?category={{ item_category|urlencode }}"
+                    {% if item_category == category %}aria-current="page"{% endif %}
+                >
+                    <span class="expense-switch-icon">{{ icon }}</span>
+                    <span>{{ item_category }}</span>
+                </a>
+                {% endfor %}
+            </div>
+        </section>
+
         <div class="expense-header">
             <div class="expense-title-row">
                 <div>
@@ -20304,15 +20432,16 @@ def expense(category):
         {% if message %}<div class="alert alert-danger">⚠️ {{ message }}</div>{% endif %}
 
         <div class="card">
-            <form method="post" id="expenseForm">
+            <form method="post" id="expenseForm" action="{{ url_for('finance.expense') }}">
+                <input type="hidden" name="category" value="{{ category }}">
                 <input type="hidden" name="action" id="formAction" value="save_expense">
 
                 <div class="voucher-box">
                     <div>
                         <label class="form-label">Payment Voucher No.</label>
-                        <input class="form-input" name="payment_voucher_no" value="{{ form_data.payment_voucher_no }}" required>
+                        <input class="form-input" name="payment_voucher_no" value="{{ form_data.payment_voucher_no }}" placeholder="可先留空，之后再补上">
                     </div>
-                    <div class="voucher-suggestion">系统建议：<strong>{{ suggested_payment_voucher_no }}</strong></div>
+                    <div class="voucher-suggestion">系统建议：<strong>{{ suggested_payment_voucher_no }}</strong><br><span style="font-weight:600;color:#64748b">编号未确定时可留空</span></div>
                 </div>
 
                 <div class="pv-layout">
@@ -20388,7 +20517,7 @@ def expense(category):
                     </section>
 
                     <div class="expense-actions">
-                        <a class="btn-tool btn-secondary" href="{{ url_for('finance.finance_expense_menu') }}">← 返回支出项目</a>
+                        <a class="btn-tool btn-secondary" href="{{ url_for('finance.finance_home') }}">🏠 返回财政首页</a>
                         <button class="btn-tool btn-danger" type="submit" onclick="document.getElementById('formAction').value='save_expense';return confirm('确定保存这笔现金支出？')">💾 保存 Payment Voucher</button>
                     </div>
                 </div>
@@ -20441,4 +20570,5 @@ def expense(category):
         vendors=vendors,
         sub_category_options=sub_category_options,
         suggested_payment_voucher_no=suggested_payment_voucher_no,
+        category_items=category_items,
     )
