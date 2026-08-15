@@ -4631,6 +4631,13 @@ body{
         </div>
 
         <div class="btn-row">
+            <a class="btn-tool btn-warning"
+            href="{{ url_for('dharma_class.class_students_inactive') }}">
+                ⏸ 暂停学生
+            </a>
+        </div>
+
+        <div class="btn-row">
 
             <a
                 class="btn-tool btn-purple"
@@ -4813,6 +4820,229 @@ function goTop() {
         group_id=group_id,
         q=q,
         current_year=current_year
+    )
+
+
+@dharma_class_bp.route("/students/inactive")
+@dharma_student_access_required
+def class_students_inactive():
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+            cur.execute("""
+                select
+                    s.id,
+                    s.student_no,
+                    s.name,
+                    s.english_name,
+                    s.gender,
+                    s.birth_year,
+                    s.status,
+                    g.name as group_name
+                from dharma_students s
+                left join dharma_class_groups g
+                    on g.id = s.group_id
+                where s.status = 'paused'
+                  and s.branch = 'CHE'
+                order by
+                    g.sort_order,
+                    s.student_no nulls last,
+                    s.name
+            """)
+
+            students = cur.fetchall()
+
+    return render_template_string("""
+<!doctype html>
+<html lang="zh">
+
+<head>
+<meta charset="utf-8">
+<meta name="viewport"
+      content="width=device-width, initial-scale=1">
+
+<title>暂停学生</title>
+
+<link rel="stylesheet"
+      href="/static/css/toolbox.css">
+</head>
+
+<body>
+
+<div class="page">
+
+    <div class="card">
+
+        <h1 class="page-title">
+            ⏸ 暂停学生
+        </h1>
+
+        <p class="page-subtitle">
+            暂停学生的历史资料仍然保留，可随时恢复。
+        </p>
+
+    </div>
+
+
+    <div class="card">
+
+        {% if students %}
+
+            <div class="table-responsive">
+
+                <table class="record-table">
+
+                    <thead>
+                        <tr>
+                            <th>编号</th>
+                            <th>姓名</th>
+                            <th>组别</th>
+                            <th>状态</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+
+                    <tbody>
+
+                    {% for s in students %}
+
+                        <tr>
+
+                            <td>
+                                {{ s.student_no or "-" }}
+                            </td>
+
+                            <td>
+                                <strong>{{ s.name }}</strong>
+
+                                {% if s.english_name %}
+                                    <br>
+                                    <span style="color:#777;">
+                                        {{ s.english_name }}
+                                    </span>
+                                {% endif %}
+                            </td>
+
+                            <td>
+                                {{ s.group_name or "-" }}
+                            </td>
+
+                            <td>
+                                ⏸ 暂停
+                            </td>
+
+                            <td>
+
+                                <form
+                                    method="post"
+                                    action="{{ url_for(
+                                        'dharma_class.class_students_restore',
+                                        student_id=s.id
+                                    ) }}"
+                                    style="margin:0;"
+                                >
+
+                                    <button
+                                        class="btn-tool btn-success"
+                                        type="submit"
+                                        style="
+                                            font-size:16px;
+                                            min-height:40px;
+                                            padding:8px 12px;
+                                        "
+                                        onclick="
+                                            return confirm(
+                                                '确定恢复 {{ s.name }} 吗？'
+                                            );
+                                        "
+                                    >
+                                        ♻️ 恢复
+                                    </button>
+
+                                </form>
+
+                            </td>
+
+                        </tr>
+
+                    {% endfor %}
+
+                    </tbody>
+
+                </table>
+
+            </div>
+
+        {% else %}
+
+            <div class="empty-state">
+                目前没有暂停学生。
+            </div>
+
+        {% endif %}
+
+    </div>
+
+
+    <div class="card">
+
+        <div class="btn-row">
+
+            <a
+                class="btn-tool btn-secondary"
+                href="{{ url_for(
+                    'dharma_class.class_students'
+                ) }}"
+            >
+                ⬅ 返回学生名单
+            </a>
+
+        </div>
+
+    </div>
+
+</div>
+
+</body>
+</html>
+""",
+        students=students
+    )
+
+
+
+@dharma_class_bp.route(
+    "/students/<int:student_id>/restore",
+    methods=["POST"]
+)
+@dharma_student_access_required
+def class_students_restore(student_id):
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute("""
+                update dharma_students
+                set status = 'active'
+                where id = %s
+                  and branch = 'CHE'
+                  and status = 'inactive'
+            """, (student_id,))
+
+            restored = cur.rowcount
+
+        conn.commit()
+
+    if restored:
+        flash("学生已恢复为在读状态。", "good")
+    else:
+        flash("找不到这位暂停学生，或学生已经恢复。", "bad")
+
+    return redirect(
+        url_for(
+            "dharma_class.class_students_inactive"
+        )
     )
 
 
