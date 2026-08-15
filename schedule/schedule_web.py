@@ -55,7 +55,6 @@ from schedule.services.settings_service import (
 
 from schedule.services.publish_service import (
     clear_schedule_need_republish,
-    clear_schedule_need_republish,
     is_schedule_published,
     mark_schedule_need_republish,
     publish_schedule_for_date,
@@ -64,6 +63,7 @@ from schedule.services.publish_service import (
 )
 
 from schedule.services.assignment_service import (
+    clear_prebook_cache,
     load_assigned_places_for_date,
     load_display_records,
     load_schedule_admin_dashboard_data,
@@ -97,9 +97,11 @@ load_dotenv()
 cc = OpenCC('t2s')  # 繁 → 简
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
-engine = create_engine(DATABASE_URL, pool_pre_ping=True) if DATABASE_URL else None
-
-DATABASE_URL = os.environ.get("DATABASE_URL")
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=300,
+) if DATABASE_URL else None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -247,9 +249,6 @@ def find_name_by_id(vol_id):
         print("find_name_by_id error:", e)
         return raw_id
     
-from opencc import OpenCC
-cc = OpenCC("t2s")
-
 
 @schedule_bp.route("/schedule/logout")
 def schedule_logout():
@@ -462,6 +461,8 @@ def delete_prebook_record(record):
 
         with pd.ExcelWriter(PREBOOK_FILE, engine="openpyxl") as writer:
             df.to_excel(writer, sheet_name="预报名", index=False)
+
+        clear_prebook_cache()
 
     except Exception as e:
         print("delete_prebook_record error:", e)
@@ -1076,8 +1077,6 @@ https://gyt-checkin.onrender.com/volunteer
 @schedule_bp.route("/schedule", methods=["GET", "POST"])
 @schedule_bp.route("/schedule/admin", methods=["GET", "POST"])
 def schedule_admin():
-    import time
-
     if not session.get("schedule_login"):
         if request.method == "POST":
             pin = request.form.get("pin", "").strip()
@@ -1091,7 +1090,6 @@ def schedule_admin():
 
         return render_template_string(LOGIN_HTML)
 
-    t0 = time.time()
 
     now = malaysia_now()
 
@@ -1120,26 +1118,15 @@ def schedule_admin():
     mode = request.args.get("mode", "")
 
     override_date = request.args.get("override_date") or default_schedule_date
-    t1 = time.time()
     dashboard = load_admin_dashboard_data(
         mode=mode,
         override_date=override_date,
     )
-    print("dashboard:", round(time.time() - t1, 2))
-    print("NOW =", now)
-    print("SWITCH =", switch_time)
-    print("DEFAULT =", default_schedule_date)
-    print("OVERRIDE =", override_date)
 
-    t2 = time.time()
     buddha_names = load_buddha_name_options()
-    print("buddha_names:", round(time.time() - t2, 2))
 
-    t3 = time.time()
     fixed_buddha_today = get_fixed_buddha_for_date(override_date)
-    print("fixed_buddha_today:", round(time.time() - t3, 2))
 
-    print("schedule_admin total:", round(time.time() - t0, 2))
 
     return render_template_string(
         SCHEDULE_HTML,
@@ -4657,13 +4644,24 @@ SCHEDULE_HTML = """
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="manifest" href="/schedule-manifest.json">
-<link rel="icon" href="/static/schedule_icon.png?v=1">
+<link rel="manifest"
+      href="/schedule-manifest.json?v=5">
+
+<link rel="icon"
+      type="image/png"
+      sizes="192x192"
+      href="/static/schedule_icon_192.png?v=5">
+
+<link rel="apple-touch-icon"
+      href="/static/schedule_icon_512.png?v=5">
+
+<meta name="theme-color"
+      content="#43a047">
+
 <title>负责人排班系统</title>
 
 <link rel="stylesheet"
       href="{{ url_for('static', filename='css/toolbox.css') }}">
-
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {

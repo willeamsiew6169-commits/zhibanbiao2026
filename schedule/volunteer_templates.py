@@ -6,8 +6,19 @@ VOLUNTEER_SIGNUP_HTML = """
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="manifest" href="/volunteer-manifest.json">
-<link rel="icon" href="/static/volunteer_icon.png?v=1">
+<link rel="manifest"
+      href="/volunteer-manifest.json?v=5">
+
+<link rel="icon"
+      type="image/png"
+      sizes="192x192"
+      href="/static/volunteer_icon_192.png?v=5">
+
+<link rel="apple-touch-icon"
+      href="/static/volunteer_icon_512.png?v=5">
+
+<meta name="theme-color"
+      content="#00a86b">
 
 <title>蕉赖共修会义工报名</title>
 

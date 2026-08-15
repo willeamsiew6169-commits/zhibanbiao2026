@@ -4,6 +4,7 @@ import os
 import re
 import psycopg2
 import traceback
+import threading
 import pandas as pd
 
 from datetime import datetime
@@ -44,8 +45,74 @@ FIXED_FILE = os.path.join(
 PREBOOK_FILE = os.path.join(BASE_DIR, "prebook_schedule.xlsx")
 OUTPUT_FILE = os.path.join(BASE_DIR, "schedule_output.txt")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-engine = create_engine(DATABASE_URL, pool_pre_ping=True) if DATABASE_URL else None
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=300,
+) if DATABASE_URL else None
 VOLUNTEER_SIGNUP_URL = "https://gyt-checkin.onrender.com/volunteer"
+
+
+_FILE_CACHE_LOCK = threading.Lock()
+_FILE_CACHE = {}
+
+
+def _cached_excel(path, *, sheet_name=None):
+    """
+    按文件修改时间缓存 Excel。
+
+    返回副本，避免调用方修改缓存内的 DataFrame。
+    """
+    if not os.path.exists(path):
+        return None
+
+    key = (os.path.abspath(path), sheet_name)
+    mtime_ns = os.stat(path).st_mtime_ns
+
+    cached = _FILE_CACHE.get(key)
+
+    if cached and cached["mtime_ns"] == mtime_ns:
+        value = cached["value"]
+        return value.copy() if hasattr(value, "copy") else value
+
+    with _FILE_CACHE_LOCK:
+        cached = _FILE_CACHE.get(key)
+
+        if cached and cached["mtime_ns"] == mtime_ns:
+            value = cached["value"]
+            return value.copy() if hasattr(value, "copy") else value
+
+        if sheet_name is None:
+            value = pd.read_excel(path)
+        else:
+            value = pd.read_excel(
+                path,
+                sheet_name=sheet_name,
+            )
+
+        _FILE_CACHE[key] = {
+            "mtime_ns": mtime_ns,
+            "value": value,
+        }
+
+        return value.copy() if hasattr(value, "copy") else value
+
+
+def clear_schedule_builder_excel_cache(path=None):
+    """
+    Excel 被外部流程修改后可主动清除缓存。
+    不传 path 时清除全部。
+    """
+    with _FILE_CACHE_LOCK:
+        if path is None:
+            _FILE_CACHE.clear()
+            return
+
+        abs_path = os.path.abspath(path)
+
+        for key in list(_FILE_CACHE):
+            if key[0] == abs_path:
+                _FILE_CACHE.pop(key, None)
 
 
 DUTY_TARGETS = {
@@ -672,52 +739,141 @@ def auto_assign_new_duty(result):
 
 def load_prebook_input(target_date_str):
     if not os.path.exists(PREBOOK_FILE):
-        return pd.DataFrame(columns=["姓名", "岗位", "开始时间", "结束时间", "优先岗位", "备注"])
+        return pd.DataFrame(
+            columns=[
+                "姓名",
+                "岗位",
+                "开始时间",
+                "结束时间",
+                "优先岗位",
+                "备注",
+            ]
+        )
 
-    df = pd.read_excel(PREBOOK_FILE, sheet_name="预报名")
+    df = _cached_excel(
+        PREBOOK_FILE,
+        sheet_name="预报名",
+    )
+
+    if df is None:
+        return pd.DataFrame(
+            columns=[
+                "姓名",
+                "岗位",
+                "开始时间",
+                "结束时间",
+                "优先岗位",
+                "备注",
+            ]
+        )
+
     df.columns = df.columns.astype(str).str.strip()
 
-    need_cols = ["姓名", "岗位", "日期", "开始时间", "结束时间"]
-    missing = [c for c in need_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"prebook_schedule.xlsx 缺少栏位：{missing}")
+    need_cols = [
+        "姓名",
+        "岗位",
+        "日期",
+        "开始时间",
+        "结束时间",
+    ]
 
-    df["日期"] = pd.to_datetime(df["日期"], errors="coerce").dt.strftime("%Y-%m-%d")
-    df = df[df["日期"] == target_date_str].copy()
+    missing = [
+        column
+        for column in need_cols
+        if column not in df.columns
+    ]
+
+    if missing:
+        raise ValueError(
+            f"prebook_schedule.xlsx 缺少栏位：{missing}"
+        )
+
+    df["日期"] = pd.to_datetime(
+        df["日期"],
+        errors="coerce",
+    ).dt.strftime("%Y-%m-%d")
+
+    df = df[
+        df["日期"] == target_date_str
+    ].copy()
 
     if df.empty:
-        return pd.DataFrame(columns=["姓名", "岗位", "开始时间", "结束时间", "优先岗位", "备注"])
+        return pd.DataFrame(
+            columns=[
+                "姓名",
+                "岗位",
+                "开始时间",
+                "结束时间",
+                "优先岗位",
+                "备注",
+            ]
+        )
 
     df["姓名"] = df["姓名"].astype(str).str.strip()
-    df["岗位"] = df["岗位"].astype(str).str.strip().map(normalize_job_name)
-    df["开始时间"] = df["开始时间"].astype(str).str.strip()
-    df["结束时间"] = df["结束时间"].astype(str).str.strip()
+    df["岗位"] = (
+        df["岗位"]
+        .astype(str)
+        .str.strip()
+        .map(normalize_job_name)
+    )
+    df["开始时间"] = (
+        df["开始时间"]
+        .astype(str)
+        .str.strip()
+    )
+    df["结束时间"] = (
+        df["结束时间"]
+        .astype(str)
+        .str.strip()
+    )
     df["优先岗位"] = ""
+
     if "备注" not in df.columns:
         df["备注"] = ""
     else:
-        df["备注"] = df["备注"].astype(str).str.strip()
+        df["备注"] = (
+            df["备注"]
+            .astype(str)
+            .str.strip()
+        )
 
-    return df[["姓名", "岗位", "开始时间", "结束时间", "优先岗位", "备注"]].copy()
+    return df[
+        [
+            "姓名",
+            "岗位",
+            "开始时间",
+            "结束时间",
+            "优先岗位",
+            "备注",
+        ]
+    ].copy()
 
 def get_latest_date_from_prebook():
     if not os.path.exists(PREBOOK_FILE):
         return None
 
-    df = pd.read_excel(PREBOOK_FILE, sheet_name="预报名")
+    df = _cached_excel(
+        PREBOOK_FILE,
+        sheet_name="预报名",
+    )
+
+    if df is None:
+        return None
+
     df.columns = df.columns.astype(str).str.strip()
 
     if "日期" not in df.columns:
         return None
 
-    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
-    df = df.dropna(subset=["日期"])
+    dates = pd.to_datetime(
+        df["日期"],
+        errors="coerce",
+    ).dropna()
 
-    if df.empty:
+    if dates.empty:
         return None
 
-    latest_date = df["日期"].max()
-    return latest_date.to_pydatetime()
+    return dates.max().to_pydatetime()
 
 def merge_signup_and_prebook(signup_df, prebook_df):
     if signup_df is None or signup_df.empty:
@@ -1045,25 +1201,45 @@ def get_weekday_name(date_obj):
 
 
 def load_fixed_schedule():
-    xls = pd.ExcelFile(FIXED_FILE)
-    sheets = xls.sheet_names
+    if not os.path.exists(FIXED_FILE):
+        raise FileNotFoundError(
+            f"找不到 fixed_schedule.xlsx：{FIXED_FILE}"
+        )
 
-    print("检测到 fixed_schedule.xlsx 工作表：", sheets)
+    buddhist_df = _cached_excel(
+        FIXED_FILE,
+        sheet_name="佛台固定",
+    )
 
-    if "佛台固定" in sheets:
-        buddhist_df = pd.read_excel(FIXED_FILE, sheet_name="佛台固定")
-        buddhist_df.columns = buddhist_df.columns.astype(str).str.strip()
-        print("佛台固定栏位：", list(buddhist_df.columns))
-    else:
+    if buddhist_df is None:
         raise ValueError("❌ 必须有【佛台固定】sheet")
 
-    if "卫生固定" in sheets:
-        cleaning_df = pd.read_excel(FIXED_FILE, sheet_name="卫生固定")
-        cleaning_df.columns = cleaning_df.columns.astype(str).str.strip()
-        print("卫生固定栏位：", list(cleaning_df.columns))
-    else:
-        print("⚠️ 没有【卫生固定】，将全部由报名决定")
-        cleaning_df = pd.DataFrame(columns=["星期", "佛堂卫生", "二楼卫生", "楼梯卫生1", "楼梯卫生2"])
+    buddhist_df.columns = (
+        buddhist_df.columns
+        .astype(str)
+        .str.strip()
+    )
+
+    try:
+        cleaning_df = _cached_excel(
+            FIXED_FILE,
+            sheet_name="卫生固定",
+        )
+        cleaning_df.columns = (
+            cleaning_df.columns
+            .astype(str)
+            .str.strip()
+        )
+    except ValueError:
+        cleaning_df = pd.DataFrame(
+            columns=[
+                "星期",
+                "佛堂卫生",
+                "二楼卫生",
+                "楼梯卫生1",
+                "楼梯卫生2",
+            ]
+        )
 
     return buddhist_df, cleaning_df
 
@@ -1202,32 +1378,45 @@ def get_fixed_people(date_obj, buddhist_df, cleaning_df):
     return result
 
 def load_buddha_override(date_obj):
-    file = "buddha_override.xlsx"
+    file = os.path.join(
+        BASE_DIR,
+        "buddha_override.xlsx",
+    )
 
     if not os.path.exists(file):
         return None
 
-    df = pd.read_excel(file)
+    df = _cached_excel(file)
 
-    if "日期" not in df.columns:
+    if df is None or "日期" not in df.columns:
         return None
 
-    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+    df["日期"] = pd.to_datetime(
+        df["日期"],
+        errors="coerce",
+    )
 
-    row = df[df["日期"] == date_obj]
+    row = df[
+        df["日期"] == pd.to_datetime(date_obj)
+    ]
 
     if row.empty:
         return None
 
     names = []
 
-    for col in ["姓名1", "姓名2", "姓名3"]:
-        if col in row.columns:
-            val = str(row.iloc[0][col]).strip()
-            if val and val != "nan":
-                names.append(val)
+    for column in ["姓名1", "姓名2", "姓名3"]:
+        if column not in row.columns:
+            continue
 
-    return names if names else None
+        value = str(
+            row.iloc[0][column]
+        ).strip()
+
+        if value and value != "nan":
+            names.append(value)
+
+    return names or None
 
 
 def normalize_job_name(job):

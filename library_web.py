@@ -503,9 +503,17 @@ def library_home():
 
     <meta name="theme-color" content="#8B4513">
 
-    <link rel="manifest" href="/library-manifest.json?v=1">
-    <link rel="icon" href="/static/library_icon.png?v=1">
-    <link rel="apple-touch-icon" href="/static/library_icon.png?v=1">
+    <link rel="manifest" href="/library-manifest.json?v=5">
+
+    <link rel="icon"
+        type="image/png"
+        sizes="192x192"
+        href="/static/library_icon_192.png?v=5">
+
+    <link rel="apple-touch-icon"
+        href="/static/library_icon_512.png?v=5">
+
+    <meta name="theme-color" content="#8B4513">
 
     <link rel="stylesheet" href="/static/css/toolbox.css">
 </head>

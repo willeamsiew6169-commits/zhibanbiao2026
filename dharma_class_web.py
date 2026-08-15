@@ -1,6 +1,7 @@
 # dharma_class_web.py
 
 from io import BytesIO
+from functools import wraps
 from db import get_conn
 from flask import send_file
 from zoneinfo import ZoneInfo
@@ -10,7 +11,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-from flask import Blueprint, render_template_string, request, redirect, url_for, flash, send_file
+from flask import Blueprint, render_template_string, request, redirect, url_for, flash, session
 
 
 dharma_class_bp = Blueprint(
@@ -18,6 +19,250 @@ dharma_class_bp = Blueprint(
     __name__,
     url_prefix="/class"
 )
+
+
+# =========================================================
+# 学生资料密码保护
+# =========================================================
+# 简单密码版：以后要换密码，只需要修改下面这一行。
+DHARMA_STUDENT_PASSWORD = "FxbChe3832#"
+
+
+def verify_dharma_student_password(password):
+    return password == DHARMA_STUDENT_PASSWORD
+
+
+def dharma_student_access_required(view_func):
+    """学生敏感资料统一入口保护。"""
+
+    @wraps(view_func)
+    def wrapped_view(*args, **kwargs):
+
+        if not session.get("dharma_student_access"):
+
+            next_url = request.full_path
+
+            if next_url.endswith("?"):
+                next_url = next_url[:-1]
+
+            return redirect(
+                url_for(
+                    "dharma_class.class_students_login",
+                    next=next_url
+                )
+            )
+
+        return view_func(*args, **kwargs)
+
+    return wrapped_view
+
+
+@dharma_class_bp.route("/students/login", methods=["GET", "POST"])
+def class_students_login():
+
+    next_url = request.values.get("next", "").strip()
+
+    if session.get("dharma_student_access"):
+
+        if next_url.startswith("/class/"):
+            return redirect(next_url)
+
+        return redirect(
+            url_for("dharma_class.class_students")
+        )
+
+    if request.method == "POST":
+
+        password = request.form.get("password", "")
+
+        if verify_dharma_student_password(password):
+
+            session["dharma_student_access"] = True
+            session.permanent = False
+
+            if next_url.startswith("/class/"):
+                return redirect(next_url)
+
+            return redirect(
+                url_for("dharma_class.class_students")
+            )
+
+        flash("密码错误，请重新输入。", "bad")
+
+    return render_template_string("""
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+>
+
+<title>学生资料验证</title>
+
+<link
+    rel="stylesheet"
+    href="/static/css/toolbox.css"
+>
+
+<style>
+
+.student-login-card {
+    max-width: 620px;
+    margin: 70px auto;
+}
+
+.student-login-icon {
+    text-align: center;
+    font-size: 58px;
+    margin-bottom: 10px;
+}
+
+.student-login-note {
+    margin: 16px 0 22px;
+    padding: 14px 16px;
+    border-radius: 14px;
+    background: #f8fafc;
+    color: #666;
+    line-height: 1.6;
+}
+
+.student-password {
+    width: 100%;
+    min-height: 58px;
+    box-sizing: border-box;
+    padding: 10px 15px;
+    border: 1px solid #d8dde5;
+    border-radius: 14px;
+    font-size: 20px;
+}
+
+.student-password:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59,130,246,.12);
+}
+
+</style>
+</head>
+
+<body>
+<div class="page">
+
+    <div class="card student-login-card">
+
+        <div class="student-login-icon">
+            🔐
+        </div>
+
+        <h1
+            class="page-title"
+            style="text-align:center;"
+        >
+            学生资料验证
+        </h1>
+
+        <p
+            class="page-subtitle"
+            style="text-align:center;"
+        >
+            学生个人资料属于受保护资料。
+        </p>
+
+        <div class="student-login-note">
+            请输入佛学班负责人密码后才可进入学生名单、
+            学生档案、编辑、导入及导出功能。
+        </div>
+
+        {% with messages =
+            get_flashed_messages(with_categories=true) %}
+
+            {% for category, message in messages %}
+
+                <div
+                    style="
+                        margin-bottom:14px;
+                        padding:12px 14px;
+                        border-radius:12px;
+                        background:#fee2e2;
+                        color:#991b1b;
+                        font-weight:700;
+                    "
+                >
+                    {{ message }}
+                </div>
+
+            {% endfor %}
+
+        {% endwith %}
+
+        <form method="post">
+
+            <input
+                type="hidden"
+                name="next"
+                value="{{ next_url }}"
+            >
+
+            <input
+                class="student-password"
+                type="password"
+                name="password"
+                placeholder="请输入负责人密码"
+                autocomplete="current-password"
+                required
+                autofocus
+            >
+
+            <div
+                class="btn-row"
+                style="margin-top:18px;"
+            >
+
+                <button
+                    class="btn-tool btn-primary"
+                    type="submit"
+                >
+                    🔓 验证并进入
+                </button>
+
+            </div>
+
+        </form>
+
+        <div class="btn-row">
+
+            <a
+                class="btn-tool btn-secondary"
+                href="{{ url_for(
+                    'dharma_class.class_admin'
+                ) }}"
+            >
+                ⬅ 返回负责人中心
+            </a>
+
+        </div>
+
+    </div>
+
+</div>
+</body>
+</html>
+""",
+        next_url=next_url
+    )
+
+
+@dharma_class_bp.route("/students/logout")
+def class_students_logout():
+
+    session.pop("dharma_student_access", None)
+
+    return redirect(
+        url_for("dharma_class.class_admin")
+    )
 
 
 STATUS_LABELS = {
@@ -249,91 +494,69 @@ def class_home():
         ) as cur:
 
             cur.execute("""
+                with student_stats as (
+                    select
+                        group_id,
+                        count(*) as total_students
+                    from dharma_students
+                    where branch = 'CHE'
+                      and status = 'active'
+                    group by group_id
+                ),
+                attendance_stats as (
+                    select
+                        group_id,
+                        count(distinct student_id) as marked_count,
+                        count(distinct student_id) filter (
+                            where status in ('present', 'late', 'farm')
+                        ) as attended_count,
+                        count(distinct student_id) filter (
+                            where status = 'present'
+                        ) as present_count,
+                        count(distinct student_id) filter (
+                            where status = 'late'
+                        ) as late_count,
+                        count(distinct student_id) filter (
+                            where status = 'farm'
+                        ) as farm_count,
+                        count(distinct student_id) filter (
+                            where status in ('absent', 'leave')
+                        ) as absent_count
+                    from dharma_attendance
+                    where branch = 'CHE'
+                      and class_date = %s
+                    group by group_id
+                ),
+                lesson_stats as (
+                    select
+                        group_id,
+                        count(*) as lesson_count
+                    from dharma_class_lessons
+                    where branch = 'CHE'
+                      and lesson_date = %s
+                    group by group_id
+                )
                 select
                     g.id,
                     g.name,
                     g.sort_order,
-
-                    count(distinct s.id) as total_students,
-
-                    count(
-                        distinct case
-                            when a.id is not null
-                            then s.id
-                        end
-                    ) as marked_count,
-
-                    count(
-                        distinct case
-                            when a.status in (
-                                'present',
-                                'late',
-                                'farm'
-                            )
-                            then s.id
-                        end
-                    ) as attended_count,
-
-                    count(
-                        distinct case
-                            when a.status = 'present'
-                            then s.id
-                        end
-                    ) as present_count,
-
-                    count(
-                        distinct case
-                            when a.status = 'late'
-                            then s.id
-                        end
-                    ) as late_count,
-
-                    count(
-                        distinct case
-                            when a.status = 'farm'
-                            then s.id
-                        end
-                    ) as farm_count,
-
-                    count(
-                        distinct case
-                            when a.status in (
-                                'absent',
-                                'leave'
-                            )
-                            then s.id
-                        end
-                    ) as absent_count,
-
-                    count(distinct l.id) as lesson_count
-
+                    coalesce(ss.total_students, 0) as total_students,
+                    coalesce(ast.marked_count, 0) as marked_count,
+                    coalesce(ast.attended_count, 0) as attended_count,
+                    coalesce(ast.present_count, 0) as present_count,
+                    coalesce(ast.late_count, 0) as late_count,
+                    coalesce(ast.farm_count, 0) as farm_count,
+                    coalesce(ast.absent_count, 0) as absent_count,
+                    coalesce(ls.lesson_count, 0) as lesson_count
                 from dharma_class_groups g
-
-                left join dharma_students s
-                    on s.group_id = g.id
-                   and s.status = 'active'
-                   and s.branch = 'CHE'
-
-                left join dharma_attendance a
-                    on a.student_id = s.id
-                   and a.class_date = %s
-                   and a.branch = 'CHE'
-
-                left join dharma_class_lessons l
-                    on l.group_id = g.id
-                   and l.lesson_date = %s
-                   and l.branch = 'CHE'
-
+                left join student_stats ss
+                    on ss.group_id = g.id
+                left join attendance_stats ast
+                    on ast.group_id = g.id
+                left join lesson_stats ls
+                    on ls.group_id = g.id
                 where g.is_active = true
-
-                group by
-                    g.id,
-                    g.name,
-                    g.sort_order
-
-                order by
-                    g.sort_order,
-                    g.id
+                order by g.sort_order, g.id
             """, (
                 today_str,
                 today_str,
@@ -364,12 +587,19 @@ def class_home():
 
 <link
     rel="manifest"
-    href="/dharma-class-manifest.json"
+    href="/dharma-class-manifest.json?v=5"
 >
 
 <link
     rel="icon"
-    href="/static/dharma_icon.png?v=1"
+    type="image/png"
+    sizes="192x192"
+    href="/static/dharma_icon_192.png?v=5"
+>
+
+<link
+    rel="apple-touch-icon"
+    href="/static/dharma_icon_512.png?v=5"
 >
 
 <meta
@@ -733,40 +963,14 @@ def class_home():
             <div class="student-search-title">
                 
             </div>
-
-            <div class="student-search-help">
-                输入学生姓名、英文名或父／母／监护人电话。
-            </div>
-
+            
             <form
                 method="get"
                 action="{{ url_for(
                     'dharma_class.class_student_search'
                 ) }}"
             >
-
-                <div class="form-group">
-
-                    <input
-                        class="form-input"
-                        name="q"
-                        placeholder="例如：陈小明"
-                        required
-                    >
-
-                </div>
-
-                <div class="btn-row">
-
-                    <button
-                        class="btn-tool btn-success"
-                        type="submit"
-                    >
-                        🔎 查看学生个人档案
-                    </button>
-
-                </div>
-
+                                
             </form>
 
         </div>
@@ -1000,7 +1204,7 @@ def class_admin():
                 <a
                     class="admin-tool tool-student"
                     href="{{ url_for(
-                        'dharma_class.class_students'
+                        'dharma_class.class_students_login'
                     ) }}"
                 >
                     <div class="admin-tool-icon">
@@ -1782,7 +1986,9 @@ def class_attendance():
                 ZoneInfo("Asia/Kuala_Lumpur")
             ).date()
 
-            if selected_date == today:
+            # selected_date 来自表单，是 YYYY-MM-DD 字符串。
+            # 必须与 today.isoformat() 比较，否则今天也会误走历史名单逻辑。
+            if selected_date == today.isoformat():
 
                 where_sql = """
                     where
@@ -3559,6 +3765,20 @@ def class_lessons():
                 ])
 
             cur.execute(f"""
+                with attendance_stats as (
+                    select
+                        branch,
+                        class_date,
+                        group_id,
+                        count(*) as attendance_count,
+                        count(*) filter (where status = 'present') as present_count,
+                        count(*) filter (where status = 'late') as late_count,
+                        count(*) filter (where status = 'farm') as farm_count,
+                        count(*) filter (where status in ('absent', 'leave')) as absent_count
+                    from dharma_attendance
+                    where branch = 'CHE'
+                    group by branch, class_date, group_id
+                )
                 select
                     l.id,
                     l.lesson_date,
@@ -3570,55 +3790,21 @@ def class_lessons():
                     coalesce(l.class_status_reason, '') as class_status_reason,
                     g.name as group_name,
                     g.sort_order as group_sort_order,
-
-                    (
-                        select count(*)
-                        from dharma_attendance a
-                        where a.branch = l.branch
-                          and a.class_date = l.lesson_date
-                          and a.group_id = l.group_id
-                    ) as attendance_count,
-
-                    (
-                        select count(*)
-                        from dharma_attendance a
-                        where a.branch = l.branch
-                          and a.class_date = l.lesson_date
-                          and a.group_id = l.group_id
-                          and a.status = 'present'
-                    ) as present_count,
-
-                    (
-                        select count(*)
-                        from dharma_attendance a
-                        where a.branch = l.branch
-                          and a.class_date = l.lesson_date
-                          and a.group_id = l.group_id
-                          and a.status = 'late'
-                    ) as late_count,
-
-                    (
-                        select count(*)
-                        from dharma_attendance a
-                        where a.branch = l.branch
-                          and a.class_date = l.lesson_date
-                          and a.group_id = l.group_id
-                          and a.status = 'farm'
-                    ) as farm_count,
-
-                    (
-                        select count(*)
-                        from dharma_attendance a
-                        where a.branch = l.branch
-                          and a.class_date = l.lesson_date
-                          and a.group_id = l.group_id
-                          and a.status in ('absent', 'leave')
-                    ) as absent_count
+                    coalesce(ast.attendance_count, 0) as attendance_count,
+                    coalesce(ast.present_count, 0) as present_count,
+                    coalesce(ast.late_count, 0) as late_count,
+                    coalesce(ast.farm_count, 0) as farm_count,
+                    coalesce(ast.absent_count, 0) as absent_count
 
                 from dharma_class_lessons l
 
                 left join dharma_class_groups g
                     on g.id = l.group_id
+
+                left join attendance_stats ast
+                    on ast.branch = l.branch
+                   and ast.class_date = l.lesson_date
+                   and ast.group_id = l.group_id
 
                 {where_sql}
 
@@ -4112,6 +4298,7 @@ def class_lessons():
     )
 
 @dharma_class_bp.route("/students")
+@dharma_student_access_required
 def class_students():
    
     current_year = datetime.now(
@@ -4630,6 +4817,7 @@ function goTop() {
 
 
 @dharma_class_bp.route("/students/search")
+@dharma_student_access_required
 def class_student_search():
 
     q = request.args.get("q", "").strip()
@@ -4833,6 +5021,7 @@ def class_student_search():
 
 
 @dharma_class_bp.route("/student/<int:student_id>")
+@dharma_student_access_required
 def class_student_profile(student_id):
 
     malaysia_today = datetime.now(
@@ -5359,6 +5548,7 @@ def class_student_profile(student_id):
 
 
 @dharma_class_bp.route("/student/<int:student_id>/export")
+@dharma_student_access_required
 def class_student_profile_export(student_id):
 
     malaysia_today = datetime.now(
@@ -5559,6 +5749,7 @@ def class_student_profile_export(student_id):
 
 
 @dharma_class_bp.route("/students/add", methods=["GET", "POST"])
+@dharma_student_access_required
 def class_students_add():
 
     from datetime import datetime
@@ -5683,7 +5874,6 @@ def class_students_add():
                         values
                         (
                             'CHE',
-                            %s,
                             %s,
                             %s,
                             %s,
@@ -5933,6 +6123,7 @@ def class_students_add():
     "/students/edit/<int:student_id>",
     methods=["GET", "POST"]
 )
+@dharma_student_access_required
 def class_students_edit(student_id):
 
     malaysia_now = datetime.now(
@@ -8417,6 +8608,7 @@ def class_export_monthly_report():
     )
 
 @dharma_class_bp.route("/students/import", methods=["GET", "POST"])
+@dharma_student_access_required
 def class_students_import():
 
     result = None
@@ -8696,6 +8888,7 @@ def class_students_import():
 """, result=result)
 
 @dharma_class_bp.route("/students/template")
+@dharma_student_access_required
 def class_students_template():
 
     wb = Workbook()
@@ -8820,6 +9013,7 @@ def class_students_template():
     )
 
 @dharma_class_bp.route("/students/export")
+@dharma_student_access_required
 def class_students_export():
 
     with get_conn() as conn:
@@ -10216,34 +10410,23 @@ def class_promote():
                                     class="form-input"
                                     name="new_group_{{ s.id }}"
                                 >
-                                    <option value="same">
-                                        保持原组
+
+                                    <option value="same" selected>
+                                        保持原组（{{ s.group_name }}）
                                     </option>
 
                                     {% for g in groups %}
-                                        <option
-                                            value="{{ g.id }}"
-                                            {% if
-                                                (
-                                                    s.group_name == "低年组"
-                                                    and g.name == "少年组"
-                                                )
-                                                or
-                                                (
-                                                    s.group_name == "少年组"
-                                                    and g.name == "高年组"
-                                                )
-                                            %}
-                                                selected
-                                            {% endif %}
-                                        >
-                                            {{ g.name }}
-                                        </option>
+                                        {% if g.id != s.group_id %}
+                                            <option value="{{ g.id }}">
+                                                {{ g.name }}
+                                            </option>
+                                        {% endif %}
                                     {% endfor %}
 
                                     <option value="paused">
                                         暂停学生
                                     </option>
+
                                 </select>
                             </td>
                         </tr>

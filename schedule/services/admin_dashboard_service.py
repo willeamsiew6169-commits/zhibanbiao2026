@@ -28,10 +28,8 @@ from schedule.services.publish_service import (
 )
 
 from schedule.services.settings_service import (
-    get_schedule_settings, 
+    get_schedule_settings,
 )
-
-from schedule.services.settings_service import is_schedule_setting_on
 
 
 def load_admin_dashboard_data(mode, override_date):
@@ -42,9 +40,18 @@ def load_admin_dashboard_data(mode, override_date):
     ).date()
 
     special_day_info = get_special_day_info(selected_date)
-    multi_day_signup_open = is_schedule_setting_on("multi_day_signup_open")
-    meal_signup_open = is_schedule_setting_on("meal_signup_open")
-    food_offering_open = is_schedule_setting_on("food_offering_open")
+
+    settings = get_schedule_settings()
+
+    def setting_is_on(key, default="false"):
+        value = settings.get(key, default)
+        return str(value).strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+
+    multi_day_signup_open = setting_is_on("multi_day_signup_open")
+    meal_signup_open = setting_is_on("meal_signup_open")
+    food_offering_open = setting_is_on("food_offering_open")
 
     template_text = {
         "normal": "平时值班模板",
@@ -58,8 +65,6 @@ def load_admin_dashboard_data(mode, override_date):
     )
 
     remove_info = get_next_day_remove_info(selected_date)
-
-    settings = get_schedule_settings()
 
     try:
         supply_alert_days = int(

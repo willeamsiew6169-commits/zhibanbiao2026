@@ -1303,7 +1303,17 @@ ADMIN_HOME_HTML = """
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
-<link rel="manifest" href="/admin-manifest.json">
+<link rel="manifest" href="/admin-manifest.json?v=5">
+
+<link rel="icon"
+      type="image/png"
+      sizes="192x192"
+      href="/static/icon_192.png?v=5">
+
+<link rel="apple-touch-icon"
+      href="/static/icon_512.png?v=5">
+
+<meta name="theme-color" content="#7a0000">
 
 <title>{{ t.get("admin_center_title", "观音堂管理员中心") }}</title>
 

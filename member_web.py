@@ -243,9 +243,19 @@ def member_query_login():
     <meta name="theme-color" content="#1976d2">
     <title>月费查询系统</title>
 
-    <link rel="manifest" href="/member-manifest.json?v=3">
-    <link rel="icon" href="/static/member_icon.png?v=3">
-    <link rel="apple-touch-icon" href="/static/member_icon.png?v=3">
+    <link rel="manifest"
+      href="/member-manifest.json?v=5">
+
+    <link rel="icon"
+        type="image/png"
+        sizes="192x192"
+        href="/static/member_icon_192.png?v=5">
+
+    <link rel="apple-touch-icon"
+        href="/static/member_icon_512.png?v=5">
+
+    <meta name="theme-color"
+        content="#1976d2">
 
     <style>
     body {
@@ -617,20 +627,6 @@ def member_home():
             paid_until_text = summary_data["paid_until"].strftime("%Y年%m月")
 
         cur.execute("""
-            select amount
-            from member_payments
-            where member_id = %s
-            order by payment_date desc, id desc
-            limit 1
-        """, (real_member_id,))
-        last_payment = cur.fetchone()
-
-        if summary_data:
-            summary_data["last_payment_amount"] = (
-                last_payment["amount"] if last_payment else 0
-            )
-
-        cur.execute("""
             select
                 payment_date,
                 receipt_no,
@@ -640,9 +636,14 @@ def member_home():
                 amount
             from member_payments
             where member_id = %s
-            order by payment_date desc, receipt_no desc
+            order by payment_date desc, id desc
         """, (real_member_id,))
         payment_rows = cur.fetchall()
+
+        if summary_data:
+            summary_data["last_payment_amount"] = (
+                payment_rows[0]["amount"] if payment_rows else 0
+            )
 
         return summary_data, paid_until_text, payment_rows
 
@@ -822,6 +823,7 @@ def member_admin():
     payments = []
     summary = None
     warnings = []
+    safety_checked = request.values.get("check") == "1"
 
     page = int(request.args.get("page", 1) or 1)
     per_page = 15
@@ -897,40 +899,16 @@ def member_admin():
                                 coalesce(sum(amount), 0) as total_payment,
                                 coalesce(sum(month_count), 0) as total_months,
                                 max(end_month) as paid_until,
-                                max(payment_date) as last_payment_date
+                                max(payment_date) as last_payment_date,
+                                (array_agg(amount order by payment_date desc, id desc))[1]
+                                    as last_payment_amount,
+                                count(*) as total_rows
                             from member_payments
                             where member_id = %s
                         """, (real_member_id,))
                         summary = cur.fetchone()
 
-                        # ✅ 最后付款金额
-                        if summary:
-                            summary["last_payment_amount"] = None
-
-                            if summary.get("last_payment_date"):
-                                cur.execute("""
-                                    select amount
-                                    from member_payments
-                                    where member_id = %s
-                                      and payment_date = %s
-                                    order by id desc
-                                    limit 1
-                                """, (
-                                    real_member_id,
-                                    summary["last_payment_date"]
-                                ))
-                                last_row = cur.fetchone()
-
-                                if last_row:
-                                    summary["last_payment_amount"] = last_row["amount"]
-
-                        # ✅ 总页数
-                        cur.execute("""
-                            select count(*) as cnt
-                            from member_payments
-                            where member_id = %s
-                        """, (real_member_id,))
-                        total_rows = cur.fetchone()["cnt"] or 0
+                        total_rows = int(summary["total_rows"] or 0) if summary else 0
                         total_pages = (total_rows + per_page - 1) // per_page
 
                         # ✅ 当前页，只显示 15 行
@@ -956,111 +934,111 @@ def member_admin():
                         ))
                         payments = cur.fetchall()
 
-                        # ✅ 另外查全部记录，用来检查错误
-                        cur.execute("""
-                            select
-                                id,
-                                payment_date,
-                                receipt_no,
-                                start_month,
-                                end_month,
-                                month_count,
-                                amount,
-                                name
-                            from member_payments
-                            where member_id = %s
-                            order by payment_date asc, id asc
-                        """, (real_member_id,))
-                        all_payments = cur.fetchall()
-
-                        seen_months = {}
-                        seen_receipts = {}
-
-                        for r in all_payments:
-                            receipt_no = r.get("receipt_no") or "-"
-                            amount = float(r.get("amount") or 0)
-                            month_count = int(r.get("month_count") or 0)
-
-                            start_month = r.get("start_month")
-                            end_month = r.get("end_month")
-                            payment_date = r.get("payment_date")
-
-                            # 1. 收据重复
-                            if receipt_no != "-":
-                                if receipt_no in seen_receipts:
-                                    warnings.append(
-                                        f"收据 {receipt_no}：收据编号重复，之前已经出现过"
-                                    )
-                                else:
-                                    seen_receipts[receipt_no] = True
-
-                            # 2. 金额不是 RM50 倍数
-                            if amount % 50 != 0:
-                                warnings.append(
-                                    f"收据 {receipt_no}：金额 RM {amount:.2f} 不是 RM50 的倍数"
-                                )
-
-                            # 3. 月数不正确
-                            if month_count <= 0:
-                                warnings.append(
-                                    f"收据 {receipt_no}：月数不正确"
-                                )
-
-                            # 4. 金额和月数不符合
-                            if amount > 0 and month_count > 0:
-                                expected_amount = month_count * 50
-                                if amount != expected_amount:
-                                    warnings.append(
-                                        f"收据 {receipt_no}：金额 RM {amount:.2f} 和月数 {month_count} 不符合，正常应是 RM {expected_amount:.2f}"
-                                    )
-
-                            # 5. 付款日期未来
-                            if payment_date and payment_date > date.today():
-                                warnings.append(
-                                    f"收据 {receipt_no}：付款日期是未来日期"
-                                )
-
-                            # 6. 开始结束月份检查
-                            if start_month and end_month:
-                                if start_month > end_month:
-                                    warnings.append(
-                                        f"收据 {receipt_no}：开始月份大过结束月份"
-                                    )
-                                else:
-                                    real_month_count = (
-                                        (end_month.year - start_month.year) * 12
-                                        + (end_month.month - start_month.month)
-                                        + 1
-                                    )
-
-                                    if real_month_count != month_count:
+                        # 只有管理员主动按下安全检查，才读取该会员全部记录。
+                        if safety_checked:
+                            cur.execute("""
+                                select
+                                    id,
+                                    payment_date,
+                                    receipt_no,
+                                    start_month,
+                                    end_month,
+                                    month_count,
+                                    amount,
+                                    name
+                                from member_payments
+                                where member_id = %s
+                                order by payment_date asc, id asc
+                            """, (real_member_id,))
+                            all_payments = cur.fetchall()
+    
+                            seen_months = {}
+                            seen_receipts = {}
+    
+                            for r in all_payments:
+                                receipt_no = r.get("receipt_no") or "-"
+                                amount = float(r.get("amount") or 0)
+                                month_count = int(r.get("month_count") or 0)
+    
+                                start_month = r.get("start_month")
+                                end_month = r.get("end_month")
+                                payment_date = r.get("payment_date")
+    
+                                # 1. 收据重复
+                                if receipt_no != "-":
+                                    if receipt_no in seen_receipts:
                                         warnings.append(
-                                            f"收据 {receipt_no}：开始月份到结束月份是 {real_month_count} 个月，但记录写 {month_count} 个月"
+                                            f"收据 {receipt_no}：收据编号重复，之前已经出现过"
                                         )
-
-                                    # 7. 重复月份检查
-                                    current = start_month
-
-                                    for i in range(real_month_count):
-                                        ym = current.strftime("%Y-%m")
-
-                                        if ym in seen_months:
+                                    else:
+                                        seen_receipts[receipt_no] = True
+    
+                                # 2. 金额不是 RM50 倍数
+                                if amount % 50 != 0:
+                                    warnings.append(
+                                        f"收据 {receipt_no}：金额 RM {amount:.2f} 不是 RM50 的倍数"
+                                    )
+    
+                                # 3. 月数不正确
+                                if month_count <= 0:
+                                    warnings.append(
+                                        f"收据 {receipt_no}：月数不正确"
+                                    )
+    
+                                # 4. 金额和月数不符合
+                                if amount > 0 and month_count > 0:
+                                    expected_amount = month_count * 50
+                                    if amount != expected_amount:
+                                        warnings.append(
+                                            f"收据 {receipt_no}：金额 RM {amount:.2f} 和月数 {month_count} 不符合，正常应是 RM {expected_amount:.2f}"
+                                        )
+    
+                                # 5. 付款日期未来
+                                if payment_date and payment_date > date.today():
+                                    warnings.append(
+                                        f"收据 {receipt_no}：付款日期是未来日期"
+                                    )
+    
+                                # 6. 开始结束月份检查
+                                if start_month and end_month:
+                                    if start_month > end_month:
+                                        warnings.append(
+                                            f"收据 {receipt_no}：开始月份大过结束月份"
+                                        )
+                                    else:
+                                        real_month_count = (
+                                            (end_month.year - start_month.year) * 12
+                                            + (end_month.month - start_month.month)
+                                            + 1
+                                        )
+    
+                                        if real_month_count != month_count:
                                             warnings.append(
-                                                f"月份重复：{ym} 已在收据 {seen_months[ym]} 记录过，现在又出现在收据 {receipt_no}"
+                                                f"收据 {receipt_no}：开始月份到结束月份是 {real_month_count} 个月，但记录写 {month_count} 个月"
                                             )
-                                        else:
-                                            seen_months[ym] = receipt_no
-
-                                        if current.month == 12:
-                                            current = current.replace(
-                                                year=current.year + 1,
-                                                month=1
-                                            )
-                                        else:
-                                            current = current.replace(
-                                                month=current.month + 1
-                                            )
-
+    
+                                        # 7. 重复月份检查
+                                        current = start_month
+    
+                                        for i in range(real_month_count):
+                                            ym = current.strftime("%Y-%m")
+    
+                                            if ym in seen_months:
+                                                warnings.append(
+                                                    f"月份重复：{ym} 已在收据 {seen_months[ym]} 记录过，现在又出现在收据 {receipt_no}"
+                                                )
+                                            else:
+                                                seen_months[ym] = receipt_no
+    
+                                            if current.month == 12:
+                                                current = current.replace(
+                                                    year=current.year + 1,
+                                                    month=1
+                                                )
+                                            else:
+                                                current = current.replace(
+                                                    month=current.month + 1
+                                                )
         except Exception as e:
             error = f"系统错误：{e}"
 
@@ -1071,6 +1049,7 @@ def member_admin():
         payments=payments,
         summary=summary,
         warnings=warnings,
+        safety_checked=safety_checked,
         raw_member_id=raw_member_id,
         page=page,
         total_pages=total_pages
@@ -2303,48 +2282,50 @@ def add_member():
             phone_digits = "".join(ch for ch in phone if ch.isdigit())
             pin = phone_digits[-4:] if len(phone_digits) >= 4 else "0000"
 
-            exist = db_query("""
-                select member_id,name
-                from members
-                where ic_number=%s
-            """, (ic_number,), fetchone=True)
+            exist = None
+            if ic_number:
+                exist = db_query("""
+                    select member_id, name
+                    from members
+                    where ic_number = %s
+                    limit 1
+                """, (ic_number,), fetchone=True)
 
             if exist:
-                error = f"""
-                身份证号码已存在：
-                {exist['member_id']}
-                {exist['name']}
-                """
-
-            db_query("""
-                insert into members
-                (
+                error = (
+                    f"身份证号码已存在："
+                    f"{exist['member_id']} / {exist['name']}"
+                )
+            else:
+                db_query("""
+                    insert into members
+                    (
+                        member_id,
+                        name,
+                        english_name,
+                        ic_number,
+                        phone,
+                        pin,
+                        branch,
+                        status,
+                        remark,
+                        member_status
+                    )
+                    values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (
                     member_id,
                     name,
                     english_name,
-                    ic_number,
+                    ic_number or None,
                     phone,
                     pin,
                     branch,
-                    status,
-                    remark,
-                    member_status
-                )
-                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """, (
-                member_id,
-                name,
-                english_name,
-                ic_number,
-                phone,
-                pin,
-                branch,
-                "在供",
-                remark or "在供",
-                "在供"
-            ))
+                    "在供",
+                    remark or "在供",
+                    "在供"
+                ))
 
-            msg = f"新增成功：{member_id} / {name} / PIN：{pin}"
+                msg = f"新增成功：{member_id} / {name} / PIN：{pin}"
 
     return render_template_string("""
 <div style="max-width:900px;margin:auto;padding:20px;">
@@ -2416,6 +2397,7 @@ def finance_upload():
     rows = []
     history_rows = []
     safety_issues = []
+    safety_checked = request.args.get("safety_check") == "1"
 
     q = request.args.get("q", "").strip()
     branch = request.args.get("branch", "CHE").strip().upper()
@@ -3046,97 +3028,97 @@ def finance_upload():
                 history_rows = cur.fetchall()
 
                 # =========================
-                # 财政安全检查
+                # 财政安全检查：只在管理员主动执行时运行
                 # =========================
+                if safety_checked:
 
-                # 1. 重复收据
-                cur.execute("""
-                    select
-                        receipt_no,
-                        count(*) as cnt
-                    from member_payments
-                    where receipt_no is not null
-                    and receipt_no <> ''
-                    group by receipt_no
-                    having count(*) > 1
-                """)
-
-                for r in cur.fetchall():
-                    safety_issues.append({
-                        "type": "重复收据",
-                        "detail": f"收据 {r['receipt_no']} 出现 {r['cnt']} 次"
-                    })
-
-                # 2. 金额和月数不符
-                cur.execute("""
-                    select
-                        id,
-                        member_id,
-                        receipt_no,
-                        amount,
-                        month_count
-                    from member_payments
-                """)
-
-                for r in cur.fetchall():
-
-                    amount = float(r["amount"] or 0)
-                    months = int(r["month_count"] or 0)
-
-                    if months > 0:
-
-                        expected = months * 50
-
-                        if amount != expected:
-
-                            safety_issues.append({
-                                "type": "金额不符",
-                                "detail":
-                                f"{r['member_id']} / {r['receipt_no']}：RM {amount:.2f}，应为 RM {expected:.2f}",
-                                "payment_id": r["id"]
-                            })
-
-                # 3. 未来日期
-                cur.execute("""
-                    select
-                        id,
-                        member_id,
-                        receipt_no,
-                        payment_date
-                    from member_payments
-                    where payment_date > current_date
-                """)
-
-                for r in cur.fetchall():
-
-                    safety_issues.append({
-                        "type": "未来日期",
-                        "detail":
-                        f"{r['member_id']} / {r['receipt_no']}：{r['payment_date']}",
-                        "payment_id": r["id"]
-                    })
-
-                # 4. 会员编号不存在
-                cur.execute("""
-                    select
-                        p.id,
-                        p.member_id,
-                        p.receipt_no
-                    from member_payments p
-                    left join members m
-                        on p.member_id = m.member_id
-                    where m.member_id is null
-                """)
-
-                for r in cur.fetchall():
-
-                    safety_issues.append({
-                        "type": "会员不存在",
-                        "detail":
-                        f"{r['member_id']} / {r['receipt_no']}",
-                        "payment_id": r["id"]
-                    })
-
+                    # 1. 重复收据
+                    cur.execute("""
+                        select
+                            receipt_no,
+                            count(*) as cnt
+                        from member_payments
+                        where receipt_no is not null
+                        and receipt_no <> ''
+                        group by receipt_no
+                        having count(*) > 1
+                    """)
+    
+                    for r in cur.fetchall():
+                        safety_issues.append({
+                            "type": "重复收据",
+                            "detail": f"收据 {r['receipt_no']} 出现 {r['cnt']} 次"
+                        })
+    
+                    # 2. 金额和月数不符
+                    cur.execute("""
+                        select
+                            id,
+                            member_id,
+                            receipt_no,
+                            amount,
+                            month_count
+                        from member_payments
+                    """)
+    
+                    for r in cur.fetchall():
+    
+                        amount = float(r["amount"] or 0)
+                        months = int(r["month_count"] or 0)
+    
+                        if months > 0:
+    
+                            expected = months * 50
+    
+                            if amount != expected:
+    
+                                safety_issues.append({
+                                    "type": "金额不符",
+                                    "detail":
+                                    f"{r['member_id']} / {r['receipt_no']}：RM {amount:.2f}，应为 RM {expected:.2f}",
+                                    "payment_id": r["id"]
+                                })
+    
+                    # 3. 未来日期
+                    cur.execute("""
+                        select
+                            id,
+                            member_id,
+                            receipt_no,
+                            payment_date
+                        from member_payments
+                        where payment_date > current_date
+                    """)
+    
+                    for r in cur.fetchall():
+    
+                        safety_issues.append({
+                            "type": "未来日期",
+                            "detail":
+                            f"{r['member_id']} / {r['receipt_no']}：{r['payment_date']}",
+                            "payment_id": r["id"]
+                        })
+    
+                    # 4. 会员编号不存在
+                    cur.execute("""
+                        select
+                            p.id,
+                            p.member_id,
+                            p.receipt_no
+                        from member_payments p
+                        left join members m
+                            on p.member_id = m.member_id
+                        where m.member_id is null
+                    """)
+    
+                    for r in cur.fetchall():
+    
+                        safety_issues.append({
+                            "type": "会员不存在",
+                            "detail":
+                            f"{r['member_id']} / {r['receipt_no']}",
+                            "payment_id": r["id"]
+                        })
     except Exception as e:
         print("读取修改历史失败:", e)
 
@@ -3425,42 +3407,51 @@ def finance_upload():
         <div class="card">
             <div class="section-title">⑤ 月费安全检查</div>
 
-            {% if safety_issues %}
-            <div class="alert alert-danger">
-                ⚠️ 发现 {{ safety_issues|length }} 个问题
-            </div>
+            {% if safety_checked %}
+                {% if safety_issues %}
+                <div class="alert alert-danger">
+                    ⚠️ 发现 {{ safety_issues|length }} 个问题
+                </div>
 
-            <div class="table-responsive">
-                <table class="record-table">
-                    <tr>
-                        <th>类型</th>
-                        <th>问题</th>
-                        <th>操作</th>
-                    </tr>
+                <div class="table-responsive">
+                    <table class="record-table">
+                        <tr>
+                            <th>类型</th>
+                            <th>问题</th>
+                            <th>操作</th>
+                        </tr>
 
-                    {% for s in safety_issues %}
-                    <tr>
-                        <td>{{ s.type }}</td>
-                        <td>{{ s.detail }}</td>
-                        <td>
-                            {% if s.payment_id %}
-                            <a class="btn-tool btn-primary mini-btn"
-                            href="/member/payment/edit/{{ s.payment_id }}">
-                                ✏ 编辑
-                            </a>
-                            {% else %}
-                            -
-                            {% endif %}
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </table>
-            </div>
+                        {% for s in safety_issues %}
+                        <tr>
+                            <td>{{ s.type }}</td>
+                            <td>{{ s.detail }}</td>
+                            <td>
+                                {% if s.payment_id %}
+                                <a class="btn-tool btn-primary mini-btn"
+                                href="/member/payment/edit/{{ s.payment_id }}">
+                                    ✏ 编辑
+                                </a>
+                                {% else %}
+                                -
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </table>
+                </div>
+                {% else %}
+                <div class="alert alert-success">✅ 没有发现问题</div>
+                {% endif %}
             {% else %}
-            <div class="alert alert-success">
-                ✅ 没有发现问题
+            <div class="small-text" style="margin-bottom:14px;">
+                为了让管理中心快速进入，系统不会自动扫描全部月费记录。
             </div>
             {% endif %}
+
+            <a class="btn-tool btn-warning"
+               href="{{ url_for('member.finance_upload', safety_check=1) }}">
+                🔎 执行全系统安全检查
+            </a>
         </div>
 
         <div class="card">
@@ -3509,6 +3500,7 @@ def finance_upload():
     months=months,
     timedelta=timedelta,
     safety_issues=safety_issues,
+    safety_checked=safety_checked,
     history_rows=history_rows
     )
 
@@ -3519,9 +3511,17 @@ MEMBER_HTML = """
 <meta charset="utf-8">
 <title>月费查询</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="manifest" href="/member-manifest.json?v=3">
-<link rel="icon" href="/static/member_icon.png?v=3">
-<link rel="apple-touch-icon" href="/static/member_icon.png?v=3">
+<link rel="manifest" href="/member-manifest.json?v=5">
+
+<link rel="icon"
+      type="image/png"
+      sizes="192x192"
+      href="/static/member_icon_192.png?v=5">
+
+<link rel="apple-touch-icon"
+      href="/static/member_icon_512.png?v=5">
+
+<meta name="theme-color" content="#1976d2">
 
 <link rel="stylesheet"
       href="{{ url_for('static', filename='css/toolbox.css') }}">
@@ -3808,26 +3808,20 @@ MEMBER_HTML = """
 <div class="page member-page">
 
     <div class="member-topbar">
-        <a class="btn-tool btn-light" href="/member/admin">
-            ⚙ 管理员入口
+
+        <a class="btn-tool btn-light"
+        href="/member/admin">
+            ⚙️ 管理员<br>
+            <small>Admin</small>
         </a>
+
+        <a class="btn-tool btn-danger"
+        href="/member/query-logout">
+            🚪 退出查询<br>
+            <small>Logout</small>
+        </a>
+
     </div>
-
-    <h1 class="page-title">🙏 月费查询</h1>
-    <p class="page-subtitle">请输入月费编号、姓名、英文名或电话查询供养记录</p>
-
-    {% if query_volunteer %}
-    <div class="alert alert-warning">
-        当前查询义工：
-        <b>{{ query_volunteer.id }} {{ query_volunteer.name }}</b>
-
-        <div style="margin-top:12px;">
-            <a class="btn-tool btn-danger" href="/member/query-logout">
-                🔒 退出查询
-            </a>
-        </div>
-    </div>
-    {% endif %}
 
     {% if error %}
     <div class="alert alert-danger">
@@ -3857,6 +3851,7 @@ MEMBER_HTML = """
                     <input
                         class="form-input"
                         id="member_id"
+                        autofocus
                         name="member_id"
                         placeholder="例如：108 / 张三 / 0123456789"
                         autocomplete="off"
@@ -4287,16 +4282,33 @@ MEMBER_ADMIN_HTML = """
     </div>
     {% endif %}
 
-    {% if warnings %}
-    <div class="alert alert-warning">
-        <b>⚠️ 系统发现可能有错误：</b>
-        <ul>
-            {% for w in warnings %}
-                <li>{{ w }}</li>
-            {% endfor %}
-        </ul>
+    <div class="card">
+        <div class="section-title">🛡️ 会员缴费安全检查</div>
+
+        {% if safety_checked %}
+            {% if warnings %}
+            <div class="alert alert-warning">
+                <b>⚠️ 系统发现可能有错误：</b>
+                <ul>
+                    {% for w in warnings %}
+                        <li>{{ w }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% else %}
+            <div class="alert alert-success">✅ 这位会员的缴费记录没有发现问题</div>
+            {% endif %}
+        {% else %}
+            <div class="small-text" style="margin-bottom:14px;">
+                为了加快页面速度，安全检查不会在每次查询时自动运行。
+            </div>
+        {% endif %}
+
+        <a class="btn-tool btn-warning"
+           href="{{ url_for('member.member_admin', member_id=member.member_id, check=1) }}">
+            🔎 执行这位会员的安全检查
+        </a>
     </div>
-    {% endif %}
 
     <div class="card">
         <div class="section-title">📋 缴费记录</div>

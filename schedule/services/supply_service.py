@@ -7,6 +7,39 @@ from lunar_rules import get_special_day_info
 from schedule.builders.time_utils import malaysia_today
 
 
+
+_SPECIAL_DATE_CACHE = {}
+
+
+def _get_special_dates(today, end_date):
+    """相同日期范围在同一天内只计算一次农历特殊日。"""
+    cache_key = (today.isoformat(), end_date.isoformat())
+    cached = _SPECIAL_DATE_CACHE.get(cache_key)
+
+    if cached is not None:
+        return [dict(item) for item in cached]
+
+    special_dates = []
+    current_date = today
+
+    while current_date <= end_date:
+        info = get_special_day_info(current_date)
+
+        if info["template_type"] in ("lunar_1_15", "buddhist_festival"):
+            special_dates.append({
+                "date": current_date,
+                "type": info["template_type"],
+                "setup_names": [],
+                "remove_names": [],
+                "names": [],
+            })
+
+        current_date += timedelta(days=1)
+
+    _SPECIAL_DATE_CACHE.clear()
+    _SPECIAL_DATE_CACHE[cache_key] = [dict(item) for item in special_dates]
+    return special_dates
+
 # ==========================================================
 # 供台报名设置
 # ==========================================================
@@ -242,29 +275,19 @@ def is_supply_remove_full(date_str):
 # ==========================================================
 
 def get_supply_signup_summary(date_str):
-    """
-    一次取得指定日期的供台报名资料。
+    """一次查询全部供台报名，再按设供台／收供台分组。"""
+    rows = load_supply_signups_for_date(date_str)
 
-    回传示例：
+    setup_rows = []
+    remove_rows = []
 
-    {
-        "setup": {
-            "count": 2,
-            "limit": 2,
-            "is_full": True,
-            "rows": [...]
-        },
-        "remove": {
-            "count": 1,
-            "limit": 2,
-            "is_full": False,
-            "rows": [...]
-        }
-    }
-    """
+    for row in rows:
+        task = normalize_supply_task(row.get("supply_task"))
 
-    setup_rows = load_supply_setup_signups_for_date(date_str)
-    remove_rows = load_supply_remove_signups_for_date(date_str)
+        if task == SUPPLY_TASK_REMOVE:
+            remove_rows.append(row)
+        else:
+            setup_rows.append(row)
 
     setup_count = len(setup_rows)
     remove_count = len(remove_rows)
@@ -298,11 +321,6 @@ def get_supply_signup_summary(date_str):
         },
     }
 
-
-# ==========================================================
-# 未来供台报名提醒
-# ==========================================================
-
 def load_upcoming_supply_signup_alerts(days_ahead=60, limit=2):
     """
     读取未来初一、十五及佛诞日的供台报名提醒。
@@ -317,27 +335,7 @@ def load_upcoming_supply_signup_alerts(days_ahead=60, limit=2):
     today = malaysia_today()
     end_date = today + timedelta(days=days_ahead)
 
-    special_dates = []
-
-    current_date = today
-
-    while current_date <= end_date:
-
-        info = get_special_day_info(current_date)
-
-        if info["template_type"] in [
-            "lunar_1_15",
-            "buddhist_festival",
-        ]:
-            special_dates.append({
-                "date": current_date,
-                "type": info["template_type"],
-                "setup_names": [],
-                "remove_names": [],
-                "names": [],
-            })
-
-        current_date += timedelta(days=1)
+    special_dates = _get_special_dates(today, end_date)
 
     if not special_dates:
         return []

@@ -57,7 +57,7 @@ EXPENSE_SUB_CATEGORY_OPTIONS = {
     "供花": ["鲜花"],
     "供果": ["水果", "供果用品", "其它"],
     "供油": ["灯油"],
-    "佛台用品": ["佛具", "佛台用品", "佛堂用品", "其它"],
+    "佛台用品": ["佛具", "佛台用品", "其它"],
     "电费": ["TNB 20-1", "TNB 20-2", "其它"],
     "水费": [
         "Air Selangor 20-1",
@@ -135,170 +135,104 @@ def get_finance_balance_summary(
     """
     计算指定分会截至某一天的资金余额。
 
-    CHE 银行余额：
-    银行期初余额
-    + CHE 月费收入
-    - 银行提款到 Petty Cash
-    ± 银行调整
-
-    Cash In Hand：
-    现金期初余额
-    + 银行提款转入现金
-    - 所有现金支出
-    ± 现金调整
+    性能版：
+    - finance_cash_movements 由 6 次查询合并成 1 次。
+    - finance_records 由 2 次查询合并成 1 次。
+    - 返回字段与旧版保持一致。
     """
 
     branch = (branch or "CHE").strip().upper()
     balance_date = balance_date or date.today()
 
-    # 1. 银行期初余额
-    bank_opening_row = db_query("""
-        select coalesce(sum(amount), 0) as total
+    movement_row = db_query("""
+        select
+            coalesce(sum(amount) filter (
+                where account_type = 'bank'
+                  and movement_type = 'opening'
+                  and record_date <= %s
+            ), 0) as bank_opening,
+
+            coalesce(sum(amount) filter (
+                where account_type = 'cash'
+                  and movement_type = 'opening'
+                  and record_date <= %s
+            ), 0) as cash_opening,
+
+            coalesce(sum(amount) filter (
+                where account_type = 'bank'
+                  and movement_type = 'cash_out'
+                  and record_date between %s and %s
+            ), 0) as bank_cash_out,
+
+            coalesce(sum(amount) filter (
+                where account_type = 'cash'
+                  and movement_type = 'cash_in'
+                  and record_date between %s and %s
+            ), 0) as petty_cash_in,
+
+            coalesce(sum(amount) filter (
+                where account_type = 'bank'
+                  and movement_type = 'adjustment'
+                  and record_date between %s and %s
+            ), 0) as bank_adjustment,
+
+            coalesce(sum(amount) filter (
+                where account_type = 'cash'
+                  and movement_type = 'adjustment'
+                  and record_date between %s and %s
+            ), 0) as cash_adjustment
+
         from finance_cash_movements
         where branch = %s
-          and account_type = 'bank'
-          and movement_type = 'opening'
           and record_date <= %s
     """, (
+        balance_date,
+        balance_date,
+        FINANCE_OPENING_DATE, balance_date,
+        FINANCE_OPENING_DATE, balance_date,
+        FINANCE_OPENING_DATE, balance_date,
+        FINANCE_OPENING_DATE, balance_date,
         branch,
         balance_date,
-    ), fetchone=True)
+    ), fetchone=True) or {}
 
-    bank_opening = Decimal(
-        str(bank_opening_row["total"] or 0)
-    )
+    record_row = db_query("""
+        select
+            coalesce(sum(amount) filter (
+                where record_type = 'income'
+                  and category = '月费'
+                  and (
+                        coalesce(member_id, '') ilike %s
+                     or coalesce(receipt_no, '') ilike %s
+                     or fund_account in (
+                            '观音堂日常户口',
+                            'CHE 日常户口'
+                        )
+                  )
+            ), 0) as monthly_income,
 
-    # 2. 现金期初余额
-    cash_opening_row = db_query("""
-        select coalesce(sum(amount), 0) as total
-        from finance_cash_movements
-        where branch = %s
-          and account_type = 'cash'
-          and movement_type = 'opening'
-          and record_date <= %s
-    """, (
-        branch,
-        balance_date,
-    ), fetchone=True)
+            coalesce(sum(amount) filter (
+                where record_type = 'expense'
+            ), 0) as cash_expense
 
-    cash_opening = Decimal(
-        str(cash_opening_row["total"] or 0)
-    )
-
-    # 3. 银行提款总额
-    cash_out_row = db_query("""
-        select coalesce(sum(amount), 0) as total
-        from finance_cash_movements
-        where branch = %s
-          and account_type = 'bank'
-          and movement_type = 'cash_out'
-          and record_date between %s and %s
-    """, (
-        branch,
-        FINANCE_OPENING_DATE,
-        balance_date,
-    ), fetchone=True)
-
-    bank_cash_out = Decimal(
-        str(cash_out_row["total"] or 0)
-    )
-
-    # 4. 转入 Petty Cash 的金额
-    cash_in_row = db_query("""
-        select coalesce(sum(amount), 0) as total
-        from finance_cash_movements
-        where branch = %s
-          and account_type = 'cash'
-          and movement_type = 'cash_in'
-          and record_date between %s and %s
-    """, (
-        branch,
-        FINANCE_OPENING_DATE,
-        balance_date,
-    ), fetchone=True)
-
-    petty_cash_in = Decimal(
-        str(cash_in_row["total"] or 0)
-    )
-
-    # 5. 银行调整
-    bank_adjustment_row = db_query("""
-        select coalesce(sum(amount), 0) as total
-        from finance_cash_movements
-        where branch = %s
-          and account_type = 'bank'
-          and movement_type = 'adjustment'
-          and record_date between %s and %s
-    """, (
-        branch,
-        FINANCE_OPENING_DATE,
-        balance_date,
-    ), fetchone=True)
-
-    bank_adjustment = Decimal(
-        str(bank_adjustment_row["total"] or 0)
-    )
-
-    # 6. 现金调整
-    cash_adjustment_row = db_query("""
-        select coalesce(sum(amount), 0) as total
-        from finance_cash_movements
-        where branch = %s
-          and account_type = 'cash'
-          and movement_type = 'adjustment'
-          and record_date between %s and %s
-    """, (
-        branch,
-        FINANCE_OPENING_DATE,
-        balance_date,
-    ), fetchone=True)
-
-    cash_adjustment = Decimal(
-        str(cash_adjustment_row["total"] or 0)
-    )
-
-    # 7. CHE 月费收入
-    monthly_income_row = db_query("""
-        select coalesce(sum(amount), 0) as total
         from finance_records
-        where record_type = 'income'
-          and category = '月费'
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and record_date between %s and %s
-          and (
-                coalesce(member_id, '') ilike %s
-             or coalesce(receipt_no, '') ilike %s
-             or fund_account in (
-                    '观音堂日常户口',
-                    'CHE 日常户口'
-                )
-          )
-    """, (
-        FINANCE_OPENING_DATE,
-        balance_date,
-        "CHE%",
-        "CHE%",
-    ), fetchone=True)
-
-    monthly_income = Decimal(
-        str(monthly_income_row["total"] or 0)
-    )
-
-    # 8. 所有有效支出
-    expense_row = db_query("""
-        select coalesce(sum(amount), 0) as total
-        from finance_records
-        where record_type = 'expense'
-          and coalesce(status, 'confirmed') <> 'cancelled'
+        where coalesce(status, 'confirmed') <> 'cancelled'
           and record_date between %s and %s
     """, (
+        f"{branch}%",
+        f"{branch}%",
         FINANCE_OPENING_DATE,
         balance_date,
-    ), fetchone=True)
+    ), fetchone=True) or {}
 
-    cash_expense = Decimal(
-        str(expense_row["total"] or 0)
-    )
+    bank_opening = Decimal(str(movement_row.get("bank_opening") or 0))
+    cash_opening = Decimal(str(movement_row.get("cash_opening") or 0))
+    bank_cash_out = Decimal(str(movement_row.get("bank_cash_out") or 0))
+    petty_cash_in = Decimal(str(movement_row.get("petty_cash_in") or 0))
+    bank_adjustment = Decimal(str(movement_row.get("bank_adjustment") or 0))
+    cash_adjustment = Decimal(str(movement_row.get("cash_adjustment") or 0))
+    monthly_income = Decimal(str(record_row.get("monthly_income") or 0))
+    cash_expense = Decimal(str(record_row.get("cash_expense") or 0))
 
     bank_balance = (
         bank_opening
@@ -2420,10 +2354,18 @@ def finance_home():
     <title>财政录入工作台</title>
 
     <link rel="manifest"
-          href="/finance-manifest.json">
+      href="/dharma-class-manifest.json">
 
     <link rel="icon"
-          href="/static/finance_icon.png?v=1">
+        type="image/png"
+        sizes="192x192"
+        href="/static/dharma_icon_192.png?v=5">
+
+    <link rel="apple-touch-icon"
+        href="/static/dharma_icon_512.png?v=5">
+
+    <meta name="theme-color"
+        content="#f6c54e">
 
     <link rel="stylesheet"
           href="{{ url_for('static', filename='css/toolbox.css') }}">
@@ -3300,28 +3242,188 @@ def finance_admin_home():
     ensure_finance_bank_in_tables()
 
     today = date.today()
-    current_ym = today.strftime("%Y-%m")
+    month_start = today.replace(day=1)
+    if month_start.month == 12:
+        next_month_start = month_start.replace(
+            year=month_start.year + 1,
+            month=1,
+        )
+    else:
+        next_month_start = month_start.replace(
+            month=month_start.month + 1,
+        )
+
+    current_ym = month_start.strftime("%Y-%m")
     branch = "CHE"
 
-    # =========================================================
-    # 1. CHE 银行与 Petty Cash 真实余额
-    #    直接使用资金中心现有的同一套计算，避免两边数字不同
-    # =========================================================
-
+    # 使用资金中心同一套余额计算。
+    # get_finance_balance_summary 返回 dict，不能使用 getattr。
     balance = get_finance_balance_summary(branch=branch)
+    bank_balance = Decimal(str(balance.get("bank_balance") or 0))
+    cash_in_hand = Decimal(str(balance.get("cash_in_hand") or 0))
 
-    bank_balance = Decimal(str(
-        getattr(balance, "bank_balance", 0) or 0
-    ))
+    # 本月、今日、PV、CHE/STW/总会统计一次完成。
+    stats_row = db_query("""
+        select
+            coalesce(sum(amount) filter (
+                where record_type = 'income'
+                  and record_date >= %s
+                  and record_date < %s
+                  and fund_account = '观音堂日常户口'
+                  and (
+                        member_id ilike 'CHE%%'
+                     or receipt_no ilike 'CHE%%'
+                     or (
+                            coalesce(member_id, '') = ''
+                        and coalesce(receipt_no, '') = ''
+                     )
+                  )
+            ), 0) as che_month_income,
 
-    cash_in_hand = Decimal(str(
-        getattr(balance, "cash_in_hand", 0) or 0
-    ))
+            count(*) filter (
+                where record_type = 'income'
+                  and record_date >= %s
+                  and record_date < %s
+                  and fund_account = '观音堂日常户口'
+                  and (
+                        member_id ilike 'CHE%%'
+                     or receipt_no ilike 'CHE%%'
+                     or (
+                            coalesce(member_id, '') = ''
+                        and coalesce(receipt_no, '') = ''
+                     )
+                  )
+            ) as che_month_income_count,
 
+            coalesce(sum(amount) filter (
+                where record_type = 'income'
+                  and record_date = %s
+                  and fund_account = '观音堂日常户口'
+                  and (
+                        member_id ilike 'CHE%%'
+                     or receipt_no ilike 'CHE%%'
+                     or (
+                            coalesce(member_id, '') = ''
+                        and coalesce(receipt_no, '') = ''
+                     )
+                  )
+            ), 0) as che_today_income,
 
-    # =========================================================
-    # 2. CHE 现金月费等待 Bank In
-    # =========================================================
+            coalesce(sum(amount) filter (
+                where record_type = 'expense'
+                  and record_date >= %s
+                  and record_date < %s
+                  and fund_account = '观音堂日常户口'
+            ), 0) as che_month_expense,
+
+            count(*) filter (
+                where record_type = 'expense'
+                  and record_date >= %s
+                  and record_date < %s
+                  and fund_account = '观音堂日常户口'
+            ) as che_month_expense_count,
+
+            coalesce(sum(amount) filter (
+                where record_type = 'expense'
+                  and record_date = %s
+                  and fund_account = '观音堂日常户口'
+            ), 0) as che_today_expense,
+
+            count(*) filter (
+                where record_type = 'expense'
+                  and fund_account = '观音堂日常户口'
+                  and (
+                        payment_voucher_no is null
+                     or trim(payment_voucher_no) = ''
+                  )
+            ) as pending_pv_count,
+
+            coalesce(sum(amount) filter (
+                where record_type = 'income'
+                  and category = '月费'
+                  and record_date >= %s
+                  and record_date < %s
+                  and (
+                        member_id ilike 'CHE%%'
+                     or receipt_no ilike 'CHE%%'
+                  )
+            ), 0) as che_monthly_total,
+
+            count(*) filter (
+                where record_type = 'income'
+                  and category = '月费'
+                  and record_date >= %s
+                  and record_date < %s
+                  and (
+                        member_id ilike 'CHE%%'
+                     or receipt_no ilike 'CHE%%'
+                  )
+            ) as che_monthly_record_count,
+
+            count(distinct member_id) filter (
+                where record_type = 'income'
+                  and category = '月费'
+                  and record_date >= %s
+                  and record_date < %s
+                  and (
+                        member_id ilike 'CHE%%'
+                     or receipt_no ilike 'CHE%%'
+                  )
+            ) as che_monthly_member_count,
+
+            coalesce(sum(amount) filter (
+                where record_type = 'income'
+                  and category = '月费'
+                  and record_date >= %s
+                  and record_date < %s
+                  and (
+                        member_id ilike 'STW%%'
+                     or receipt_no ilike 'STW%%'
+                  )
+            ), 0) as stw_month_income,
+
+            count(*) filter (
+                where record_type = 'income'
+                  and category = '月费'
+                  and record_date >= %s
+                  and record_date < %s
+                  and (
+                        member_id ilike 'STW%%'
+                     or receipt_no ilike 'STW%%'
+                  )
+            ) as stw_month_count,
+
+            coalesce(sum(amount) filter (
+                where record_type = 'income'
+                  and record_date >= %s
+                  and record_date < %s
+                  and fund_account = '总会户口'
+            ), 0) as hq_month_income,
+
+            count(*) filter (
+                where record_type = 'income'
+                  and record_date >= %s
+                  and record_date < %s
+                  and fund_account = '总会户口'
+            ) as hq_month_count
+
+        from finance_records
+        where coalesce(status, 'confirmed') <> 'cancelled'
+    """, (
+        month_start, next_month_start,
+        month_start, next_month_start,
+        today,
+        month_start, next_month_start,
+        month_start, next_month_start,
+        today,
+        month_start, next_month_start,
+        month_start, next_month_start,
+        month_start, next_month_start,
+        month_start, next_month_start,
+        month_start, next_month_start,
+        month_start, next_month_start,
+        month_start, next_month_start,
+    ), fetchone=True) or {}
 
     waiting_row = db_query("""
         select
@@ -3334,272 +3436,38 @@ def finance_admin_home():
           and coalesce(r.status, 'confirmed') <> 'cancelled'
           and (
                 r.member_id ilike 'CHE%%'
-                or r.receipt_no ilike 'CHE%%'
+             or r.receipt_no ilike 'CHE%%'
           )
           and not exists (
               select 1
               from finance_bank_deposit_items i
               where i.finance_record_id = r.id
           )
-    """, fetchone=True) or {
-        "total": 0,
-        "count": 0
-    }
-
-    waiting_bank_in = Decimal(str(
-        waiting_row.get("total") or 0
-    ))
-
-    waiting_bank_in_count = int(
-        waiting_row.get("count") or 0
-    )
-
-
-    # =========================================================
-    # 3. 银行待确认
-    # =========================================================
+    """, fetchone=True) or {}
 
     pending_bank_row = db_query("""
         select count(*) as total
         from bank_pending_records
-    """, fetchone=True) or {
-        "total": 0
-    }
+    """, fetchone=True) or {}
 
-    pending_bank_count = int(
-        pending_bank_row.get("total") or 0
-    )
+    waiting_bank_in = Decimal(str(waiting_row.get("total") or 0))
+    waiting_bank_in_count = int(waiting_row.get("count") or 0)
+    pending_bank_count = int(pending_bank_row.get("total") or 0)
 
-
-    # =========================================================
-    # 4. CHE 本月收入
-    #
-    # 这里只统计 CHE 日常户口收入。
-    # 总会布施不会混进 CHE。
-    # =========================================================
-
-    income_row = db_query("""
-        select
-            coalesce(sum(amount), 0) as total,
-            count(*) as count
-        from finance_records
-        where record_type = 'income'
-          and to_char(record_date, 'YYYY-MM') = %s
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and fund_account = '观音堂日常户口'
-          and (
-                member_id ilike 'CHE%%'
-                or receipt_no ilike 'CHE%%'
-                or (
-                    coalesce(member_id, '') = ''
-                    and coalesce(receipt_no, '') = ''
-                )
-          )
-    """, (current_ym,), fetchone=True) or {
-        "total": 0,
-        "count": 0
-    }
-
-    che_month_income = Decimal(str(
-        income_row.get("total") or 0
-    ))
-
-    che_month_income_count = int(
-        income_row.get("count") or 0
-    )
-
-
-    # =========================================================
-    # 5. CHE 今日收入
-    # =========================================================
-
-    today_income_row = db_query("""
-        select coalesce(sum(amount), 0) as total
-        from finance_records
-        where record_type = 'income'
-          and record_date = %s
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and fund_account = '观音堂日常户口'
-          and (
-                member_id ilike 'CHE%%'
-                or receipt_no ilike 'CHE%%'
-                or (
-                    coalesce(member_id, '') = ''
-                    and coalesce(receipt_no, '') = ''
-                )
-          )
-    """, (today,), fetchone=True) or {
-        "total": 0
-    }
-
-    che_today_income = Decimal(str(
-        today_income_row.get("total") or 0
-    ))
-
-
-    # =========================================================
-    # 6. CHE 本月支出
-    # =========================================================
-
-    expense_row = db_query("""
-        select
-            coalesce(sum(amount), 0) as total,
-            count(*) as count
-        from finance_records
-        where record_type = 'expense'
-          and to_char(record_date, 'YYYY-MM') = %s
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and fund_account = '观音堂日常户口'
-    """, (current_ym,), fetchone=True) or {
-        "total": 0,
-        "count": 0
-    }
-
-    che_month_expense = Decimal(str(
-        expense_row.get("total") or 0
-    ))
-
-    che_month_expense_count = int(
-        expense_row.get("count") or 0
-    )
-
-
-    # =========================================================
-    # 7. CHE 今日支出
-    # =========================================================
-
-    today_expense_row = db_query("""
-        select coalesce(sum(amount), 0) as total
-        from finance_records
-        where record_type = 'expense'
-          and record_date = %s
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and fund_account = '观音堂日常户口'
-    """, (today,), fetchone=True) or {
-        "total": 0
-    }
-
-    che_today_expense = Decimal(str(
-        today_expense_row.get("total") or 0
-    ))
-
-
-    # =========================================================
-    # 8. 支出待补 PV
-    # =========================================================
-
-    pending_pv_row = db_query("""
-        select count(*) as total
-        from finance_records
-        where record_type = 'expense'
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and fund_account = '观音堂日常户口'
-          and (
-                payment_voucher_no is null
-                or trim(payment_voucher_no) = ''
-          )
-    """, fetchone=True) or {
-        "total": 0
-    }
-
-    pending_pv_count = int(
-        pending_pv_row.get("total") or 0
-    )
-
-
-    # =========================================================
-    # 9. CHE 本月月费
-    # =========================================================
-
-    che_monthly_row = db_query("""
-        select
-            coalesce(sum(amount), 0) as total,
-            count(*) as record_count,
-            count(distinct member_id) as member_count
-        from finance_records
-        where record_type = 'income'
-          and category = '月费'
-          and to_char(record_date, 'YYYY-MM') = %s
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and (
-                member_id ilike 'CHE%%'
-                or receipt_no ilike 'CHE%%'
-          )
-    """, (current_ym,), fetchone=True) or {
-        "total": 0,
-        "record_count": 0,
-        "member_count": 0
-    }
-
-    che_monthly_total = Decimal(str(
-        che_monthly_row.get("total") or 0
-    ))
-
-    che_monthly_record_count = int(
-        che_monthly_row.get("record_count") or 0
-    )
-
-    che_monthly_member_count = int(
-        che_monthly_row.get("member_count") or 0
-    )
-
-
-    # =========================================================
-    # 10. STW 本月月费
-    # =========================================================
-
-    stw_row = db_query("""
-        select
-            coalesce(sum(amount), 0) as total,
-            count(*) as record_count
-        from finance_records
-        where record_type = 'income'
-          and category = '月费'
-          and to_char(record_date, 'YYYY-MM') = %s
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and (
-                member_id ilike 'STW%%'
-                or receipt_no ilike 'STW%%'
-          )
-    """, (current_ym,), fetchone=True) or {
-        "total": 0,
-        "record_count": 0
-    }
-
-    stw_month_income = Decimal(str(
-        stw_row.get("total") or 0
-    ))
-
-    stw_month_count = int(
-        stw_row.get("record_count") or 0
-    )
-
-
-    # =========================================================
-    # 11. 总会本月布施
-    # =========================================================
-
-    hq_row = db_query("""
-        select
-            coalesce(sum(amount), 0) as total,
-            count(*) as record_count
-        from finance_records
-        where record_type = 'income'
-          and to_char(record_date, 'YYYY-MM') = %s
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and fund_account = '总会户口'
-    """, (current_ym,), fetchone=True) or {
-        "total": 0,
-        "record_count": 0
-    }
-
-    hq_month_income = Decimal(str(
-        hq_row.get("total") or 0
-    ))
-
-    hq_month_count = int(
-        hq_row.get("record_count") or 0
-    )
+    che_month_income = Decimal(str(stats_row.get("che_month_income") or 0))
+    che_month_income_count = int(stats_row.get("che_month_income_count") or 0)
+    che_today_income = Decimal(str(stats_row.get("che_today_income") or 0))
+    che_month_expense = Decimal(str(stats_row.get("che_month_expense") or 0))
+    che_month_expense_count = int(stats_row.get("che_month_expense_count") or 0)
+    che_today_expense = Decimal(str(stats_row.get("che_today_expense") or 0))
+    pending_pv_count = int(stats_row.get("pending_pv_count") or 0)
+    che_monthly_total = Decimal(str(stats_row.get("che_monthly_total") or 0))
+    che_monthly_record_count = int(stats_row.get("che_monthly_record_count") or 0)
+    che_monthly_member_count = int(stats_row.get("che_monthly_member_count") or 0)
+    stw_month_income = Decimal(str(stats_row.get("stw_month_income") or 0))
+    stw_month_count = int(stats_row.get("stw_month_count") or 0)
+    hq_month_income = Decimal(str(stats_row.get("hq_month_income") or 0))
+    hq_month_count = int(stats_row.get("hq_month_count") or 0)
 
 
     return render_template_string(r"""
@@ -16305,84 +16173,90 @@ def dashboard():
     ym = request.args.get(
         "ym",
         date.today().strftime("%Y-%m")
-    )
+    ).strip()
 
-    daily_income = db_query("""
+    try:
+        selected_month = datetime.strptime(ym, "%Y-%m").date()
+    except ValueError:
+        selected_month = date.today().replace(day=1)
+        ym = selected_month.strftime("%Y-%m")
+
+    month_start = selected_month.replace(day=1)
+    if month_start.month == 12:
+        next_month_start = month_start.replace(
+            year=month_start.year + 1,
+            month=1,
+        )
+    else:
+        next_month_start = month_start.replace(
+            month=month_start.month + 1,
+        )
+
+    # 一次读取该月份全部分类汇总，替代旧版 6 次 SQL。
+    aggregate_rows = db_query("""
         select
+            fund_account,
+            record_type,
             category,
             coalesce(sum(amount), 0) as total
         from finance_records
-        where to_char(record_date, 'YYYY-MM') = %s
+        where record_date >= %s
+          and record_date < %s
           and coalesce(status, 'confirmed') <> 'cancelled'
-          and fund_account = '观音堂日常户口'
-          and record_type = 'income'
-        group by category
-        order by category
-    """, (ym,), fetchall=True)
+          and (
+                (
+                    fund_account = '观音堂日常户口'
+                    and record_type in ('income', 'expense')
+                )
+                or (
+                    fund_account = '总会户口'
+                    and record_type = 'income'
+                )
+          )
+        group by fund_account, record_type, category
+        order by fund_account, record_type, category
+    """, (
+        month_start,
+        next_month_start,
+    ), fetchall=True) or []
 
-    daily_expense = db_query("""
-        select
-            category,
-            coalesce(sum(amount), 0) as total
-        from finance_records
-        where to_char(record_date, 'YYYY-MM') = %s
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and fund_account = '观音堂日常户口'
-          and record_type = 'expense'
-        group by category
-        order by category
-    """, (ym,), fetchall=True)
+    daily_income = []
+    daily_expense = []
+    hq_income = []
 
-    hq_income = db_query("""
-        select
-            category,
-            coalesce(sum(amount), 0) as total
-        from finance_records
-        where to_char(record_date, 'YYYY-MM') = %s
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and fund_account = '总会户口'
-          and record_type = 'income'
-        group by category
-        order by category
-    """, (ym,), fetchall=True)
+    daily_income_value = 0.0
+    daily_expense_value = 0.0
+    hq_income_value = 0.0
 
-    daily_income_total = db_query("""
-        select coalesce(sum(amount), 0) as total
-        from finance_records
-        where to_char(record_date, 'YYYY-MM') = %s
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and fund_account = '观音堂日常户口'
-          and record_type = 'income'
-    """, (ym,), fetchone=True)
+    for row in aggregate_rows:
+        total = float(row.get("total") or 0)
+        item = {
+            "category": row.get("category"),
+            "total": row.get("total") or 0,
+        }
 
-    daily_expense_total = db_query("""
-        select coalesce(sum(amount), 0) as total
-        from finance_records
-        where to_char(record_date, 'YYYY-MM') = %s
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and fund_account = '观音堂日常户口'
-          and record_type = 'expense'
-    """, (ym,), fetchone=True)
+        if (
+            row.get("fund_account") == "观音堂日常户口"
+            and row.get("record_type") == "income"
+        ):
+            daily_income.append(item)
+            daily_income_value += total
 
-    hq_income_total = db_query("""
-        select coalesce(sum(amount), 0) as total
-        from finance_records
-        where to_char(record_date, 'YYYY-MM') = %s
-          and coalesce(status, 'confirmed') <> 'cancelled'
-          and fund_account = '总会户口'
-          and record_type = 'income'
-    """, (ym,), fetchone=True)
+        elif (
+            row.get("fund_account") == "观音堂日常户口"
+            and row.get("record_type") == "expense"
+        ):
+            daily_expense.append(item)
+            daily_expense_value += total
 
-    selected_month = datetime.strptime(
-        ym,
-        "%Y-%m"
-    ).date()
+        elif (
+            row.get("fund_account") == "总会户口"
+            and row.get("record_type") == "income"
+        ):
+            hq_income.append(item)
+            hq_income_value += total
 
-    previous_month_last_day = (
-        selected_month.replace(day=1)
-        - timedelta(days=1)
-    )
-
+    previous_month_last_day = month_start - timedelta(days=1)
     previous_ym = previous_month_last_day.strftime("%Y-%m")
 
     previous_close = get_month_close_record(
@@ -16392,18 +16266,6 @@ def dashboard():
 
     opening_balance = float(
         (previous_close or {}).get("closing_balance") or 0
-    )
-
-    daily_income_value = float(
-        daily_income_total["total"] or 0
-    )
-
-    daily_expense_value = float(
-        daily_expense_total["total"] or 0
-    )
-
-    hq_income_value = float(
-        hq_income_total["total"] or 0
     )
 
     daily_balance = (
@@ -19179,6 +19041,67 @@ def finance_vendors():
                 """, (vendor_id,))
                 message = "付款对象状态已更新。"
 
+            elif action == "delete":
+                vendor_id = int(
+                    request.form.get("vendor_id")
+                )
+
+                used_row = db_query("""
+                    select count(*) as total
+                    from finance_records
+                    where vendor_id = %s
+                """, (
+                    vendor_id,
+                ), fetchone=True) or {
+                    "total": 0
+                }
+
+                used_count = int(
+                    used_row.get("total") or 0
+                )
+
+                if used_count > 0:
+                    raise ValueError(
+                        f"这家公司已经被 {used_count} 笔支出记录使用，"
+                        "不能删除；请改为停用。"
+                    )
+
+                vendor_row = db_query("""
+                    select
+                        coalesce(
+                            company_name,
+                            vendor_name
+                        ) as company_name
+                    from finance_vendors
+                    where id = %s
+                    and branch = 'CHE'
+                    limit 1
+                """, (
+                    vendor_id,
+                ), fetchone=True)
+
+                if not vendor_row:
+                    raise ValueError(
+                        "找不到这家公司。"
+                    )
+
+                company_name = (
+                    vendor_row.get("company_name")
+                    or "付款对象"
+                )
+
+                db_query("""
+                    delete from finance_vendors
+                    where id = %s
+                    and branch = 'CHE'
+                """, (
+                    vendor_id,
+                ))
+
+                message = (
+                    f"已删除付款对象：{company_name}"
+                )
+
         except (ValueError, TypeError) as exc:
             error = str(exc)
 
@@ -19213,10 +19136,54 @@ def finance_vendors():
             .vendor-header{background:linear-gradient(135deg,#7c3aed,#5b21b6);color:#fff;padding:28px;border-radius:22px;margin-bottom:20px}
             .vendor-header h1{margin:0 0 8px}.vendor-header p{margin:0;opacity:.92}
             .vendor-grid{display:grid;grid-template-columns:2fr 1.3fr 1fr 1fr 90px auto;gap:10px;align-items:end}
-            .vendor-row{display:grid;grid-template-columns:2fr 1.3fr 1fr 1fr 90px auto auto;gap:8px;align-items:center;padding:12px 0;border-bottom:1px solid #e5e7eb}
+            .vendor-row{
+                display:grid;
+                grid-template-columns:
+                    2fr 1.3fr 1fr 1fr 90px minmax(300px,auto);
+                gap:8px;
+                align-items:center;
+                padding:12px 0;
+                border-bottom:1px solid #e5e7eb;
+            }
+
+            .vendor-actions{
+                display:flex;
+                gap:8px;
+                align-items:center;
+                justify-content:flex-end;
+                flex-wrap:nowrap;
+            }
+
+            .vendor-actions .btn-tool{
+                min-width:88px;
+                white-space:nowrap;
+                padding-left:12px;
+                padding-right:12px;
+            }
             .vendor-row input,.vendor-row select{width:100%;padding:10px;border:1px solid #d1d5db;border-radius:10px}
             .inactive{opacity:.55}
-            @media(max-width:800px){.vendor-grid,.vendor-row{grid-template-columns:1fr}.vendor-row{padding:16px 0}}
+            @media(max-width:800px){
+
+                .vendor-grid,
+                .vendor-row{
+                    grid-template-columns:1fr;
+                }
+
+                .vendor-row{
+                    padding:16px 0;
+                }
+
+                .vendor-actions{
+                    display:grid;
+                    grid-template-columns:repeat(3,minmax(0,1fr));
+                    width:100%;
+                }
+
+                .vendor-actions .btn-tool{
+                    width:100%;
+                    min-width:0;
+                }
+            }
         </style>
     </head>
     <body>
@@ -19253,8 +19220,42 @@ def finance_vendors():
                 <input name="phone" value="{{ v.phone or '' }}" placeholder="电话">
                 <input name="contact_person" value="{{ v.contact_person or '' }}" placeholder="联络人">
                 <input name="sort_order" type="number" value="{{ v.sort_order }}">
-                <button class="btn-tool btn-secondary" name="action" value="edit">保存</button>
-                <button class="btn-tool btn-danger" name="action" value="toggle">{% if v.is_active %}停用{% else %}启用{% endif %}</button>
+                <div class="vendor-actions">
+
+                    <button
+                        class="btn-tool btn-secondary"
+                        type="submit"
+                        name="action"
+                        value="edit">
+                        💾 保存
+                    </button>
+
+                    <button
+                        class="btn-tool btn-warning"
+                        type="submit"
+                        name="action"
+                        value="toggle"
+                        formnovalidate>
+                        {% if v.is_active %}
+                            🚫 停用
+                        {% else %}
+                            ✅ 启用
+                        {% endif %}
+                    </button>
+
+                    <button
+                        class="btn-tool btn-danger"
+                        type="submit"
+                        name="action"
+                        value="delete"
+                        formnovalidate
+                        onclick="return confirm(
+                            '确定删除【{{ v.company_name }}】？\n\n如果已经有 Payment Voucher 使用，将不能删除。'
+                        )">
+                        🗑 删除
+                    </button>
+
+                </div>
             </form>
             {% else %}<p>还没有付款对象。</p>{% endfor %}
         </div>
@@ -20479,7 +20480,16 @@ def expense():
                                     <input class="form-input" name="new_vendor_phone" placeholder="电话（可选）">
                                     <input class="form-input" name="new_vendor_contact_person" placeholder="联络人（可选）">
                                 </div>
-                                <button class="btn-tool btn-primary" type="submit" onclick="document.getElementById('formAction').value='add_vendor'" style="margin-top:10px">保存公司并自动选择</button>
+                                <button
+                                    class="btn-tool btn-primary"
+                                    type="submit"
+                                    formnovalidate
+                                    onclick="
+                                        document.getElementById('formAction').value='add_vendor';
+                                    "
+                                    style="margin-top:10px">
+                                    保存公司并自动选择
+                                </button>
                             </div>
                         </div>
 
