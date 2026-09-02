@@ -3532,7 +3532,8 @@ MEMBER_HTML = """
    ========================= */
 
 .member-page{
-    max-width:760px;
+    width:min(96vw, 1180px);
+    max-width:1180px;
     margin:0 auto;
 }
 
@@ -3545,24 +3546,24 @@ MEMBER_HTML = """
 
 .member-topbar .btn-tool{
     width:auto;
-    min-height:48px;
-    padding:10px 18px;
-    font-size:17px;
+    min-height:56px;
+    padding:12px 22px;
+    font-size:19px;
 }
 
 /* 查询输入区域 */
 .member-search-row{
     display:grid;
-    grid-template-columns:100px minmax(0, 1fr);
-    gap:10px;
+    grid-template-columns:120px minmax(0, 1fr);
+    gap:14px;
     align-items:stretch;
 }
 
 .branch-btn{
     width:100%;
-    min-height:64px;
-    padding:0 10px;
-    font-size:23px;
+    min-height:76px;
+    padding:0 14px;
+    font-size:27px;
     font-weight:800;
     border:0;
     border-radius:16px;
@@ -3574,8 +3575,18 @@ MEMBER_HTML = """
 .member-search-row .form-input{
     width:100%;
     min-width:0;
-    min-height:64px;
+    min-height:76px;
     box-sizing:border-box;
+    font-size:24px;
+    padding:16px 20px;
+}
+
+/* 桌面版查询区放大 */
+@media(min-width:701px){
+    .member-page > .card{padding:32px;}
+    .member-page > .card .section-title{font-size:32px;margin-bottom:20px;}
+    .member-page > .card label{font-size:22px;}
+    .member-page > .card > form > .btn-tool{min-height:68px;font-size:24px;margin-top:8px;}
 }
 
 /* 会员资料 */

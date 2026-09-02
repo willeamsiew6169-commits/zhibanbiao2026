@@ -73,7 +73,21 @@ SPECIAL_DAYS = {
         "setup_shifu": True,
         "remove_next_day": True,
     },
-    (9, 19): {
+    (7, 13): {
+        "name": "大势至菩萨圣诞",
+        "template_type": "buddhist_festival",
+        "start_time": "06:00",
+        "setup_shifu": True,
+        "remove_next_day": True,
+    },
+    (7, 30): {
+        "name": "地藏王菩萨圣诞",
+        "template_type": "buddhist_festival",
+        "start_time": "06:00",
+        "setup_shifu": True,
+        "remove_next_day": True,
+    },
+        (9, 19): {
         "name": "观世音菩萨出家日",
         "template_type": "buddhist_festival",
         "start_time": "06:00",

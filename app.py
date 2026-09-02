@@ -1540,7 +1540,9 @@ def index():
     special_day_info = get_special_day_info(now.date())
 
     lunar_text = special_day_info.get("lunar_text", "")
-    buddhist_day = special_day_info.get("festival_name", "")
+
+    special_names = special_day_info.get("special_names", [])
+    buddhist_day = " / ".join(special_names)
 
     return render_template_string(
         PAGE,

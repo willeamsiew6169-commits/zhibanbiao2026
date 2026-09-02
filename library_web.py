@@ -8,8 +8,9 @@ from db import get_conn
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from openpyxl import load_workbook
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, Json
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
 from schedule.builders.time_utils import malaysia_now
 from flask import Blueprint, flash, request, redirect, url_for, session, render_template_string
 
@@ -21,10 +22,138 @@ library_bp = Blueprint(
 )
 
 MALAYSIA_TZ = ZoneInfo("Asia/Kuala_Lumpur")
+# 只用于第一次建立「系统开发者」账号。建立后，日常登录改用 Email + 个人 PIN。
 LIBRARY_ADMIN_PIN = os.getenv("LIBRARY_ADMIN_PIN", "1234")
 
+LIBRARY_ROLES = ("developer", "main_admin", "team_leader")
+LIBRARY_ROLE_LABELS = {
+    "developer": "系统开发者",
+    "main_admin": "主负责人",
+    "team_leader": "小组长",
+}
+
+LIBRARY_PERMISSION_FIELDS = [
+    "can_batch_in",
+    "can_batch_out",
+    "can_view_records",
+    "can_adjust_stock",
+    "can_cancel_transaction",
+    "can_manage_items",
+    "can_stocktake",
+    "can_view_audit_log",
+    "can_manage_permissions",
+]
+
+def get_library_admin():
+    admin_id = session.get("library_admin_id")
+    if not admin_id:
+        return None
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select
+                    a.*,
+                    v.name as volunteer_name
+                from library_admin_users a
+                left join volunteers v
+                  on v.id::text = a.volunteer_id::text
+                where a.id = %s
+                  and a.is_active = true
+                limit 1
+            """, (admin_id,))
+            return cur.fetchone()
+
 def is_library_admin():
-    return session.get("library_admin") is True
+    return get_library_admin() is not None
+
+def library_role(admin=None):
+    admin = admin or get_library_admin()
+    if not admin:
+        return ""
+    role = (admin.get("role") or "").strip()
+    # 兼容旧资料：旧 Super Admin 自动视为系统开发者
+    if not role and admin.get("is_super_admin"):
+        return "developer"
+    return role or "team_leader"
+
+
+def library_role_label(admin=None):
+    return LIBRARY_ROLE_LABELS.get(library_role(admin), "小组长")
+
+
+def library_admin_can(permission):
+    admin = get_library_admin()
+    if not admin:
+        return False
+
+    role = library_role(admin)
+
+    # 系统开发者拥有全部权限
+    if role == "developer":
+        return True
+
+    # 只有系统开发者 / 主负责人可以管理负责人
+    if permission == "can_manage_permissions" and role not in ("developer", "main_admin"):
+        return False
+
+    return bool(admin.get(permission))
+
+
+def library_admin_label(admin=None):
+    admin = admin or get_library_admin()
+    if not admin:
+        return "负责人"
+    name = admin.get("volunteer_name") or admin.get("volunteer_id") or "负责人"
+    vid = admin.get("volunteer_id") or ""
+    return f"{vid} {name}".strip()
+
+def write_library_audit(
+    cur,
+    action,
+    *,
+    item_code=None,
+    item_name=None,
+    quantity_change=None,
+    balance_before=None,
+    balance_after=None,
+    transaction_id=None,
+    detail=None,
+    metadata=None,
+    admin=None,
+):
+    admin = admin or get_library_admin()
+    if not admin:
+        return
+
+    cur.execute("""
+        insert into library_audit_logs (
+            admin_user_id, volunteer_id, volunteer_name, user_email,
+            action, item_code, item_name, quantity_change,
+            balance_before, balance_after, transaction_id, detail, metadata
+        )
+        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        admin.get("id"),
+        admin.get("volunteer_id"),
+        admin.get("volunteer_name"),
+        admin.get("email"),
+        action, item_code, item_name, quantity_change,
+        balance_before, balance_after, transaction_id, detail,
+        Json(metadata or {})
+    ))
+
+def library_permission_denied():
+    return render_template_string("""
+    <!doctype html><html lang="zh"><head>
+    <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="stylesheet" href="/static/css/toolbox.css">
+    <title>没有权限</title></head><body><div class="page"><div class="card">
+    <h1 class="page-title">🔒 没有权限</h1>
+    <p class="page-subtitle">你的负责人账号没有这个功能的权限。</p>
+    <div class="btn-row"><a class="btn-tool btn-secondary" href="/library/admin/home">返回负责人专区</a></div>
+    </div></div></body></html>
+    """), 403
 
 def get_library_out_volunteer():
     return session.get("library_out_volunteer")
@@ -344,6 +473,11 @@ def make_item_code(index, category):
 @library_bp.route("/upload", methods=["GET", "POST"])
 def library_upload():
 
+    if not is_library_admin():
+        return redirect(url_for("library.library_admin"))
+    if not library_admin_can("can_manage_items"):
+        return library_permission_denied()
+
     message = None
     error = None
 
@@ -520,66 +654,120 @@ def library_home():
 
 <body>
 
+<!-- 法物查询 -->
 <div class="page">
 
-    <div class="card">
+    <div class="card"
+         style="
+            max-width:1000px;
+            margin:40px auto;
+            padding:45px 55px 50px;
+         ">
 
-        <h1 class="page-title">
-            📚 藏经阁系统
-        </h1>
+        <!-- 标题 -->
+        <div style="text-align:center; margin-bottom:32px;">
 
-        <p class="page-subtitle">
-            查询法物、登记领取及管理藏经阁库存
-        </p>
+            <h1 class="page-title"
+                style="font-size:38px; margin-bottom:8px;">
+                📚 藏经阁系统
+            </h1>
 
-        <!-- 主功能 -->
-        <div class="btn-row">
-
-            <a class="btn-tool btn-purple"
-            href="/library/scan"
-            style="font-size:26px;
-                    min-height:90px;
-                    flex:1;">
-                📷 扫描法物
-            </a>
+            <p class="page-subtitle"
+               style="font-size:20px; margin:0;">
+                查询法物、登记领取及管理藏经阁库存
+            </p>
 
         </div>
 
-        <!-- 次功能 -->
-        <div class="btn-row">
 
-            <a class="btn-tool btn-primary"
-            href="/library/search"
-            style="flex:1;">
-                🔍 法物查询
-            </a>
+        <!-- 法物查询 -->
+        <div style="
+            max-width:760px;
+            margin:0 auto;
+        ">
+
+            <form method="get" action="/library/search">
+
+                <div class="form-group">
+
+                    <label style="
+                        font-size:25px;
+                        font-weight:700;
+                        display:block;
+                        margin-bottom:12px;
+                    ">
+                        🔍 法物查询
+                    </label>
+
+                    <input
+                        class="form-input"
+                        type="text"
+                        name="q"
+                        placeholder="例如：白话06 / 婚姻 / 小房子 / DVD"
+                        autocomplete="off"
+                        style="
+                            font-size:21px;
+                            min-height:64px;
+                        "
+                    >
+
+                </div>
+
+                <button
+                    class="btn-tool btn-primary"
+                    type="submit"
+                    style="
+                        width:100%;
+                        font-size:22px;
+                        min-height:64px;
+                        margin-top:10px;
+                    ">
+                    🔍 搜索
+                </button>
+
+            </form>
+
+        </div>
+
+
+        <!-- 手动登记领取 -->
+        <div style="
+            display:flex;
+            justify-content:center;
+            margin-top:28px;
+        ">
 
             <a class="btn-tool btn-success"
-            href="/library/out"
-            style="flex:1;">
+               href="/library/out"
+               style="
+                    width:430px;
+                    max-width:90%;
+                    font-size:21px;
+                    min-height:60px;
+               ">
                 📝 手动登记领取
             </a>
 
-            <a class="btn-tool"
-            href="/library/batch-in"
-            style="
-                flex:1;
-                background:#0ea5a8;
-                color:white;">
-                📦 批量入库
-            </a>
-
         </div>
 
-        <hr style="margin:35px 0;">
 
-        <div class="btn-row">
+        <!-- 负责人专区 -->
+        <div style="
+            text-align:center;
+            margin-top:42px;
+        ">
 
             <a class="btn-tool btn-warning"
-            href="/library/admin"
-            style="font-size:24px;
-                    min-height:85px;
-                    flex:1;">
+               href="/library/admin"
+               style="
+                    display:inline-flex;
+                    width:auto;
+                    min-width:210px;
+                    justify-content:center;
+                    font-size:19px;
+                    min-height:52px;
+                    padding:10px 26px;
+               ">
                 ⚙️ 负责人专区
             </a>
 
@@ -1102,316 +1290,607 @@ function toggleBranch() {
 
 @library_bp.route("/admin", methods=["GET", "POST"])
 def library_admin():
-
     if is_library_admin():
         return redirect(url_for("library.library_admin_home"))
 
     error = None
+    bootstrap = False
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("select count(*) as c from library_admin_users")
+            bootstrap = int(cur.fetchone()["c"] or 0) == 0
 
     if request.method == "POST":
-
+        email = request.form.get("email", "").strip().lower()
         pin = request.form.get("pin", "").strip()
 
-        if pin == LIBRARY_ADMIN_PIN:
-            session["library_admin"] = True
-            session.modified = True
-            return redirect(url_for("library.library_admin_home"))
+        if bootstrap:
+            volunteer_id = request.form.get("volunteer_id", "").strip().upper()
+            master_pin = request.form.get("master_pin", "").strip()
+
+            if master_pin != LIBRARY_ADMIN_PIN:
+                error = "首次设置 PIN 不正确"
+            elif not volunteer_id or not email or len(pin) < 4:
+                error = "请完整填写义工编号、Email 和至少 4 位个人 PIN"
+            else:
+                with get_conn() as conn:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute("select id, name from volunteers where id::text=%s limit 1", (volunteer_id,))
+                        vol = cur.fetchone()
+                        if not vol:
+                            error = "找不到这位义工"
+                        else:
+                            cur.execute("""
+                                insert into library_admin_users (
+                                    volunteer_id, email, pin_hash,
+                                    role, is_active, is_super_admin,
+                                    can_batch_in, can_batch_out, can_view_records,
+                                    can_adjust_stock, can_cancel_transaction,
+                                    can_manage_items, can_stocktake,
+                                    can_view_audit_log, can_manage_permissions
+                                ) values (
+                                    %s,%s,%s,
+                                    'developer',true,true,
+                                    true,true,true,true,true,true,true,true,true
+                                )
+                                returning id
+                            """, (volunteer_id, email, generate_password_hash(pin)))
+                            admin_id = cur.fetchone()["id"]
+                            conn.commit()
+                            session["library_admin_id"] = admin_id
+                            session.modified = True
+
+                            admin = get_library_admin()
+                            with get_conn() as log_conn:
+                                with log_conn.cursor(cursor_factory=RealDictCursor) as log_cur:
+                                    write_library_audit(log_cur, "ADMIN_BOOTSTRAP", detail="建立系统开发者账号", admin=admin)
+                                    log_conn.commit()
+                            return redirect(url_for("library.library_admin_home"))
         else:
-            error = "负责人 PIN 不正确"
+            if not email or not pin:
+                error = "请输入 Email 和个人 PIN"
+            else:
+                with get_conn() as conn:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute("""
+                            select id, pin_hash
+                            from library_admin_users
+                            where lower(email)=lower(%s)
+                              and is_active=true
+                            limit 1
+                        """, (email,))
+                        row = cur.fetchone()
+
+                if not row or not check_password_hash(row["pin_hash"], pin):
+                    error = "Email 或个人 PIN 不正确"
+                else:
+                    session["library_admin_id"] = row["id"]
+                    session.modified = True
+                    admin = get_library_admin()
+                    with get_conn() as log_conn:
+                        with log_conn.cursor(cursor_factory=RealDictCursor) as log_cur:
+                            write_library_audit(log_cur, "LOGIN", detail="登入负责人专区", admin=admin)
+                            log_conn.commit()
+                    return redirect(url_for("library.library_admin_home"))
 
     return render_template_string("""
 <!doctype html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="zh"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>藏经阁负责人专区</title>
 <link rel="stylesheet" href="/static/css/toolbox.css">
-</head>
-
-<body>
-
-<div class="page">
-
-<div class="card">
-
+</head><body><div class="page"><div class="card">
 <h1 class="page-title">⚙️ 负责人专区</h1>
 
-<p class="page-subtitle">
-请输入负责人 PIN
-</p>
-
-{% if error %}
-<div class="alert alert-danger">
-{{ error }}
-</div>
+{% if bootstrap %}
+<p class="page-subtitle">第一次使用：建立系统开发者账号。以后主负责人和小组长都使用自己的 Email + 个人 PIN 登录。</p>
+{% else %}
+<p class="page-subtitle">请输入自己的 Email 与个人 PIN</p>
 {% endif %}
 
+{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+
 <form method="post">
+{% if bootstrap %}
+<div class="form-group"><label class="form-label">义工编号</label>
+<input class="form-input" name="volunteer_id" placeholder="例如 CHE-208" required></div>
+{% endif %}
 
-<div class="form-group">
-<label class="form-label">负责人 PIN</label>
+<div class="form-group"><label class="form-label">Email</label>
+<input class="form-input" type="email" name="email" placeholder="例如 name@gmail.com" required autocomplete="username"></div>
 
-<input
-type="password"
-name="pin"
-class="form-input"
-placeholder="请输入 PIN"
-required>
-</div>
+<div class="form-group"><label class="form-label">个人 PIN</label>
+<input class="form-input" type="password" name="pin" placeholder="至少 4 位" required autocomplete="current-password"></div>
+
+{% if bootstrap %}
+<div class="form-group"><label class="form-label">原负责人 PIN（只用于第一次设置）</label>
+<input class="form-input" type="password" name="master_pin" required></div>
+{% endif %}
 
 <div class="btn-row">
-
-<button class="btn-tool btn-warning" type="submit">
-登入
-</button>
-
-<a class="btn-tool btn-secondary" href="/library">
-返回
-</a>
-
-</div>
-
-</form>
-
-</div>
-
-</div>
-
-</body>
-</html>
-""", error=error)
+<button class="btn-tool btn-warning" type="submit">登入</button>
+<a class="btn-tool btn-secondary" href="/library">返回</a>
+</div></form>
+</div></div></body></html>
+""", error=error, bootstrap=bootstrap)
 
 @library_bp.route("/admin/home")
 def library_admin_home():
-
-    if not is_library_admin():
+    admin = get_library_admin()
+    if not admin:
         return redirect(url_for("library.library_admin"))
-    
+
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-
-            cur.execute("""
-                select
-                    count(*) as total_items,
-                    coalesce(sum(balance), 0) as total_balance
-                from library_items
-                where is_active = true
-            """)
+            cur.execute("""select count(*) as total_items, coalesce(sum(balance),0) as total_balance
+                           from library_items where is_active=true""")
             summary = cur.fetchone()
-
-            cur.execute("""
-                select count(*) as low_stock_count
-                from library_items
-                where is_active = true
-                  and balance <= min_balance
-            """)
+            cur.execute("""select count(*) as low_stock_count from library_items
+                           where is_active=true and balance <= min_balance""")
             low_stock = cur.fetchone()
-
-            cur.execute("""
-                select coalesce(sum(quantity), 0) as today_out
-                from library_transactions
-                where transaction_type = 'out'
-                  and (created_at at time zone 'Asia/Kuala_Lumpur')::date =
-                      (now() at time zone 'Asia/Kuala_Lumpur')::date
-            """)
+            cur.execute("""select coalesce(sum(quantity),0) as today_out from library_transactions
+                           where transaction_type='out'
+                           and (created_at at time zone 'Asia/Kuala_Lumpur')::date=(now() at time zone 'Asia/Kuala_Lumpur')::date""")
             today_out = cur.fetchone()
-
-            cur.execute("""
-                select coalesce(sum(quantity), 0) as today_in
-                from library_transactions
-                where transaction_type = 'in'
-                  and (created_at at time zone 'Asia/Kuala_Lumpur')::date =
-                      (now() at time zone 'Asia/Kuala_Lumpur')::date
-            """)
+            cur.execute("""select coalesce(sum(quantity),0) as today_in from library_transactions
+                           where transaction_type='in'
+                           and (created_at at time zone 'Asia/Kuala_Lumpur')::date=(now() at time zone 'Asia/Kuala_Lumpur')::date""")
             today_in = cur.fetchone()
-
-            cur.execute("""
-                select
-                    item_code,
-                    item_name,
-                    transaction_type,
-                    quantity,
-                    volunteer_name,
-                    handled_by,
-                    to_char(
-                        created_at at time zone 'Asia/Kuala_Lumpur',
-                        'YYYY-MM-DD HH24:MI'
-                    ) as created_at_my
-                from library_transactions
-                order by created_at desc
-                limit 5
-            """)
+            cur.execute("""select item_code,item_name,transaction_type,quantity,volunteer_name,handled_by,
+                           to_char(created_at at time zone 'Asia/Kuala_Lumpur','YYYY-MM-DD HH24:MI') as created_at_my
+                           from library_transactions order by created_at desc limit 5""")
             recent_rows = cur.fetchall()
+
+    return render_template_string("""
+<!doctype html><html lang="zh"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>藏经阁负责人</title><link rel="stylesheet" href="/static/css/toolbox.css"></head><body>
+<div class="page"><div class="card">
+<h1 class="page-title">📚 藏经阁负责人</h1>
+<p class="page-subtitle">{{ admin.volunteer_name or admin.volunteer_id }} · {{ role_label }} · {{ admin.email }}</p>
+
+<div class="card"><h2 class="section-title">📊 今日概况</h2><div class="summary-grid">
+<div class="summary-box"><div class="summary-title">法物种类</div><div class="summary-value">{{ summary.total_items }}</div></div>
+<div class="summary-box"><div class="summary-title">总库存</div><div class="summary-value">{{ summary.total_balance }}</div></div>
+<div class="summary-box"><div class="summary-title">今日领取</div><div class="summary-value">{{ today_out.today_out }}</div></div>
+<div class="summary-box"><div class="summary-title">今日入库</div><div class="summary-value">{{ today_in.today_in }}</div></div>
+<div class="summary-box"><div class="summary-title">库存不足</div><div class="summary-value">{{ low_stock.low_stock_count }}</div></div>
+</div></div>
+
+<div class="card"><h2 class="section-title">🕒 最近记录</h2>
+{% if not recent_rows %}<div class="empty-state">暂时没有进出记录。</div>{% else %}
+{% for row in recent_rows %}<div style="border-bottom:1px solid #eee;padding:12px 0;">
+{% if row.transaction_type == 'out' %}<b style="color:#dc3545;">📤 出库</b>
+{% elif row.transaction_type == 'in' %}<b style="color:#28a745;">📥 入库</b>
+{% else %}<b style="color:#ff9800;">⚙️ 调整</b>{% endif %}<br>
+📚 {{ row.item_name }}<br>数量：<b>{{ row.quantity }}</b>
+{% if row.volunteer_name %}<br>👤 {{ row.volunteer_name }}{% endif %}
+{% if row.handled_by %}<br>👨‍💼 {{ row.handled_by }}{% endif %}<br>
+<small style="color:#666;">{{ row.created_at_my }}</small></div>{% endfor %}{% endif %}</div>
+
+<div class="btn-row">
+{% if can_batch_in %}<a class="btn-tool btn-success" href="/library/batch-in">📦 批量入库</a><a class="btn-tool btn-success" href="/library/in">📥 单项入库</a>{% endif %}
+{% if can_view_records %}<a class="btn-tool btn-primary" href="/library/records">📋 进出记录</a>{% endif %}
+<a class="btn-tool btn-warning" href="/library/low-stock">📊 库存不足</a>
+{% if can_stocktake or can_adjust_stock %}<a class="btn-tool btn-purple" href="{{ url_for('library.library_stocktake') }}">📤 上传盘点 Excel</a>{% endif %}
+{% if can_manage_items %}<a class="btn-tool btn-primary" href="/library/items">⚙️ 法物管理</a>{% endif %}
+{% if can_view_audit_log %}<a class="btn-tool" style="background:#5b6472;color:white;" href="/library/admin/audit">🧾 操作日志</a>{% endif %}
+{% if can_manage_permissions %}<a class="btn-tool" style="background:#0d9488;color:white;" href="/library/admin/users">👥 负责人权限</a>{% endif %}
+</div>
+<hr style="margin:35px 0;"><div class="btn-row">
+<a class="btn-tool btn-secondary" href="/library">返回藏经阁首页</a>
+<a class="btn-tool btn-danger" href="/library/admin/logout">退出负责人专区</a>
+</div></div></div></body></html>
+""",
+        admin=admin,
+        role_label=library_role_label(admin),
+        can_batch_in=library_admin_can("can_batch_in"),
+        can_view_records=library_admin_can("can_view_records"),
+        can_stocktake=library_admin_can("can_stocktake"),
+        can_adjust_stock=library_admin_can("can_adjust_stock"),
+        can_manage_items=library_admin_can("can_manage_items"),
+        can_view_audit_log=library_admin_can("can_view_audit_log"),
+        can_manage_permissions=library_admin_can("can_manage_permissions"),
+        summary=summary,
+        low_stock=low_stock,
+        today_out=today_out,
+        today_in=today_in,
+        recent_rows=recent_rows
+    )
+
+@library_bp.route("/admin/users", methods=["GET", "POST"])
+def library_admin_users():
+    if not is_library_admin():
+        return redirect(url_for("library.library_admin"))
+    if not library_admin_can("can_manage_permissions"):
+        return library_permission_denied()
+
+    admin = get_library_admin()
+    current_role = library_role(admin)
+    error = None
+    success = None
+
+    # 系统开发者可以建立主负责人 / 小组长；
+    # 主负责人只能建立和管理小组长。
+    allowed_roles = ["main_admin", "team_leader"] if current_role == "developer" else ["team_leader"]
+
+    if request.method == "POST":
+        user_id = request.form.get("user_id", "").strip()
+        volunteer_id = request.form.get("volunteer_id", "").strip().upper()
+        email = request.form.get("email", "").strip().lower()
+        pin = request.form.get("pin", "").strip()
+        is_active = request.form.get("is_active") == "1"
+        target_role = request.form.get("role", "team_leader").strip()
+
+        if target_role not in LIBRARY_ROLES:
+            target_role = "team_leader"
+
+        perms = {p: request.form.get(p) == "1" for p in LIBRARY_PERMISSION_FIELDS}
+
+        if not volunteer_id or not email:
+            error = "义工编号和 Email 必须填写"
+        elif target_role == "developer":
+            error = "系统开发者账号不能在这里新增或升级"
+        elif target_role not in allowed_roles:
+            error = "你没有权限建立或修改这个级别的负责人"
+        else:
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("select id,name from volunteers where id::text=%s limit 1", (volunteer_id,))
+                    vol = cur.fetchone()
+
+                    if not vol:
+                        error = "找不到这位义工"
+                    elif not user_id and len(pin) < 4:
+                        error = "新增负责人必须设置至少 4 位个人 PIN"
+                    else:
+                        try:
+                            before = None
+
+                            if user_id:
+                                cur.execute("select * from library_admin_users where id=%s limit 1", (user_id,))
+                                before = cur.fetchone()
+
+                                if not before:
+                                    error = "找不到这位负责人"
+                                else:
+                                    before_role = (before.get("role") or "").strip()
+                                    if not before_role and before.get("is_super_admin"):
+                                        before_role = "developer"
+                                    before_role = before_role or "team_leader"
+
+                                    # 开发者账号不能在一般权限页面被修改/停用。
+                                    if before_role == "developer":
+                                        error = "系统开发者账号不能在负责人权限页面修改"
+                                    elif current_role == "main_admin" and before_role != "team_leader":
+                                        error = "主负责人只能管理小组长"
+                                    elif current_role == "main_admin" and target_role != "team_leader":
+                                        error = "主负责人不能把小组长升级为主负责人"
+                                    elif str(before["id"]) == str(admin["id"]):
+                                        error = "不能在这里停用或修改自己的账号"
+                                    else:
+                                        sets = [
+                                            "volunteer_id=%s",
+                                            "email=%s",
+                                            "role=%s",
+                                            "is_active=%s",
+                                            "is_super_admin=false",
+                                        ]
+                                        vals = [volunteer_id, email, target_role, is_active]
+
+                                        for p in LIBRARY_PERMISSION_FIELDS:
+                                            sets.append(f"{p}=%s")
+                                            vals.append(perms[p])
+
+                                        if pin:
+                                            sets.append("pin_hash=%s")
+                                            vals.append(generate_password_hash(pin))
+
+                                        sets.append("updated_at=now()")
+                                        vals.append(user_id)
+
+                                        cur.execute(
+                                            f"update library_admin_users set {', '.join(sets)} where id=%s",
+                                            vals
+                                        )
+
+                                        action = "ADMIN_EDIT"
+                                        detail = (
+                                            f"修改负责人：{volunteer_id} "
+                                            f"({LIBRARY_ROLE_LABELS.get(before_role, before_role)}"
+                                            f" → {LIBRARY_ROLE_LABELS.get(target_role, target_role)})"
+                                        )
+                            else:
+                                cols = [
+                                    "volunteer_id", "email", "pin_hash", "role",
+                                    "is_active", "is_super_admin"
+                                ] + LIBRARY_PERMISSION_FIELDS
+
+                                vals = [
+                                    volunteer_id,
+                                    email,
+                                    generate_password_hash(pin),
+                                    target_role,
+                                    is_active,
+                                    False,
+                                ] + [perms[p] for p in LIBRARY_PERMISSION_FIELDS]
+
+                                placeholders = ",".join(["%s"] * len(vals))
+                                cur.execute(
+                                    f"insert into library_admin_users ({','.join(cols)}) "
+                                    f"values ({placeholders}) returning id",
+                                    vals
+                                )
+                                user_id = str(cur.fetchone()["id"])
+                                action = "ADMIN_CREATE"
+                                detail = (
+                                    f"新增{LIBRARY_ROLE_LABELS.get(target_role, target_role)}："
+                                    f"{volunteer_id}"
+                                )
+
+                            if not error:
+                                write_library_audit(
+                                    cur,
+                                    action,
+                                    detail=detail,
+                                    metadata={
+                                        "target_admin_id": user_id,
+                                        "volunteer_id": volunteer_id,
+                                        "email": email,
+                                        "role": target_role,
+                                        "is_active": is_active,
+                                        "permissions": perms,
+                                    },
+                                    admin=admin,
+                                )
+                                conn.commit()
+                                success = "负责人资料已保存"
+
+                        except Exception as e:
+                            conn.rollback()
+                            error = f"保存失败：{e}"
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if current_role == "developer":
+                cur.execute("""
+                    select a.*, v.name as volunteer_name
+                    from library_admin_users a
+                    left join volunteers v on v.id::text=a.volunteer_id::text
+                    order by
+                        case coalesce(a.role,'team_leader')
+                            when 'developer' then 1
+                            when 'main_admin' then 2
+                            else 3
+                        end,
+                        a.is_active desc,
+                        coalesce(v.name,a.volunteer_id)
+                """)
+            else:
+                cur.execute("""
+                    select a.*, v.name as volunteer_name
+                    from library_admin_users a
+                    left join volunteers v on v.id::text=a.volunteer_id::text
+                    where coalesce(a.role,'team_leader')='team_leader'
+                    order by a.is_active desc, coalesce(v.name,a.volunteer_id)
+                """)
+            rows = cur.fetchall()
 
     return render_template_string("""
 <!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>藏经阁负责人</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>负责人权限</title>
 <link rel="stylesheet" href="/static/css/toolbox.css">
 </head>
-
 <body>
-
 <div class="page">
 
 <div class="card">
+    <h1 class="page-title">👥 负责人权限</h1>
+    <p class="page-subtitle">
+        当前身份：{{ current_role_label }}。
+        {% if current_role == 'developer' %}
+            你可以建立主负责人和小组长。
+        {% else %}
+            主负责人只管理小组长。
+        {% endif %}
+    </p>
 
-<h1 class="page-title">📚 藏经阁负责人</h1>
+    {% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+    {% if success %}<div class="alert alert-success">{{ success }}</div>{% endif %}
 
-<p class="page-subtitle">
-入库、记录、盘点及库存管理
-</p>
-                                  
-<div class="card">
-    <h2 class="section-title">📊 今日概况</h2>
-
-    <div class="summary-grid">
-
-        <div class="summary-box">
-            <div class="summary-title">法物种类</div>
-            <div class="summary-value">{{ summary.total_items }}</div>
-        </div>
-
-        <div class="summary-box">
-            <div class="summary-title">总库存</div>
-            <div class="summary-value">{{ summary.total_balance }}</div>
-        </div>
-
-        <div class="summary-box">
-            <div class="summary-title">今日领取</div>
-            <div class="summary-value">{{ today_out.today_out }}</div>
-        </div>
-
-        <div class="summary-box">
-            <div class="summary-title">今日入库</div>
-            <div class="summary-value">{{ today_in.today_in }}</div>
-        </div>
-
-        <div class="summary-box">
-            <div class="summary-title">库存不足</div>
-            <div class="summary-value">{{ low_stock.low_stock_count }}</div>
-        </div>
-
-    </div>
-
-    {% if low_stock.low_stock_count > 0 %}
-    <div class="alert alert-warning" style="margin-top:16px;">
-        ⚠ 有 {{ low_stock.low_stock_count }} 项法物库存不足。
-        <br><br>
-        <a class="btn-tool btn-warning" href="{{ url_for('library.library_low_stock') }}">
-            查看库存不足
-        </a>
-    </div>
-    {% endif %}
+    <a class="btn-tool btn-secondary" href="/library/admin/home">← 返回负责人专区</a>
 </div>
-                                  
-<div class="card">
-    <h2 class="section-title">🕒 最近记录</h2>
 
-    {% if not recent_rows %}
-        <div class="empty-state">
-            暂时没有进出记录。
+<div class="card">
+    <h2 class="section-title">➕ 新增负责人</h2>
+
+    <form method="post">
+        <input type="hidden" name="is_active" value="1">
+
+        <div class="form-group">
+            <label class="form-label">义工编号</label>
+            <input class="form-input" name="volunteer_id" placeholder="CHE-208 / STW-160" required>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">Email</label>
+            <input class="form-input" type="email" name="email" required>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">个人 PIN</label>
+            <input class="form-input" type="password" name="pin" minlength="4" required>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">身份级别</label>
+            <select class="form-input" name="role" required>
+                {% for value,label in allowed_role_options %}
+                <option value="{{ value }}">{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <h3 class="section-title" style="margin-top:22px;">功能权限</h3>
+        <div class="summary-grid">
+            {% for p,label in permission_labels %}
+            <label class="summary-box" style="text-align:left;">
+                <input type="checkbox" name="{{ p }}" value="1"> {{ label }}
+            </label>
+            {% endfor %}
+        </div>
+
+        <div class="btn-row" style="margin-top:18px;">
+            <button class="btn-tool btn-success" type="submit">保存负责人</button>
+        </div>
+    </form>
+</div>
+
+{% for u in rows %}
+{% set urole = u.role or ('developer' if u.is_super_admin else 'team_leader') %}
+
+<div class="card">
+    <h2 class="section-title">
+        {{ u.volunteer_name or u.volunteer_id }}
+        {% if urole == 'developer' %} 🛠️
+        {% elif urole == 'main_admin' %} ⭐
+        {% else %} 👤
+        {% endif %}
+    </h2>
+
+    <p>
+        {{ u.volunteer_id }} · {{ u.email }} ·
+        <b>{{ role_labels.get(urole, '小组长') }}</b> ·
+        {% if u.is_active %}启用{% else %}已停用{% endif %}
+    </p>
+
+    {% if urole == 'developer' %}
+        <div class="alert alert-info">
+            🛠️ 系统开发者为最高级账号，拥有全部权限；不能在这里被停用或降级。
         </div>
     {% else %}
+        <form method="post">
+            <input type="hidden" name="user_id" value="{{ u.id }}">
+            <input type="hidden" name="volunteer_id" value="{{ u.volunteer_id }}">
 
-        {% for row in recent_rows %}
-        <div style="
-            border-bottom:1px solid #eee;
-            padding:12px 0;
-        ">
-            {% if row.transaction_type == "out" %}
-                <b style="color:#dc3545;">📤 出库</b>
-            {% elif row.transaction_type == "in" %}
-                <b style="color:#28a745;">📥 入库</b>
-            {% else %}
-                <b style="color:#ff9800;">⚙️ 调整</b>
-            {% endif %}
+            <div class="form-group">
+                <label class="form-label">Email</label>
+                <input class="form-input" type="email" name="email" value="{{ u.email }}" required>
+            </div>
 
-            <br>
+            <div class="form-group">
+                <label class="form-label">新 PIN（不修改可留空）</label>
+                <input class="form-input" type="password" name="pin">
+            </div>
 
-            📚 {{ row.item_name }}
-            <br>
+            <div class="form-group">
+                <label class="form-label">身份级别</label>
+                <select class="form-input" name="role">
+                    {% for value,label in allowed_role_options %}
+                    <option value="{{ value }}" {% if urole == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
 
-            数量：<b>{{ row.quantity }}</b>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" name="is_active" value="1"
+                           {% if u.is_active %}checked{% endif %}>
+                    启用账号
+                </label>
+            </div>
 
-            {% if row.volunteer_name %}
-                <br>👤 {{ row.volunteer_name }}
-            {% endif %}
+            <div class="summary-grid">
+                {% for p,label in permission_labels %}
+                <label class="summary-box" style="text-align:left;">
+                    <input type="checkbox" name="{{ p }}" value="1"
+                           {% if u[p] %}checked{% endif %}>
+                    {{ label }}
+                </label>
+                {% endfor %}
+            </div>
 
-            {% if row.handled_by %}
-                <br>👨‍💼 {{ row.handled_by }}
-            {% endif %}
-
-            <br>
-            <small style="color:#666;">
-                {{ row.created_at_my }}
-            </small>
-        </div>
-        {% endfor %}
-
+            <div class="btn-row" style="margin-top:18px;">
+                <button class="btn-tool btn-warning" type="submit">保存修改</button>
+            </div>
+        </form>
     {% endif %}
 </div>
-
-<div class="btn-row">
-
-<a class="btn-tool btn-success" href="/library/in">
-📥 入库
-</a>
-
-<a class="btn-tool btn-primary" href="/library/records">
-📋 进出记录
-</a>
-
-<a class="btn-tool btn-warning" href="/library/low-stock">
-📊 库存不足
-</a>
-
-<a class="btn-tool btn-purple" href="{{ url_for('library.library_stocktake') }}">
-    📤 上传盘点 Excel
-</a>
-
-<a class="btn-tool btn-primary" href="/library/items">
-⚙️ 法物管理
-</a>
+{% endfor %}
 
 </div>
-
-<hr style="margin:35px 0;">
-
-<div class="btn-row">
-
-<a class="btn-tool btn-secondary" href="/library">
-返回藏经阁首页
-</a>
-
-<a class="btn-tool btn-danger" href="/library/admin/logout">
-退出负责人专区
-</a>
-
-</div>
-
-</div>
-
-</div>
-
 </body>
 </html>
 """,
-    summary=summary,
-    low_stock=low_stock,
-    today_out=today_out,
-    today_in=today_in,
-    recent_rows=recent_rows)
+        rows=rows,
+        error=error,
+        success=success,
+        current_role=current_role,
+        current_role_label=library_role_label(admin),
+        role_labels=LIBRARY_ROLE_LABELS,
+        allowed_role_options=[(r, LIBRARY_ROLE_LABELS[r]) for r in allowed_roles],
+        permission_labels=[
+            ("can_batch_in","批量/单项入库"),
+            ("can_batch_out","批量出库"),
+            ("can_view_records","查看进出记录"),
+            ("can_adjust_stock","调整库存"),
+            ("can_cancel_transaction","撤销记录"),
+            ("can_manage_items","法物管理"),
+            ("can_stocktake","库存盘点"),
+            ("can_view_audit_log","查看操作日志"),
+            ("can_manage_permissions","管理负责人权限"),
+        ],
+    )
+
+
+@library_bp.route("/admin/audit")
+def library_admin_audit():
+    if not is_library_admin():
+        return redirect(url_for("library.library_admin"))
+    if not library_admin_can("can_view_audit_log"):
+        return library_permission_denied()
+
+    keyword = request.args.get("q", "").strip()
+    action = request.args.get("action", "").strip()
+    like = f"%{keyword}%"
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select *, to_char(created_at at time zone 'Asia/Kuala_Lumpur','DD/MM/YYYY HH24:MI:SS') as created_at_my
+                from library_audit_logs
+                where (%s='' or action=%s)
+                  and (%s='' or coalesce(volunteer_name,'') ilike %s or coalesce(user_email,'') ilike %s
+                       or coalesce(item_name,'') ilike %s or coalesce(item_code,'') ilike %s or coalesce(detail,'') ilike %s)
+                order by created_at desc limit 500
+            """, (action, action, keyword, like, like, like, like, like))
+            rows = cur.fetchall()
+
+    return render_template_string("""
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>操作日志</title><link rel="stylesheet" href="/static/css/toolbox.css"></head><body><div class="page">
+<div class="card"><h1 class="page-title">🧾 操作日志</h1><p class="page-subtitle">负责人做过的入库、调整、撤销、资料修改和权限修改都会留下记录。</p>
+<form method="get"><div class="form-group"><label class="form-label">搜索</label><input class="form-input" name="q" value="{{ q }}" placeholder="姓名 / Email / 法物 / 编号 / 备注"></div>
+<div class="form-group"><label class="form-label">操作类型</label><select class="form-input" name="action"><option value="">全部</option>{% for a in actions %}<option value="{{ a }}" {% if a==action %}selected{% endif %}>{{ a }}</option>{% endfor %}</select></div>
+<div class="btn-row"><button class="btn-tool btn-primary">搜索</button><a class="btn-tool btn-secondary" href="/library/admin/home">返回负责人专区</a></div></form></div>
+<div class="card"><div class="table-responsive"><table class="record-table"><thead><tr><th>时间</th><th>负责人</th><th>操作</th><th>法物</th><th>变化</th><th>库存</th><th>详情</th></tr></thead><tbody>
+{% for r in rows %}<tr><td>{{ r.created_at_my }}</td><td>{{ r.volunteer_name or r.volunteer_id or '-' }}<br><small>{{ r.user_email or '' }}</small></td><td>{{ r.action }}</td>
+<td>{{ r.item_name or '-' }}{% if r.item_code %}<br><small>{{ r.item_code }}</small>{% endif %}</td><td>{% if r.quantity_change is not none %}{{ '%+d'|format(r.quantity_change) }}{% else %}-{% endif %}</td>
+<td>{% if r.balance_before is not none %}{{ r.balance_before }} → {{ r.balance_after }}{% else %}-{% endif %}</td><td>{{ r.detail or '-' }}</td></tr>{% endfor %}
+</tbody></table></div>{% if not rows %}<div class="empty-state">没有操作日志</div>{% endif %}</div></div></body></html>
+""", rows=rows, q=keyword, action=action, actions=["LOGIN","LOGOUT","ADMIN_BOOTSTRAP","ADMIN_CREATE","ADMIN_EDIT","BATCH_IN","SINGLE_IN","STOCKTAKE_ADJUST","CANCEL_TRANSACTION","ITEM_EDIT"])
 
 @library_bp.route("/items")
 def library_items():
 
     if not is_library_admin():
         return redirect(url_for("library.library_admin"))
+    if not library_admin_can("can_manage_items"):
+        return library_permission_denied()
 
     keyword = request.args.get("q", "").strip()
     items = []
@@ -1541,6 +2020,8 @@ def library_records():
 
     if not is_library_admin():
         return redirect(url_for("library.library_admin"))
+    if not library_admin_can("can_view_records"):
+        return library_permission_denied()
 
     keyword = request.args.get("q", "").strip()
 
@@ -1786,7 +2267,7 @@ records=records
 @library_bp.route("/low-stock")
 def library_low_stock():
 
-    if not session.get("library_admin"):
+    if not is_library_admin():
         return redirect(url_for("library.library_admin"))
 
     with get_conn() as conn:
@@ -1913,6 +2394,8 @@ def library_in():
 
     if not is_library_admin():
         return redirect(url_for("library.library_admin"))
+    if not library_admin_can("can_batch_in"):
+        return library_permission_denied()
 
     keyword = request.args.get("q", "").strip()
 
@@ -2107,9 +2590,13 @@ def library_in_item(item_code):
 
     if not is_library_admin():
         return redirect(url_for("library.library_admin"))
+    if not library_admin_can("can_batch_in"):
+        return library_permission_denied()
 
     success = None
     error = None
+    admin = get_library_admin()
+    handled_by = library_admin_label(admin)
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -2181,14 +2668,21 @@ def library_in_item(item_code):
                         item["item_code"],
                         item["name"],
                         qty,
-                        "负责人",
+                        handled_by,
                         remark
 
                     ))
 
+                    before = int(item["balance"] or 0)
+                    after = before + qty
+                    write_library_audit(
+                        cur, "SINGLE_IN", item_code=item["item_code"], item_name=item["name"],
+                        quantity_change=qty, balance_before=before, balance_after=after,
+                        detail=remark or "单项入库", admin=admin
+                    )
                     conn.commit()
 
-                    item["balance"] += qty
+                    item["balance"] = after
 
                     success = "入库成功！"
 
@@ -2364,12 +2858,18 @@ def library_item_edit(item_code):
 
     if not is_library_admin():
         return redirect(url_for("library.library_admin"))
+    if not library_admin_can("can_manage_items"):
+        return library_permission_denied()
 
     error = None
     success = None
+    admin = get_library_admin()
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+            cur.execute("select * from library_items where item_code=%s limit 1", (item_code,))
+            before_item = cur.fetchone()
 
             if request.method == "POST":
 
@@ -2408,6 +2908,15 @@ def library_item_edit(item_code):
                         item_code
                     ))
 
+                    write_library_audit(
+                        cur, "ITEM_EDIT", item_code=item_code, item_name=name,
+                        detail="修改法物资料",
+                        metadata={
+                            "before": dict(before_item) if before_item else {},
+                            "after": {"name": name, "category": category, "location": location,
+                                      "unit": unit, "min_balance": min_balance, "description": description}
+                        }, admin=admin
+                    )
                     conn.commit()
                     success = "法物资料已保存"
 
@@ -2527,10 +3036,14 @@ success=success
 
 @library_bp.route("/admin/logout")
 def library_admin_logout():
-
-    session.pop("library_admin", None)
+    admin = get_library_admin()
+    if admin:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                write_library_audit(cur, "LOGOUT", detail="退出负责人专区", admin=admin)
+                conn.commit()
+    session.pop("library_admin_id", None)
     session.modified = True
-
     return redirect(url_for("library.library_home"))
 
 @library_bp.route("/out/search")
@@ -3205,8 +3718,13 @@ success_items=success_items
 @library_bp.route("/stocktake", methods=["GET", "POST"])
 def library_stocktake():
 
-    if not session.get("library_admin"):
+    if not is_library_admin():
         return redirect(url_for("library.library_admin"))
+    if not (library_admin_can("can_stocktake") or library_admin_can("can_adjust_stock")):
+        return library_permission_denied()
+
+    admin = get_library_admin()
+    handled_by = library_admin_label(admin)
 
     preview_rows = []
     error = None
@@ -3254,9 +3772,16 @@ def library_stocktake():
                             row["name"],
                             "adjust",
                             diff,
-                            "负责人",
+                            handled_by,
                             "盘点调整"
                         ))
+
+                        write_library_audit(
+                            cur, "STOCKTAKE_ADJUST",
+                            item_code=row["item_code"], item_name=row["name"],
+                            quantity_change=diff, balance_before=row["system_balance"],
+                            balance_after=row["actual_balance"], detail="盘点调整", admin=admin
+                        )
 
                     conn.commit()
 
@@ -4032,90 +4557,59 @@ startCamera();
 
 @library_bp.route("/records/cancel/<int:id>", methods=["POST"])
 def library_cancel_record(id):
-
     if not is_library_admin():
         return redirect(url_for("library.library_admin"))
+    if not library_admin_can("can_cancel_transaction"):
+        return library_permission_denied()
 
+    admin = get_library_admin()
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-
-            cur.execute("""
-                select
-                    id,
-                    item_code,
-                    item_name,
-                    transaction_type,
-                    quantity,
-                    status
-                from library_transactions
-                where id = %s
-                limit 1
-            """, (id,))
-
+            cur.execute("""select id,item_code,item_name,transaction_type,quantity,status
+                           from library_transactions where id=%s limit 1""", (id,))
             row = cur.fetchone()
-
-            if not row:
+            if not row or row["status"] == "cancelled":
                 return redirect(url_for("library.library_records"))
 
-            if row["status"] == "cancelled":
-                return redirect(url_for("library.library_records"))
-
+            cur.execute("select balance from library_items where item_code=%s", (row["item_code"],))
+            bal_row = cur.fetchone()
+            before = int(bal_row["balance"] or 0) if bal_row else None
             qty = int(row["quantity"])
-
-            if row["transaction_type"] == "in":
-                delta = -qty
-
-            elif row["transaction_type"] == "out":
-                delta = qty
-
-            else:
-                delta = 0
+            delta = -qty if row["transaction_type"] == "in" else qty if row["transaction_type"] == "out" else 0
 
             if delta != 0:
-                cur.execute("""
-                    update library_items
-                    set balance = balance + %s
-                    where item_code = %s
-                """, (
-                    delta,
-                    row["item_code"]
-                ))
-
-            cur.execute("""
-                update library_transactions
-                set status = 'cancelled'
-                where id = %s
-            """, (id,))
-
+                cur.execute("update library_items set balance=balance+%s where item_code=%s", (delta, row["item_code"]))
+            cur.execute("update library_transactions set status='cancelled' where id=%s", (id,))
+            after = before + delta if before is not None else None
+            write_library_audit(cur, "CANCEL_TRANSACTION", item_code=row["item_code"], item_name=row["item_name"],
+                                quantity_change=delta, balance_before=before, balance_after=after,
+                                transaction_id=id, detail=f"撤销 {row['transaction_type']} 记录", admin=admin)
             conn.commit()
-
     return redirect(url_for("library.library_records"))
-
 
 @library_bp.route("/batch-in", methods=["GET", "POST"])
 def library_batch_in():
-    if request.method == "POST":
-        handled_by = request.form.get("handled_by", "").strip()
-        remark = request.form.get("remark", "").strip()
+    if not is_library_admin():
+        return redirect(url_for("library.library_admin"))
+    if not library_admin_can("can_batch_in"):
+        return library_permission_denied()
 
+    admin = get_library_admin()
+    handled_by = library_admin_label(admin)
+
+    if request.method == "POST":
+        remark = request.form.get("remark", "").strip()
         codes = request.form.getlist("item_code[]")
         quantities = request.form.getlist("quantity[]")
-
-        if not handled_by:
-            flash("请填写负责人", "bad")
-            return redirect(url_for("library.library_batch_in"))
-
         batch_time = now_malaysia()
-
         items = []
 
         for code, qty in zip(codes, quantities):
             code = code.strip().upper()
             try:
                 qty = int(qty)
-            except:
+            except Exception:
                 qty = 0
-
             if code and qty > 0:
                 items.append((code, qty))
 
@@ -4125,53 +4619,32 @@ def library_batch_in():
 
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-
                 for item_code, qty in items:
-                    cur.execute("""
-                        select item_code, name, balance
-                        from library_items
-                        where item_code = %s
-                          and is_active = true
-                    """, (item_code,))
-
+                    cur.execute("""select item_code,name,balance from library_items
+                                   where item_code=%s and is_active=true for update""", (item_code,))
                     item = cur.fetchone()
-
                     if not item:
                         conn.rollback()
                         flash(f"找不到法物编号：{item_code}", "bad")
                         return redirect(url_for("library.library_batch_in"))
 
-                    cur.execute("""
-                        update library_items
-                        set balance = balance + %s
-                        where item_code = %s
-                    """, (qty, item_code))
-
-                    cur.execute("""
-                        insert into library_transactions
-                        (
-                            item_code,
-                            item_name,
-                            transaction_type,
-                            quantity,
-                            handled_by,
-                            remark,
-                            created_at
-                        )
-                        values (%s, %s, 'in', %s, %s, %s, %s)
-                    """, (
-                        item["item_code"],
-                        item["name"],
-                        qty,
-                        handled_by,
-                        remark,
-                        batch_time
-                    ))
-
+                    before = int(item["balance"] or 0)
+                    after = before + qty
+                    cur.execute("update library_items set balance=%s where item_code=%s", (after, item_code))
+                    cur.execute("""insert into library_transactions
+                                   (item_code,item_name,transaction_type,quantity,handled_by,remark,created_at)
+                                   values (%s,%s,'in',%s,%s,%s,%s) returning id""",
+                                (item["item_code"], item["name"], qty, handled_by, remark, batch_time))
+                    transaction_id = cur.fetchone()["id"]
+                    write_library_audit(cur, "BATCH_IN", item_code=item["item_code"], item_name=item["name"],
+                                        quantity_change=qty, balance_before=before, balance_after=after,
+                                        transaction_id=transaction_id, detail=remark or "批量入库", admin=admin)
                 conn.commit()
 
         flash(f"批量入库完成：{len(items)} 种法物", "good")
-        return redirect(url_for("library.library_records"))
+        if library_admin_can("can_view_records"):
+            return redirect(url_for("library.library_records"))
+        return redirect(url_for("library.library_admin_home"))
 
     return render_template_string("""
 <!doctype html>
@@ -4192,14 +4665,12 @@ def library_batch_in():
             扫码枪或手机相机连续扫描。同一本自动累计，也可以直接修改数量。
         </div>
 
+        <div class="alert alert-info">
+            👤 当前负责人：<b>{{ admin_label }}</b>
+        </div>
+
         <form method="post" onsubmit="return beforeSubmit();">
-
-            <div class="form-group">
-                <label>负责人</label>
-                <input class="form-input" name="handled_by" placeholder="例如：张三 / CHE-108" required>
-            </div>
-
-            <div class="form-group">
+<div class="form-group">
                 <label>备注</label>
                 <input class="form-input" name="remark" placeholder="例如：新书到货 / 批量入库">
             </div>
@@ -4283,8 +4754,8 @@ def library_batch_in():
                 ✅ 确认全部入库
             </button>
 
-            <a class="btn-tool btn-secondary" href="/library">
-                ⬅ 返回首页
+            <a class="btn-tool btn-secondary" href="/library/admin/home">
+                ⬅ 返回负责人专区
             </a>
 
         </form>
@@ -4550,7 +5021,7 @@ window.onload = function() {
 
 </body>
 </html>
-""")
+""", admin_label=library_admin_label(admin))
 
 @library_bp.route("/api/item/<item_code>")
 def library_api_item(item_code):

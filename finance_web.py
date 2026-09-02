@@ -2354,18 +2354,18 @@ def finance_home():
     <title>财政录入工作台</title>
 
     <link rel="manifest"
-      href="/dharma-class-manifest.json">
+        href="/finance-manifest.json?v=5">
 
     <link rel="icon"
         type="image/png"
         sizes="192x192"
-        href="/static/dharma_icon_192.png?v=5">
+        href="/static/finance_icon_192.png?v=5">
 
     <link rel="apple-touch-icon"
-        href="/static/dharma_icon_512.png?v=5">
+        href="/static/finance_icon_512.png?v=5">
 
     <meta name="theme-color"
-        content="#f6c54e">
+        content="#f4b400">
 
     <link rel="stylesheet"
           href="{{ url_for('static', filename='css/toolbox.css') }}">
@@ -7138,6 +7138,77 @@ def update_member_status(member_id):
 def add_member():
     return "Add Member Coming Soon"
 
+@finance_bp.route("/api/monthly-member-lookup")
+def monthly_member_lookup():
+    """月费工作台即时显示会员姓名；只做查询，不修改资料。"""
+    branch = request.args.get("branch", "CHE").strip().upper()
+    keyword = request.args.get("q", "").strip()
+
+    if branch not in ("CHE", "STW"):
+        return jsonify({"ok": False, "message": "Invalid branch"}), 400
+
+    if not keyword:
+        return jsonify({"ok": True, "found": False})
+
+    if keyword.isdigit():
+        member_id = f"{branch}-{int(keyword)}"
+    else:
+        member_id = normalize_member_id(
+            keyword,
+            default_branch=branch,
+        )
+
+    member = db_query("""
+        select
+            member_id,
+            name,
+            english_name
+        from members
+        where member_id = %s
+        limit 1
+    """, (member_id,), fetchone=True)
+
+    if not member:
+        matches = db_query("""
+            select
+                member_id,
+                name,
+                english_name
+            from members
+            where upper(coalesce(branch, %s)) = %s
+              and (
+                    lower(trim(name)) = lower(trim(%s))
+                 or lower(trim(coalesce(english_name, ''))) = lower(trim(%s))
+              )
+            order by member_id
+            limit 2
+        """, (
+            branch,
+            branch,
+            keyword,
+            keyword,
+        ), fetchall=True) or []
+
+        if len(matches) == 1:
+            member = matches[0]
+
+    if not member:
+        return jsonify({
+            "ok": True,
+            "found": False,
+            "name": "",
+            "member_id": "",
+        })
+
+    return jsonify({
+        "ok": True,
+        "found": True,
+        "name": member.get("name") or "",
+        "member_id": member.get("member_id") or "",
+        "english_name": member.get("english_name") or "",
+    })
+
+
 @finance_bp.route("/monthly_fee_batch/<branch>", methods=["GET", "POST"])
 def monthly_fee_batch(branch):
 
@@ -7151,7 +7222,7 @@ def monthly_fee_batch(branch):
 
     raw_text = request.form.get("raw_text", "").strip()
 
-    next_receipt_no = get_next_receipt_no(
+    next_receipt_source = get_next_receipt_no(
         branch,
         "月费",
     )
@@ -7160,7 +7231,27 @@ def monthly_fee_batch(branch):
         branch,
         "月费",
     )
-    next_receipt_raw = next_receipt_no.replace(branch, "", 1)
+
+    def normalize_monthly_receipt_no(value):
+        """统一月费收条为 CHE0001564 / STW0001564。"""
+        value = str(value or "").strip().upper()
+        digits = "".join(ch for ch in value if ch.isdigit())
+
+        if not digits:
+            return ""
+
+        return branch + str(int(digits)).zfill(7)
+
+    # 即使 finance_receipt_books 仍保存旧 prefix（例如 CHE-），
+    # 这个月费工作台也只显示和保存无横线的统一格式。
+    next_receipt_no = normalize_monthly_receipt_no(
+        next_receipt_source
+    )
+    next_receipt_raw = (
+        next_receipt_no[len(branch):]
+        if next_receipt_no.startswith(branch)
+        else ""
+    )
 
     receipt_start_raw = request.form.get(
         "receipt_start",
@@ -7170,13 +7261,9 @@ def monthly_fee_batch(branch):
     if not receipt_start_raw:
         receipt_start_raw = next_receipt_raw
 
-    if receipt_start_raw.isdigit():
-        receipt_start = (
-            branch
-            + str(int(receipt_start_raw)).zfill(7)
-        )
-    else:
-        receipt_start = receipt_start_raw
+    receipt_start = normalize_monthly_receipt_no(
+        receipt_start_raw
+    )
 
     default_receipt_date = (
         request.form.get("receipt_date")
@@ -7208,19 +7295,16 @@ def monthly_fee_batch(branch):
     default_amount = money(50)
 
     def make_receipt_no(start_no, index):
-        match = re.match(r"^([A-Z]+)(\d+)$", start_no)
+        match = re.match(rf"^{branch}(\d+)$", start_no)
 
         if not match:
             return ""
 
-        prefix = match.group(1)
-        number_text = match.group(2)
+        start_number = int(match.group(1))
 
         return (
-            prefix
-            + str(int(number_text) + index).zfill(
-                len(number_text)
-            )
+            branch
+            + str(start_number + index).zfill(7)
         )
 
     def parse_date_header(line):
@@ -7690,7 +7774,7 @@ def monthly_fee_batch(branch):
 
                     for row in data_rows:
                         member_id = row["member_id"]
-                        branch = (
+                        row_branch = (
                             "STW"
                             if str(member_id).startswith("STW-")
                             else "CHE"
@@ -7734,7 +7818,7 @@ def monthly_fee_batch(branch):
                             "income",
                             get_fund_account(
                                 "月费",
-                                branch=branch
+                                branch=row_branch
                             ),
                             row["payment_date"],
                             row["receipt_date"],
@@ -7957,13 +8041,12 @@ body{background:#eef4fa}
         <textarea id="raw_text" class="batch-textarea" name="raw_text" placeholder="单笔加入会自动逐行排列；每位会员一行。也可直接贴上多位会员资料。&#10;&#10;例如：&#10;@2026-07-23&#10;108 50&#10;188 100">{{ raw_text }}</textarea>
         <div class="receipt-check">
           <div class="receipt-head"><span>🧾 收条号码对照</span><span id="receipt_check_next">下一张：{{ next_receipt_no }}</span></div>
-          <div class="receipt-wrap"><table class="receipt-table"><thead><tr><th>收条号码</th><th>输入资料</th><th>金额</th></tr></thead><tbody id="receipt_check_body"></tbody></table><div id="receipt_check_empty" class="receipt-empty">加入会员后，这里会自动显示对应收条号码。</div></div>
+          <div class="receipt-wrap"><table class="receipt-table"><thead><tr><th>收条号码</th><th>会员编号</th><th>姓名</th><th>金额</th></tr></thead><tbody id="receipt_check_body"></tbody></table><div id="receipt_check_empty" class="receipt-empty">加入会员后，这里会自动显示对应收条号码。</div></div>
           <div id="receipt_check_summary" class="receipt-summary">共 0 张 · RM 0.00</div>
         </div>
         <div class="payment-grid">
           <div><label class="form-label">付款方式</label><select id="payment_method" class="form-select" name="payment_method" onchange="togglePaymentDate()"><option value="现金" {% if payment_method=='现金' %}selected{% endif %}>现金</option><option value="银行过账" {% if payment_method=='银行过账' %}selected{% endif %}>银行过账</option></select></div>
           <div id="payment_date_box"><label class="form-label">银行付款日期</label><input class="form-input" name="payment_date" type="date" value="{{ bank_payment_date }}"></div>
-          <div class="full"><label class="form-label">批量清单默认月费 RM</label><input id="default_amount" class="form-input" name="default_amount" type="number" step="50" min="50" value="50"><span class="field-help">清单只写编号或姓名时，默认使用 RM50。</span></div>
         </div>
         <div class="actions {% if not (preview_rows and not has_preview_error) %}single{% endif %}"><button class="preview-btn" type="submit" name="action" value="preview">👁️ 预览资料</button>{% if preview_rows and not has_preview_error %}<button class="confirm-btn" type="submit" name="action" value="confirm" onclick="return confirm('确定全部入账？')">✅ 确认全部入账</button>{% endif %}</div>
       </section>
@@ -7991,11 +8074,57 @@ function changeQuickAmount(delta){const i=document.getElementById("quick_amount"
 function setMonthMultiplier(n,btn){document.getElementById("quick_amount").value=n*50;document.querySelectorAll(".multi-btn").forEach(b=>b.classList.toggle("active",b===btn));document.getElementById("quick_member_keyword").focus()}
 function parseQuick(v){const text=(v||"").trim();let m=text.match(/^(.+?)[*,，]\s*(\d{1,2})$/);if(m)return{keyword:m[1].trim(),amount:Number(m[2])*50};m=text.match(/^(.+?)\s+(\d{1,2})$/);if(m&&Number(m[2])>=1&&Number(m[2])<=50)return{keyword:m[1].trim(),amount:Number(m[2])*50};return{keyword:text,amount:null}}
 function addQuickMember(){const k=document.getElementById("quick_member_keyword"),a=document.getElementById("quick_amount"),p=parseQuick(k.value);if(!p.keyword){alert("请输入会员编号或姓名");k.focus();return}const amount=p.amount!==null?p.amount:(Number(a.value)||50),line=p.keyword+" "+amount;appendBatchLine(line);k.value="";a.value="50";document.querySelectorAll(".multi-btn").forEach(b=>b.classList.toggle("active",b.dataset.months==="1"));k.focus();refreshReceiptCheck()}
-function receiptFormat(){const s="{{ next_receipt_no }}",m=s.match(/^(.*?)(\d+)$/);return m?{p:m[1],w:m[2].length}:{p:"{{ branch }}",w:7}}
-function receiptNo(n){const f=receiptFormat();return f.p+String(n).padStart(f.w,"0")}
-function refreshReceiptCheck(){const t=document.getElementById("raw_text"),startEl=document.querySelector('[name="receipt_start"]'),def=document.getElementById("default_amount"),body=document.getElementById("receipt_check_body"),empty=document.getElementById("receipt_check_empty"),sum=document.getElementById("receipt_check_summary"),next=document.getElementById("receipt_check_next");const start=parseInt(startEl.value,10),rows=[];let total=0;t.value.split(/\r?\n/).forEach(raw=>{const line=raw.trim();if(!line||line.startsWith("@"))return;let amount=Number(def.value)||50,m=line.match(/^(.+?)[*,，]\s*(\d{1,2})$/);if(m)amount=Number(m[2])*50;else{const parts=line.split(/\s+/),v=Number(parts[parts.length-1]);if(parts.length>1&&Number.isFinite(v))amount=(Number.isInteger(v)&&v>=1&&v<=49)?v*50:v}rows.push({line,amount});total+=amount});body.innerHTML="";if(Number.isFinite(start))rows.forEach((r,i)=>{const tr=document.createElement("tr");tr.innerHTML="<td>"+receiptNo(start+i)+"</td><td>"+r.line.replace(/</g,"&lt;").replace(/>/g,"&gt;")+"</td><td>RM "+r.amount.toFixed(2)+"</td>";body.appendChild(tr)});empty.style.display=rows.length?"none":"block";next.textContent="下一张："+(Number.isFinite(start)?receiptNo(start+rows.length):"—");sum.textContent="共 "+rows.length+" 张 · RM "+total.toFixed(2)}
+const monthlyMemberCache = new Map();
+function receiptNo(n){return "{{ branch }}"+String(n).padStart(7,"0")}
+function escapeHtml(value){return String(value||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}
+function parseReceiptRow(line){
+    let amount=50,keyword=line,m=line.match(/^(.+?)[*,，]\s*(\d{1,2})$/);
+    if(m){keyword=m[1].trim();amount=Number(m[2])*50}
+    else{
+        const parts=line.split(/\s+/),v=Number(parts[parts.length-1]);
+        if(parts.length>1&&Number.isFinite(v)){
+            keyword=parts.slice(0,-1).join(" ").trim();
+            amount=(Number.isInteger(v)&&v>=1&&v<=49)?v*50:v
+        }
+    }
+    return{line,keyword,amount}
+}
+async function lookupMonthlyMember(keyword){
+    const key=String(keyword||"").trim().toUpperCase();
+    if(!key)return null;
+    if(monthlyMemberCache.has(key))return monthlyMemberCache.get(key);
+    try{
+        const url="{{ url_for('finance.monthly_member_lookup') }}?branch={{ branch }}&q="+encodeURIComponent(keyword);
+        const res=await fetch(url,{headers:{"Accept":"application/json"}});
+        const data=await res.json();
+        const result=(data&&data.ok&&data.found)?data:null;
+        monthlyMemberCache.set(key,result);
+        return result
+    }catch(error){return null}
+}
+function refreshReceiptCheck(){
+    const t=document.getElementById("raw_text"),startEl=document.querySelector('[name="receipt_start"]'),body=document.getElementById("receipt_check_body"),empty=document.getElementById("receipt_check_empty"),sum=document.getElementById("receipt_check_summary"),next=document.getElementById("receipt_check_next");
+    const start=parseInt(String(startEl.value||"").replace(/\D/g,""),10),rows=[];let total=0;
+    t.value.split(/\r?\n/).forEach(raw=>{const line=raw.trim();if(!line||line.startsWith("@"))return;const row=parseReceiptRow(line);rows.push(row);total+=row.amount});
+    body.innerHTML="";
+    if(Number.isFinite(start))rows.forEach((r,i)=>{
+        const tr=document.createElement("tr");
+        const nameCell=document.createElement("td");
+        nameCell.textContent="查询中…";
+        tr.innerHTML="<td>"+receiptNo(start+i)+"</td><td>"+escapeHtml(r.keyword)+"</td>";
+        tr.appendChild(nameCell);
+        const amountCell=document.createElement("td");amountCell.textContent="RM "+r.amount.toFixed(2);tr.appendChild(amountCell);body.appendChild(tr);
+        lookupMonthlyMember(r.keyword).then(member=>{
+            if(member){nameCell.innerHTML="<strong>"+escapeHtml(member.name)+"</strong><br><span style='color:#64748b;font-size:12px'>"+escapeHtml(member.member_id)+"</span>"}
+            else{nameCell.innerHTML="<span style='color:#b91c1c'>找不到会员</span>"}
+        })
+    });
+    empty.style.display=rows.length?"none":"block";
+    next.textContent="下一张："+(Number.isFinite(start)?receiptNo(start+rows.length):"—");
+    sum.textContent="共 "+rows.length+" 张 · RM "+total.toFixed(2)
+}
 function togglePaymentDate(){const m=document.getElementById("payment_method"),b=document.getElementById("payment_date_box");b.style.display=m.value==="银行过账"?"block":"none"}
-document.addEventListener("DOMContentLoaded",()=>{const k=document.getElementById("quick_member_keyword"),status=document.getElementById("space_mode_status");let mode=false;function setMode(v){mode=v;status.classList.toggle("active",v);status.textContent=v?"金额快捷模式：请按 1～0（1=RM50，2=RM100…0=RM500）":"输入编号后按 Space，再按 1～0；例如 208 → Space → 2 → Enter = RM100"}k.addEventListener("keydown",e=>{if(e.key===" "&&k.value.trim()&&!mode){e.preventDefault();setMode(true);return}if(mode&&/^[0-9]$/.test(e.key)){e.preventDefault();const n=e.key==="0"?10:Number(e.key),btn=document.querySelector('.multi-btn[data-months="'+n+'"]');setMonthMultiplier(n,btn);setMode(false);return}if(e.key==="Enter"){e.preventDefault();setMode(false);addQuickMember()}if(e.key==="Escape"&&mode){e.preventDefault();setMode(false)}});document.getElementById("batch_insert_date").addEventListener("change",()=>updateDateStatus());document.getElementById("raw_text").addEventListener("input",refreshReceiptCheck);document.querySelector('[name="receipt_start"]').addEventListener("input",refreshReceiptCheck);document.getElementById("default_amount").addEventListener("input",refreshReceiptCheck);document.addEventListener("keydown",e=>{if(e.key==="F2"){e.preventDefault();insertBatchDate()}else if(e.ctrlKey&&e.key==="Enter"){e.preventDefault();document.querySelector('button[value="preview"]').click()}});togglePaymentDate();updateDateStatus();refreshReceiptCheck()});
+document.addEventListener("DOMContentLoaded",()=>{const k=document.getElementById("quick_member_keyword"),status=document.getElementById("space_mode_status");let mode=false;function setMode(v){mode=v;status.classList.toggle("active",v);status.textContent=v?"金额快捷模式：请按 1～0（1=RM50，2=RM100…0=RM500）":"输入编号后按 Space，再按 1～0；例如 208 → Space → 2 → Enter = RM100"}k.addEventListener("keydown",e=>{if(e.key===" "&&k.value.trim()&&!mode){e.preventDefault();setMode(true);return}if(mode&&/^[0-9]$/.test(e.key)){e.preventDefault();const n=e.key==="0"?10:Number(e.key),btn=document.querySelector('.multi-btn[data-months="'+n+'"]');setMonthMultiplier(n,btn);setMode(false);return}if(e.key==="Enter"){e.preventDefault();setMode(false);addQuickMember()}if(e.key==="Escape"&&mode){e.preventDefault();setMode(false)}});document.getElementById("batch_insert_date").addEventListener("change",()=>updateDateStatus());document.getElementById("raw_text").addEventListener("input",refreshReceiptCheck);document.querySelector('[name="receipt_start"]').addEventListener("input",refreshReceiptCheck);document.addEventListener("keydown",e=>{if(e.key==="F2"){e.preventDefault();insertBatchDate()}else if(e.ctrlKey&&e.key==="Enter"){e.preventDefault();document.querySelector('button[value="preview"]').click()}});togglePaymentDate();updateDateStatus();refreshReceiptCheck()});
 </script>
 </body>
 </html>
@@ -8009,7 +8138,6 @@ document.addEventListener("DOMContentLoaded",()=>{const k=document.getElementByI
         bank_payment_date=bank_payment_date,
         current_book_no=current_book_no,
         payment_method=payment_method,
-        default_amount=50,
         preview_rows=preview_rows,
         has_preview_error=any(row.get("error") for row in preview_rows),
     )
