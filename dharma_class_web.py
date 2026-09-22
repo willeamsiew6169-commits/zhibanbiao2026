@@ -21,250 +21,6 @@ dharma_class_bp = Blueprint(
 )
 
 
-# =========================================================
-# 学生资料密码保护
-# =========================================================
-# 简单密码版：以后要换密码，只需要修改下面这一行。
-DHARMA_STUDENT_PASSWORD = "FxbChe3832#"
-
-
-def verify_dharma_student_password(password):
-    return password == DHARMA_STUDENT_PASSWORD
-
-
-def dharma_student_access_required(view_func):
-    """学生敏感资料统一入口保护。"""
-
-    @wraps(view_func)
-    def wrapped_view(*args, **kwargs):
-
-        if not session.get("dharma_student_access"):
-
-            next_url = request.full_path
-
-            if next_url.endswith("?"):
-                next_url = next_url[:-1]
-
-            return redirect(
-                url_for(
-                    "dharma_class.class_students_login",
-                    next=next_url
-                )
-            )
-
-        return view_func(*args, **kwargs)
-
-    return wrapped_view
-
-
-@dharma_class_bp.route("/students/login", methods=["GET", "POST"])
-def class_students_login():
-
-    next_url = request.values.get("next", "").strip()
-
-    if session.get("dharma_student_access"):
-
-        if next_url.startswith("/class/"):
-            return redirect(next_url)
-
-        return redirect(
-            url_for("dharma_class.class_students")
-        )
-
-    if request.method == "POST":
-
-        password = request.form.get("password", "")
-
-        if verify_dharma_student_password(password):
-
-            session["dharma_student_access"] = True
-            session.permanent = False
-
-            if next_url.startswith("/class/"):
-                return redirect(next_url)
-
-            return redirect(
-                url_for("dharma_class.class_students")
-            )
-
-        flash("密码错误，请重新输入。", "bad")
-
-    return render_template_string("""
-<!doctype html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-
-<meta
-    name="viewport"
-    content="width=device-width, initial-scale=1"
->
-
-<title>学生资料验证</title>
-
-<link
-    rel="stylesheet"
-    href="/static/css/toolbox.css"
->
-
-<style>
-
-.student-login-card {
-    max-width: 620px;
-    margin: 70px auto;
-}
-
-.student-login-icon {
-    text-align: center;
-    font-size: 58px;
-    margin-bottom: 10px;
-}
-
-.student-login-note {
-    margin: 16px 0 22px;
-    padding: 14px 16px;
-    border-radius: 14px;
-    background: #f8fafc;
-    color: #666;
-    line-height: 1.6;
-}
-
-.student-password {
-    width: 100%;
-    min-height: 58px;
-    box-sizing: border-box;
-    padding: 10px 15px;
-    border: 1px solid #d8dde5;
-    border-radius: 14px;
-    font-size: 20px;
-}
-
-.student-password:focus {
-    outline: none;
-    border-color: #3b82f6;
-    box-shadow: 0 0 0 3px rgba(59,130,246,.12);
-}
-
-</style>
-</head>
-
-<body>
-<div class="page">
-
-    <div class="card student-login-card">
-
-        <div class="student-login-icon">
-            🔐
-        </div>
-
-        <h1
-            class="page-title"
-            style="text-align:center;"
-        >
-            学生资料验证
-        </h1>
-
-        <p
-            class="page-subtitle"
-            style="text-align:center;"
-        >
-            学生个人资料属于受保护资料。
-        </p>
-
-        <div class="student-login-note">
-            请输入佛学班负责人密码后才可进入学生名单、
-            学生档案、编辑、导入及导出功能。
-        </div>
-
-        {% with messages =
-            get_flashed_messages(with_categories=true) %}
-
-            {% for category, message in messages %}
-
-                <div
-                    style="
-                        margin-bottom:14px;
-                        padding:12px 14px;
-                        border-radius:12px;
-                        background:#fee2e2;
-                        color:#991b1b;
-                        font-weight:700;
-                    "
-                >
-                    {{ message }}
-                </div>
-
-            {% endfor %}
-
-        {% endwith %}
-
-        <form method="post">
-
-            <input
-                type="hidden"
-                name="next"
-                value="{{ next_url }}"
-            >
-
-            <input
-                class="student-password"
-                type="password"
-                name="password"
-                placeholder="请输入负责人密码"
-                autocomplete="current-password"
-                required
-                autofocus
-            >
-
-            <div
-                class="btn-row"
-                style="margin-top:18px;"
-            >
-
-                <button
-                    class="btn-tool btn-primary"
-                    type="submit"
-                >
-                    🔓 验证并进入
-                </button>
-
-            </div>
-
-        </form>
-
-        <div class="btn-row">
-
-            <a
-                class="btn-tool btn-secondary"
-                href="{{ url_for(
-                    'dharma_class.class_admin'
-                ) }}"
-            >
-                ⬅ 返回负责人中心
-            </a>
-
-        </div>
-
-    </div>
-
-</div>
-</body>
-</html>
-""",
-        next_url=next_url
-    )
-
-
-@dharma_class_bp.route("/students/logout")
-def class_students_logout():
-
-    session.pop("dharma_student_access", None)
-
-    return redirect(
-        url_for("dharma_class.class_admin")
-    )
-
-
 STATUS_LABELS = {
     "present": "出席",
     "absent": "缺席",
@@ -300,7 +56,6 @@ AUDIT_FIELD_LABELS = {
     "gender": "性别",
     "birth_year": "出生年份",
     "parent_name": "父／母／监护人",
-    "parent_phone": "联系电话",
     "group_id": "组别",
     "student_status": "学生状态",
 }
@@ -1204,7 +959,7 @@ def class_admin():
                 <a
                     class="admin-tool tool-student"
                     href="{{ url_for(
-                        'dharma_class.class_students_login'
+                        'dharma_class.class_students'
                     ) }}"
                 >
                     <div class="admin-tool-icon">
@@ -4298,7 +4053,6 @@ def class_lessons():
     )
 
 @dharma_class_bp.route("/students")
-@dharma_student_access_required
 def class_students():
    
     current_year = datetime.now(
@@ -4352,12 +4106,10 @@ def class_students():
                         s.name ilike %s
                         or coalesce(s.english_name, '') ilike %s
                         or coalesce(s.parent_name, '') ilike %s
-                        or coalesce(s.parent_phone, '') ilike %s
                     )
                 """
 
                 params.extend([
-                    like,
                     like,
                     like,
                     like
@@ -4687,7 +4439,6 @@ body{
                             <th>年龄</th>
                             <th>组别</th>
                             <th>父／母／监护人</th>
-                            <th>联系电话</th>
                             <th>备注</th>
                             <th>操作</th>
                         </tr>
@@ -4728,10 +4479,6 @@ body{
 
                             <td class="student-contact">
                                 {{ s.parent_name or "—" }}
-                            </td>
-
-                            <td class="student-contact">
-                                {{ s.parent_phone or "—" }}
                             </td>
 
                             <td class="student-remark">
@@ -4824,7 +4571,6 @@ function goTop() {
 
 
 @dharma_class_bp.route("/students/inactive")
-@dharma_student_access_required
 def class_students_inactive():
 
     with get_conn() as conn:
@@ -5016,7 +4762,6 @@ def class_students_inactive():
     "/students/<int:student_id>/restore",
     methods=["POST"]
 )
-@dharma_student_access_required
 def class_students_restore(student_id):
 
     with get_conn() as conn:
@@ -5047,7 +4792,6 @@ def class_students_restore(student_id):
 
 
 @dharma_class_bp.route("/students/search")
-@dharma_student_access_required
 def class_student_search():
 
     q = request.args.get("q", "").strip()
@@ -5083,7 +4827,6 @@ def class_student_search():
                             s.name ilike %s
                          or coalesce(s.english_name, '') ilike %s
                          or coalesce(s.parent_name, '') ilike %s
-                         or coalesce(s.parent_phone, '') ilike %s
                       )
                     order by
                         case when s.status = 'active' then 0 else 1 end,
@@ -5144,7 +4887,7 @@ def class_student_search():
     <div class="card">
         <h1 class="page-title">🔎 搜索学生个人档案</h1>
         <p class="page-subtitle">
-            可使用中文姓名、英文名、或联系电话搜索。
+            可使用中文姓名或英文名搜索。
         </p>
 
         <form method="get">
@@ -5198,8 +4941,6 @@ def class_student_search():
 
                             父／母／监护人：{{ s.parent_name or '—' }}<br>
 
-                            电话：{{ s.parent_phone or '—' }}<br>
-
                             状态：{{ s.status or '—' }}
 
                         </div>
@@ -5251,7 +4992,6 @@ def class_student_search():
 
 
 @dharma_class_bp.route("/student/<int:student_id>")
-@dharma_student_access_required
 def class_student_profile(student_id):
 
     malaysia_today = datetime.now(
@@ -5590,8 +5330,6 @@ def class_student_profile(student_id):
 
             父／母／监护人：{{ student.parent_name or '—' }}
             ｜
-            电话：{{ student.parent_phone or '—' }}
-            ｜
             状态：{{ student.status or '—' }}
 
             <br>
@@ -5778,7 +5516,6 @@ def class_student_profile(student_id):
 
 
 @dharma_class_bp.route("/student/<int:student_id>/export")
-@dharma_student_access_required
 def class_student_profile_export(student_id):
 
     malaysia_today = datetime.now(
@@ -5902,7 +5639,6 @@ def class_student_profile_export(student_id):
         ("性别", student["gender"] or "—"),
         ("出生年份", student["birth_year"] or "—"),
         ("父／母／监护人", student["parent_name"] or "—"),
-        ("联系电话", student["parent_phone"] or "—"),
         ("学生状态", student["status"] or "—"),
         ("备注", student["remark"] or "—"),
     ]
@@ -5979,7 +5715,6 @@ def class_student_profile_export(student_id):
 
 
 @dharma_class_bp.route("/students/add", methods=["GET", "POST"])
-@dharma_student_access_required
 def class_students_add():
 
     from datetime import datetime
@@ -6033,9 +5768,8 @@ def class_students_add():
                     "parent_name", ""
                 ).strip()
 
-                parent_phone = request.form.get(
-                    "parent_phone", ""
-                ).strip()
+                # 家长电话号码不再收集／显示。数据库字段保留兼容旧资料。
+                parent_phone = ""
 
                 group_id_text = request.form.get(
                     "group_id", ""
@@ -6261,18 +5995,7 @@ def class_students_add():
                 >
             </div>
 
-            <div class="form-group">
-                <label class="form-label">
-                    父／母／监护人电话
-                </label>
-
-                <input
-                    class="form-input"
-                    name="parent_phone"
-                    value="{{ form_data.parent_phone }}"
-                    inputmode="tel"
-                >
-            </div>
+            
 
             <div class="form-group">
                 <label class="form-label">
@@ -6353,7 +6076,6 @@ def class_students_add():
     "/students/edit/<int:student_id>",
     methods=["GET", "POST"]
 )
-@dharma_student_access_required
 def class_students_edit(student_id):
 
     malaysia_now = datetime.now(
@@ -6595,10 +6317,8 @@ def class_students_edit(student_id):
                     ""
                 ).strip()
 
-                parent_phone = request.form.get(
-                    "parent_phone",
-                    ""
-                ).strip()
+                # 家长电话号码不再显示／编辑；保留数据库原值，避免旧资料被意外清空。
+                parent_phone = student.get("parent_phone") or ""
 
                 group_id_text = request.form.get(
                     "group_id",
@@ -6879,19 +6599,7 @@ def class_students_edit(student_id):
                 >
             </div>
 
-            <div class="form-group">
-                <label class="form-label">
-                    父／母／监护人电话
-                </label>
-
-                <input
-                    class="form-input"
-                    name="parent_phone"
-                    value="{{ student.parent_phone or '' }}"
-                    placeholder="例如：0123456789"
-                    inputmode="tel"
-                >
-            </div>
+            
 
             <div class="form-group">
                 <label class="form-label">
@@ -8838,7 +8546,6 @@ def class_export_monthly_report():
     )
 
 @dharma_class_bp.route("/students/import", methods=["GET", "POST"])
-@dharma_student_access_required
 def class_students_import():
 
     result = None
@@ -8892,9 +8599,9 @@ def class_students_import():
                             birth_year = None
 
                     parent_name = str(row[5]).strip() if len(row) > 5 and row[5] else ""
-                    parent_phone = str(row[6]).strip() if len(row) > 6 and row[6] else ""
-                    group_name = str(row[7]).strip() if len(row) > 7 and row[7] else ""
-                    remark = str(row[8]).strip() if len(row) > 8 and row[8] else ""
+                    parent_phone = ""
+                    group_name = str(row[6]).strip() if len(row) > 6 and row[6] else ""
+                    remark = str(row[7]).strip() if len(row) > 7 and row[7] else ""
 
                     if not name:
                         blank += 1
@@ -8932,17 +8639,13 @@ def class_students_import():
                         )
                         continue
 
-                    # 重复检查：中文姓名 + 家长电话
+                    # 家长电话已取消，因此以中文姓名检查重复。
                     cur.execute("""
                         select id
                         from dharma_students
                         where name = %s
-                        and coalesce(parent_phone, '') = %s
                         limit 1
-                    """, (
-                        name,
-                        parent_phone or ""
-                    ))
+                    """, (name,))
 
                     exists = cur.fetchone()
 
@@ -9020,7 +8723,7 @@ def class_students_import():
 
         <div class="empty-state" style="text-align:left;">
             Excel 第一行标题请使用：<br><br>
-            中文姓名｜家长姓名｜家长电话｜组别｜备注<br><br>
+            中文姓名｜英文名｜性别｜出生年份｜家长姓名｜组别｜备注<br><br>
             组别目前只接受：低年组、高年组、少年组
         </div>
 
@@ -9118,7 +8821,6 @@ def class_students_import():
 """, result=result)
 
 @dharma_class_bp.route("/students/template")
-@dharma_student_access_required
 def class_students_template():
 
     wb = Workbook()
@@ -9131,7 +8833,6 @@ def class_students_template():
         "性别",
         "出生年份",
         "父／母／监护人姓名",
-        "父／母／监护人电话",
         "组别",
         "备注"
     ]
@@ -9145,7 +8846,6 @@ def class_students_template():
         "男",
         2016,
         "张爸爸",
-        "0123456789",
         "低年组",
         ""
     ])
@@ -9156,7 +8856,6 @@ def class_students_template():
         "女",
         2014,
         "李妈妈",
-        "01122334455",
         "高年组",
         ""
     ])
@@ -9191,9 +8890,8 @@ def class_students_template():
         "C":10,
         "D":12,
         "E":22,
-        "F":18,
-        "G":15,
-        "H":25,
+        "F":15,
+        "G":25,
     }
 
     for col, width in widths.items():
@@ -9223,7 +8921,7 @@ def class_students_template():
     )
 
     ws.add_data_validation(group_dv)
-    group_dv.add("G2:G500")
+    group_dv.add("F2:F500")
 
     #
     # 冻结标题
@@ -9243,7 +8941,6 @@ def class_students_template():
     )
 
 @dharma_class_bp.route("/students/export")
-@dharma_student_access_required
 def class_students_export():
 
     with get_conn() as conn:
@@ -9253,7 +8950,6 @@ def class_students_export():
                     s.name,
                     s.english_name,
                     s.parent_name,
-                    s.parent_phone,
                     g.name as group_name,
                     s.status,
                     s.remark
@@ -9271,7 +8967,6 @@ def class_students_export():
         "中文姓名",
         "英文名",
         "家长姓名",
-        "家长电话",
         "组别",
         "状态",
         "备注"
@@ -9282,7 +8977,6 @@ def class_students_export():
             r["name"] or "",
             r["english_name"] or "",
             r["parent_name"] or "",
-            r["parent_phone"] or "",
             r["group_name"] or "",
             r["status"] or "",
             r["remark"] or ""

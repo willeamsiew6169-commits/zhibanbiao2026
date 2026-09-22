@@ -7221,6 +7221,10 @@ def monthly_fee_batch(branch):
     preview_rows = []
 
     raw_text = request.form.get("raw_text", "").strip()
+    batch_row_dates_raw = request.form.get("batch_row_dates", "").strip()
+    batch_row_dates = [
+        x.strip() for x in batch_row_dates_raw.split(",") if x.strip()
+    ]
 
     next_receipt_source = get_next_receipt_no(
         branch,
@@ -7332,6 +7336,7 @@ def monthly_fee_batch(branch):
         rows = []
         current_receipt_date = default_receipt_date
         receipt_index = 0
+        data_row_index = 0
         today_date = date.today()
 
         for line_no, original_line in enumerate(
@@ -7371,6 +7376,20 @@ def monthly_fee_batch(branch):
                     current_receipt_date = parsed_date
 
                 continue
+
+            # 新版工作台不需要手动输入 @日期。
+            # 每一笔的日期由前端隐藏字段 batch_row_dates 保存。
+            if data_row_index < len(batch_row_dates):
+                saved_row_date = batch_row_dates[data_row_index]
+                try:
+                    current_receipt_date = date.fromisoformat(
+                        saved_row_date
+                    ).isoformat()
+                except ValueError:
+                    current_receipt_date = default_receipt_date
+            else:
+                current_receipt_date = default_receipt_date
+            data_row_index += 1
 
             # 支持普通金额与月数倍数：
             # 108 -> 默认 RM50；108 100 -> RM100
@@ -7970,7 +7989,7 @@ body{background:#eef4fa}
 <div class="finance-page">
   <div class="topbar">
     <div class="title-row"><a class="btn-tool btn-secondary" href="{{ url_for('finance.finance_income_menu') }}">← 返回</a><h1>💳 {{ branch }} 月费录入</h1><button class="help-btn" type="button" onclick="document.getElementById('usageHelp').showModal()">❓ 使用说明</button></div>
-    <div class="shortcut-bar">F2 插入日期｜编号 + Space + 1～0｜Enter 加入｜Ctrl+Enter 预览</div>
+    <div class="shortcut-bar">编号 + Space + 1～0｜Enter 加入｜Ctrl+Enter 预览</div>
   </div>
   <dialog id="usageHelp" class="help-dialog">
     <div class="help-card">
@@ -7979,7 +7998,6 @@ body{background:#eef4fa}
         <button class="help-close" type="button" onclick="document.getElementById('usageHelp').close()">×</button>
       </div>
       <div class="help-grid">
-        <div class="help-key">F2</div><div>把当前选择的收条日期插入右边清单。</div>
         <div class="help-key">编号 → Space</div><div>进入金额快捷模式。</div>
         <div class="help-key">1～9、0</div><div>选择 RM50～RM500；例如 2 = RM100，0 = RM500。</div>
         <div class="help-key">Enter</div><div>把当前会员加入待录入清单。</div>
@@ -8016,9 +8034,8 @@ body{background:#eef4fa}
               <button type="button" onclick="changeBatchDate(-1)">←</button>
               <input id="batch_insert_date" name="receipt_date" type="date" value="{{ default_receipt_date }}">
               <button type="button" onclick="changeBatchDate(1)">→</button>
-              <button class="f2" type="button" onclick="insertBatchDate()">F2 插入</button>
             </div>
-            <div id="batch_date_status" class="date-status">当前选择：{{ default_receipt_date }}</div>
+            <div id="batch_date_status" class="date-status">当前日期：{{ default_receipt_date }}；之后加入的记录会使用这个日期。</div>
           </div>
         </div>
         <div class="quick-section">
@@ -8038,10 +8055,11 @@ body{background:#eef4fa}
 
       <section class="panel">
         <h2 class="panel-title"><span class="badge">2</span>待录入清单与付款资料</h2>
-        <textarea id="raw_text" class="batch-textarea" name="raw_text" placeholder="单笔加入会自动逐行排列；每位会员一行。也可直接贴上多位会员资料。&#10;&#10;例如：&#10;@2026-07-23&#10;108 50&#10;188 100">{{ raw_text }}</textarea>
+        <textarea id="raw_text" class="batch-textarea" name="raw_text" placeholder="单笔加入会自动逐行排列；每位会员一行。也可直接贴上多位会员资料。&#10;&#10;例如：&#10;108 50&#10;188 100">{{ raw_text }}</textarea>
+        <input type="hidden" id="batch_row_dates" name="batch_row_dates" value="{{ batch_row_dates_raw }}">
         <div class="receipt-check">
           <div class="receipt-head"><span>🧾 收条号码对照</span><span id="receipt_check_next">下一张：{{ next_receipt_no }}</span></div>
-          <div class="receipt-wrap"><table class="receipt-table"><thead><tr><th>收条号码</th><th>会员编号</th><th>姓名</th><th>金额</th></tr></thead><tbody id="receipt_check_body"></tbody></table><div id="receipt_check_empty" class="receipt-empty">加入会员后，这里会自动显示对应收条号码。</div></div>
+          <div class="receipt-wrap"><table class="receipt-table"><thead><tr><th>收条号码</th><th>日期</th><th>会员编号</th><th>姓名</th><th>金额</th></tr></thead><tbody id="receipt_check_body"></tbody></table><div id="receipt_check_empty" class="receipt-empty">加入会员后，这里会自动显示对应收条号码。</div></div>
           <div id="receipt_check_summary" class="receipt-summary">共 0 张 · RM 0.00</div>
         </div>
         <div class="payment-grid">
@@ -8059,17 +8077,23 @@ body{background:#eef4fa}
 </div>
 <script>
 function iso(d){return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")}
-function changeBatchDate(days){const i=document.getElementById("batch_insert_date");const d=i.value?new Date(i.value+"T00:00:00"):new Date();d.setDate(d.getDate()+days);i.value=iso(d);updateDateStatus()}
-function updateDateStatus(text){const i=document.getElementById("batch_insert_date"),s=document.getElementById("batch_date_status");if(s)s.textContent=text||("当前选择："+(i.value||"未选择")+"；按 F2 插入日期。")}
+function selectedReceiptDate(){const i=document.getElementById("batch_insert_date");return i&&i.value?i.value:"{{ default_receipt_date }}"}
+function changeBatchDate(days){const i=document.getElementById("batch_insert_date");const d=i.value?new Date(i.value+"T00:00:00"):new Date();d.setDate(d.getDate()+days);i.value=iso(d);updateDateStatus();}
+function updateDateStatus(){const i=document.getElementById("batch_insert_date"),s=document.getElementById("batch_date_status");if(s)s.textContent="当前日期："+(i.value||"未选择")+"；之后加入的记录会使用这个日期。"}
+let batchRowDates=[];
+function saveBatchRowDates(){const h=document.getElementById("batch_row_dates");if(h)h.value=batchRowDates.join(",")}
+function countDataRows(){return document.getElementById("raw_text").value.split(/\r?\n/).filter(x=>{const v=x.trim();return v&&!v.startsWith("@")} ).length}
+function syncBatchRowDates(){const count=countDataRows(),d=selectedReceiptDate();while(batchRowDates.length<count)batchRowDates.push(d);if(batchRowDates.length>count)batchRowDates=batchRowDates.slice(0,count);saveBatchRowDates()}
 function appendBatchLine(line){
     const t=document.getElementById("raw_text");
     const clean=String(line||"").trim();
     if(!clean)return;
     const existing=t.value.trimEnd();
     t.value=existing?existing+"\n"+clean:clean;
+    batchRowDates.push(selectedReceiptDate());
+    saveBatchRowDates();
     t.scrollTop=t.scrollHeight;
 }
-function insertBatchDate(){const i=document.getElementById("batch_insert_date"),t=document.getElementById("raw_text");if(!i.value)return alert("请先选择日期");const mark="@"+i.value,lines=t.value.split(/\r?\n/);let last="";for(let x=lines.length-1;x>=0;x--){if(lines[x].trim()){last=lines[x].trim();break}}if(last!==mark)appendBatchLine(mark);t.focus();updateDateStatus("✅ 已插入 "+mark);refreshReceiptCheck()}
 function changeQuickAmount(delta){const i=document.getElementById("quick_amount");i.value=Math.max(50,(Number(i.value)||50)+delta)}
 function setMonthMultiplier(n,btn){document.getElementById("quick_amount").value=n*50;document.querySelectorAll(".multi-btn").forEach(b=>b.classList.toggle("active",b===btn));document.getElementById("quick_member_keyword").focus()}
 function parseQuick(v){const text=(v||"").trim();let m=text.match(/^(.+?)[*,，]\s*(\d{1,2})$/);if(m)return{keyword:m[1].trim(),amount:Number(m[2])*50};m=text.match(/^(.+?)\s+(\d{1,2})$/);if(m&&Number(m[2])>=1&&Number(m[2])<=50)return{keyword:m[1].trim(),amount:Number(m[2])*50};return{keyword:text,amount:null}}
@@ -8104,14 +8128,15 @@ async function lookupMonthlyMember(keyword){
 }
 function refreshReceiptCheck(){
     const t=document.getElementById("raw_text"),startEl=document.querySelector('[name="receipt_start"]'),body=document.getElementById("receipt_check_body"),empty=document.getElementById("receipt_check_empty"),sum=document.getElementById("receipt_check_summary"),next=document.getElementById("receipt_check_next");
-    const start=parseInt(String(startEl.value||"").replace(/\D/g,""),10),rows=[];let total=0;
-    t.value.split(/\r?\n/).forEach(raw=>{const line=raw.trim();if(!line||line.startsWith("@"))return;const row=parseReceiptRow(line);rows.push(row);total+=row.amount});
+    syncBatchRowDates();
+    const start=parseInt(String(startEl.value||"").replace(/\D/g,""),10),rows=[];let total=0,rowIndex=0;
+    t.value.split(/\r?\n/).forEach(raw=>{const line=raw.trim();if(!line||line.startsWith("@"))return;const row=parseReceiptRow(line);row.receiptDate=batchRowDates[rowIndex]||selectedReceiptDate();rowIndex+=1;rows.push(row);total+=row.amount});
     body.innerHTML="";
     if(Number.isFinite(start))rows.forEach((r,i)=>{
         const tr=document.createElement("tr");
         const nameCell=document.createElement("td");
         nameCell.textContent="查询中…";
-        tr.innerHTML="<td>"+receiptNo(start+i)+"</td><td>"+escapeHtml(r.keyword)+"</td>";
+        tr.innerHTML="<td>"+receiptNo(start+i)+"</td><td>"+escapeHtml(r.receiptDate)+"</td><td>"+escapeHtml(r.keyword)+"</td>";
         tr.appendChild(nameCell);
         const amountCell=document.createElement("td");amountCell.textContent="RM "+r.amount.toFixed(2);tr.appendChild(amountCell);body.appendChild(tr);
         lookupMonthlyMember(r.keyword).then(member=>{
@@ -8124,7 +8149,10 @@ function refreshReceiptCheck(){
     sum.textContent="共 "+rows.length+" 张 · RM "+total.toFixed(2)
 }
 function togglePaymentDate(){const m=document.getElementById("payment_method"),b=document.getElementById("payment_date_box");b.style.display=m.value==="银行过账"?"block":"none"}
-document.addEventListener("DOMContentLoaded",()=>{const k=document.getElementById("quick_member_keyword"),status=document.getElementById("space_mode_status");let mode=false;function setMode(v){mode=v;status.classList.toggle("active",v);status.textContent=v?"金额快捷模式：请按 1～0（1=RM50，2=RM100…0=RM500）":"输入编号后按 Space，再按 1～0；例如 208 → Space → 2 → Enter = RM100"}k.addEventListener("keydown",e=>{if(e.key===" "&&k.value.trim()&&!mode){e.preventDefault();setMode(true);return}if(mode&&/^[0-9]$/.test(e.key)){e.preventDefault();const n=e.key==="0"?10:Number(e.key),btn=document.querySelector('.multi-btn[data-months="'+n+'"]');setMonthMultiplier(n,btn);setMode(false);return}if(e.key==="Enter"){e.preventDefault();setMode(false);addQuickMember()}if(e.key==="Escape"&&mode){e.preventDefault();setMode(false)}});document.getElementById("batch_insert_date").addEventListener("change",()=>updateDateStatus());document.getElementById("raw_text").addEventListener("input",refreshReceiptCheck);document.querySelector('[name="receipt_start"]').addEventListener("input",refreshReceiptCheck);document.addEventListener("keydown",e=>{if(e.key==="F2"){e.preventDefault();insertBatchDate()}else if(e.ctrlKey&&e.key==="Enter"){e.preventDefault();document.querySelector('button[value="preview"]').click()}});togglePaymentDate();updateDateStatus();refreshReceiptCheck()});
+document.addEventListener("DOMContentLoaded",()=>{const k=document.getElementById("quick_member_keyword"),status=document.getElementById("space_mode_status");let mode=false;function setMode(v){mode=v;status.classList.toggle("active",v);status.textContent=v?"金额快捷模式：请按 1～0（1=RM50，2=RM100…0=RM500）":"输入编号后按 Space，再按 1～0；例如 208 → Space → 2 → Enter = RM100"}k.addEventListener("keydown",e=>{if(e.key===" "&&k.value.trim()&&!mode){e.preventDefault();setMode(true);return}if(mode&&/^[0-9]$/.test(e.key)){e.preventDefault();const n=e.key==="0"?10:Number(e.key),btn=document.querySelector('.multi-btn[data-months="'+n+'"]');setMonthMultiplier(n,btn);setMode(false);return}if(e.key==="Enter"){e.preventDefault();setMode(false);addQuickMember()}if(e.key==="Escape"&&mode){e.preventDefault();setMode(false)}});document.getElementById("batch_insert_date").addEventListener("change",()=>updateDateStatus());document.getElementById("raw_text").addEventListener("input",refreshReceiptCheck);document.querySelector('[name="receipt_start"]').addEventListener("input",refreshReceiptCheck);const hiddenDates=document.getElementById("batch_row_dates");batchRowDates=(hiddenDates&&hiddenDates.value?hiddenDates.value.split(",").filter(Boolean):[]);
+const rawText=document.getElementById("raw_text");rawText.addEventListener("input",()=>{syncBatchRowDates();refreshReceiptCheck()});
+const dateInput=document.getElementById("batch_insert_date");dateInput.addEventListener("change",()=>{updateDateStatus();if(countDataRows()===0){batchRowDates=[];saveBatchRowDates()}refreshReceiptCheck()});
+document.addEventListener("keydown",e=>{if(e.ctrlKey&&e.key==="Enter"){e.preventDefault();document.querySelector('button[value="preview"]').click()}});togglePaymentDate();updateDateStatus();syncBatchRowDates();refreshReceiptCheck()});
 </script>
 </body>
 </html>
@@ -8132,6 +8160,7 @@ document.addEventListener("DOMContentLoaded",()=>{const k=document.getElementByI
         branch=branch,
         message=message,
         raw_text=raw_text,
+        batch_row_dates_raw=batch_row_dates_raw,
         receipt_start_raw=receipt_start_raw,
         next_receipt_no=next_receipt_no,
         default_receipt_date=default_receipt_date,
