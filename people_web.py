@@ -1,5 +1,5 @@
 # people_web.py
-# 人员管理中心 v6.7.4
+# 人员管理中心 v6.8 Speed
 # 直接管理 Supabase/PostgreSQL 的 members + volunteers
 # 功能：总名单、搜索筛选、个人资料编辑、义工/月费状态切换、Excel 下载
 
@@ -24,9 +24,14 @@ from flask import (
     render_template_string,
     send_file,
     session,
+    g,
 )
 
 people_bp = Blueprint("people", __name__, url_prefix="/people")
+
+# 每个 Gunicorn worker 只做一次资料表结构检查，避免每个页面请求重复执行 DDL。
+_profile_tables_ready = False
+_admin_application_tables_ready = False
 
 
 def clean(v):
@@ -142,6 +147,12 @@ def volunteer_exists(volunteer_id):
     return bool(row)
 
 def load_people():
+    # Speed: 同一个 HTTP request 内只读取/合并一次人员名单。
+    # index -> filtered_people / find_person 等再次使用时直接复用，避免重复查询 Supabase。
+    cached = getattr(g, "_people_rows", None)
+    if cached is not None:
+        return cached
+
     members = db_query("""
         select member_id, name, english_name, phone, pin, branch,
                status, remark, member_status, ic_number
@@ -229,18 +240,82 @@ def load_people():
 
     rows = list(people.values())
     rows.sort(key=lambda x: natural_id_key(x["display_id"]))
+    g._people_rows = rows
     return rows
 
 
 def find_person(person_key):
-    for p in load_people():
-        if p["key"] == person_key:
-            return p
+    """Speed: 单人页面按编号精确查询，不再为了一个人载入整张 members/volunteers。"""
+    key = clean(person_key)
+    if not key or ":" not in key:
+        return None
+    kind, raw_id = key.split(":", 1)
+    raw_id = clean(raw_id)
+
+    if kind.upper() == "M":
+        m = db_query("""
+            select member_id,name,english_name,phone,pin,branch,status,remark,member_status,ic_number
+            from members where upper(member_id)=upper(%s) limit 1
+        """, (raw_id,), fetchone=True)
+        if not m:
+            return None
+        mid = clean(m.get("member_id"))
+        v = db_query("""
+            select id,branch,name,status,phone,is_volunteer,is_member,member_id,pin,remark
+            from volunteers
+            where upper(coalesce(member_id,''))=upper(%s)
+               or (coalesce(is_member,false)=true and upper(id)=upper(%s))
+            order by case when upper(coalesce(member_id,''))=upper(%s) then 0 else 1 end
+            limit 1
+        """, (mid, mid, mid), fetchone=True)
+        return {
+            "key": "M:" + mid.upper(), "display_id": mid, "member_id": mid,
+            "volunteer_id": clean(v.get("id")) if v else "",
+            "branch": norm_branch(m.get("branch")), "member_branch": norm_branch(m.get("branch")),
+            "volunteer_branch": norm_branch(v.get("branch")) if v else "",
+            "name": clean(m.get("name")) or (clean(v.get("name")) if v else ""),
+            "english_name": clean(m.get("english_name")),
+            "phone": format_phone(m.get("phone")) or (format_phone(v.get("phone")) if v else ""),
+            "pin": clean(m.get("pin")) or (clean(v.get("pin")) if v else ""),
+            "ic_number": clean(m.get("ic_number")),
+            "remark": clean(m.get("remark")) or (clean(v.get("remark")) if v else ""),
+            "is_member": True, "member_status": clean(m.get("member_status") or m.get("status") or "在供"),
+            "is_volunteer": (bool(v.get("is_volunteer")) if v and v.get("is_volunteer") is not None else bool(v)),
+            "volunteer_status": clean(v.get("status") or "在册") if v else "",
+        }
+
+    if kind.upper() == "V":
+        v = db_query("""
+            select id,branch,name,status,phone,is_volunteer,is_member,member_id,pin,remark
+            from volunteers where upper(id)=upper(%s) limit 1
+        """, (raw_id,), fetchone=True)
+        if not v:
+            return None
+        vid = clean(v.get("id")); mid = clean(v.get("member_id"))
+        m = None
+        if mid:
+            m = db_query("""
+                select member_id,name,english_name,phone,pin,branch,status,remark,member_status,ic_number
+                from members where upper(member_id)=upper(%s) limit 1
+            """, (mid,), fetchone=True)
+        # 若实际上已连接 member，保持系统原有的 M: 主键规则。
+        if m:
+            return find_person("M:" + clean(m.get("member_id")))
+        return {
+            "key": "V:" + vid.upper(), "display_id": vid, "member_id": mid, "volunteer_id": vid,
+            "branch": norm_branch(v.get("branch")), "member_branch": "", "volunteer_branch": norm_branch(v.get("branch")),
+            "name": clean(v.get("name")), "english_name": "", "phone": format_phone(v.get("phone")),
+            "pin": clean(v.get("pin")), "ic_number": "", "remark": clean(v.get("remark")),
+            "is_member": False, "member_status": "",
+            "is_volunteer": bool(v.get("is_volunteer")) if v.get("is_volunteer") is not None else True,
+            "volunteer_status": clean(v.get("status") or "在册"),
+        }
     return None
 
 
-def filtered_people():
-    rows = load_people()
+def filtered_people(source_rows=None):
+    # 首页已经有 all_rows 时直接传入，避免再次调用人员载入流程。
+    rows = list(source_rows) if source_rows is not None else load_people()
     q = clean(request.args.get("q")).lower()
     branch = clean(request.args.get("branch")).upper()
     kind = clean(request.args.get("kind") or "all")
@@ -495,13 +570,20 @@ KINDS = [
 
 @people_bp.route("/")
 def index():
-    ensure_people_profile_tables()
+    # 这些表在资料更新/审核功能入口会自动建立；普通首页不再每次执行 DDL 检查。
     all_rows = load_people()
-    rows = filtered_people()
-    profile_rows = db_query("select volunteer_id from people_profiles", fetchall=True) or []
-    pending_rows = db_query("select distinct volunteer_id from people_profile_updates where status='pending'", fetchall=True) or []
-    profile_ids = {clean(r.get('volunteer_id')).upper() for r in profile_rows}
-    pending_ids = {clean(r.get('volunteer_id')).upper() for r in pending_rows}
+    rows = filtered_people(all_rows)
+
+    # Speed: 原本两次数据库 round-trip，合并成一次。
+    profile_state_rows = db_query("""
+        select volunteer_id, 'done' as profile_state from people_profiles
+        union all
+        select distinct volunteer_id, 'pending' as profile_state
+        from people_profile_updates
+        where status='pending'
+    """, fetchall=True) or []
+    profile_ids = {clean(r.get('volunteer_id')).upper() for r in profile_state_rows if r.get('profile_state') == 'done'}
+    pending_ids = {clean(r.get('volunteer_id')).upper() for r in profile_state_rows if r.get('profile_state') == 'pending'}
     active_volunteer_ids = {clean(p.get('volunteer_id')).upper() for p in all_rows if p['is_volunteer'] and p['volunteer_status']=='在册'}
     stats = {
         "total": len(all_rows),
@@ -824,7 +906,10 @@ def download():
 # ============================================================
 
 def ensure_people_profile_tables():
-    """首次进入新功能时自动建立资料表；不修改现有 members / volunteers 结构。"""
+    """每个 worker 首次使用时检查一次；之后直接返回。"""
+    global _profile_tables_ready
+    if _profile_tables_ready:
+        return
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -876,6 +961,7 @@ def ensure_people_profile_tables():
                     updated_at timestamp not null default current_timestamp
                 )
             """)
+    _profile_tables_ready = True
 
 
 def get_volunteer_for_self_login(volunteer_id, pin):
@@ -1157,6 +1243,9 @@ ADMIN_ACCOUNT_SLOTS = [
 
 
 def ensure_people_admin_and_application_tables():
+    global _admin_application_tables_ready
+    if _admin_application_tables_ready:
+        return
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -1230,6 +1319,7 @@ def ensure_people_admin_and_application_tables():
             ):
                 cur.execute(f"alter table people_applications add column if not exists {col}")
             cur.execute("create unique index if not exists people_applications_invite_token_uq on people_applications(invite_token) where invite_token is not null")
+    _admin_application_tables_ready = True
 
 
 def people_admin_count():
@@ -1239,11 +1329,9 @@ def people_admin_count():
 
 
 def people_admin_logged_in():
-    username=clean(session.get('people_admin_username'))
-    if not username:
-        return False
-    r=db_query("select username from people_admin_users where username=%s and active=true",(username,),fetchone=True)
-    return bool(r)
+    # Flask session 已签名；登录成功后无需每打开一个 /people 页面都再查一次数据库。
+    # 这样个人档案、编辑、申请工作台等入口都会少一次 PostgreSQL round-trip。
+    return bool(clean(session.get('people_admin_username')))
 
 
 ADMIN_LOGIN_PAGE = r"""
@@ -1284,7 +1372,6 @@ def admin_setup():
 
 @people_bp.route('/admin/login',methods=['GET','POST'])
 def admin_login():
-    ensure_people_admin_and_application_tables()
     if people_admin_count()==0:
         return redirect(url_for('people.admin_setup'))
     error=''
