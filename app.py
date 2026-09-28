@@ -20,6 +20,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 from admin_web import admin_bp
 from member_web import member_bp
+from people_web import people_bp
 from pypinyin import lazy_pinyin
 from manifest import manifest_bp
 from db import db_query, get_conn
@@ -41,7 +42,7 @@ from finance_month_end import finance_month_end_bp
 from finance_audit import finance_audit_bp
 from flask import (
     Flask, request, redirect, url_for,
-    render_template_string, flash, jsonify,
+    render_template_string, flash, jsonify, 
     make_response, send_file, send_from_directory,
 )
 
@@ -122,6 +123,7 @@ app.register_blueprint(finance_bp)
 app.register_blueprint(reading_bp)
 app.register_blueprint(library_bp)
 app.register_blueprint(member_bp)
+app.register_blueprint(people_bp)
 app.register_blueprint(admin_bp)
 
 

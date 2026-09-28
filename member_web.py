@@ -2635,9 +2635,13 @@ def finance_upload():
 
         else:
             try:
-                df = pd.read_excel(file)
-
-                df = df[[
+                # =========================
+                # Render 低内存安全读取
+                # =========================
+                # 旧做法 pd.read_excel(file) 会先把整张工作表读入内存，
+                # 即使后面只保留 8 栏，也可能在 Render 小内存实例触发 OOM。
+                # 这里从读取阶段就只载入月费导入真正需要的 8 栏。
+                required_columns = [
                     "日期\nDate",
                     "收据编号 \nOfficial Receipt No",
                     "编号 No/",
@@ -2645,10 +2649,52 @@ def finance_upload():
                     "START MONTH",
                     "END MONTH",
                     "No/ of Mth",
-                    "Total Amt"
-                ]]
+                    "Total Amt",
+                ]
+
+                # 防止异常巨大的 Excel 上传直接吃光 Render 内存。
+                # FileStorage.stream 可 seek，因此检查后把指针移回开头。
+                file.stream.seek(0, os.SEEK_END)
+                upload_size = file.stream.tell()
+                file.stream.seek(0)
+
+                max_upload_bytes = 15 * 1024 * 1024  # 15 MB
+                if upload_size > max_upload_bytes:
+                    raise ValueError(
+                        f"Excel 文件过大（{upload_size / 1024 / 1024:.1f} MB）。"
+                        "请把文件缩小至 15 MB 以下再上传。"
+                    )
+
+                df = pd.read_excel(
+                    file,
+                    usecols=required_columns,
+                    engine="openpyxl",
+                )
+
+                # 再确认模板栏位完整；错误时给管理员清楚提示。
+                missing_columns = [
+                    col for col in required_columns
+                    if col not in df.columns
+                ]
+                if missing_columns:
+                    raise ValueError(
+                        "Excel 缺少必要栏位："
+                        + "、".join(
+                            col.replace("\n", " / ")
+                            for col in missing_columns
+                        )
+                    )
 
                 df = df.dropna(subset=["编号 No/"])
+
+                # 防止 Excel 因整栏格式/异常有效范围产生极大量资料行。
+                # 正常月费单月文件远低于这个数量。
+                max_import_rows = 10000
+                if len(df) > max_import_rows:
+                    raise ValueError(
+                        f"Excel 有 {len(df)} 行有效会员资料，超过安全上限 "
+                        f"{max_import_rows} 行。请检查工作表是否有异常格式或多余资料。"
+                    )
 
                 inserted = 0
                 skipped = 0

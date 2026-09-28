@@ -33,18 +33,36 @@ def get_db():
 
 @contextmanager
 def get_conn():
-    conn = pool.getconn()
+    conn = None
+    broken = False
 
     try:
+        conn = pool.getconn()
         yield conn
-        conn.commit()
+
+        if conn and not conn.closed:
+            conn.commit()
+        else:
+            broken = True
 
     except Exception:
-        conn.rollback()
+        # 保留原本真正的异常；如果连接已经断开，不要再 rollback 造成第二个错误覆盖它。
+        try:
+            if conn and not conn.closed:
+                conn.rollback()
+            else:
+                broken = True
+        except (psycopg2.InterfaceError, psycopg2.OperationalError):
+            broken = True
         raise
 
     finally:
-        pool.putconn(conn) 
+        if conn is not None:
+            try:
+                # 已关闭/失效的连接直接从 pool 丢弃，不能再放回去重复使用。
+                pool.putconn(conn, close=(broken or bool(conn.closed)))
+            except Exception:
+                pass
 
 def db_query(sql, params=None, fetchone=False, fetchall=False):
     import psycopg2
