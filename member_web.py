@@ -11,6 +11,7 @@ from flask import send_file
 from db import db_query, get_conn
 from psycopg2.extras import RealDictCursor
 from openpyxl.utils import get_column_letter
+from openpyxl import load_workbook
 from datetime import datetime, date, timedelta
 from schedule.builders.time_utils import malaysia_now
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -2634,13 +2635,28 @@ def finance_upload():
             error = "请选择 Excel 文件"
 
         else:
+            workbook = None
             try:
-                # =========================
-                # Render 低内存安全读取
-                # =========================
-                # 旧做法 pd.read_excel(file) 会先把整张工作表读入内存，
-                # 即使后面只保留 8 栏，也可能在 Render 小内存实例触发 OOM。
-                # 这里从读取阶段就只载入月费导入真正需要的 8 栏。
+                # ==================================================
+                # Render 低内存 + 只处理新资料
+                # ==================================================
+                # 1) Excel 用 read_only=True 逐行读取，不建立 DataFrame。
+                # 2) 上传开始时一次性读取会员与现有月费到内存索引。
+                # 3) 有收据：已存在立即跳过。
+                # 4) 空收据：用 会员+日期+月份+金额 判断是否已导入。
+                # 5) 后来 Excel 补上收据：自动补回原来的空收据记录，不新增第二笔。
+                if not file.filename.lower().endswith(".xlsx"):
+                    raise ValueError("目前上传只接受 .xlsx 文件。请先另存为 .xlsx 再上传。")
+
+                file.stream.seek(0, os.SEEK_END)
+                upload_size = file.stream.tell()
+                file.stream.seek(0)
+                if upload_size > 15 * 1024 * 1024:
+                    raise ValueError(
+                        f"Excel 文件过大（{upload_size / 1024 / 1024:.1f} MB）。"
+                        "请把文件缩小至 15 MB 以下再上传。"
+                    )
+
                 required_columns = [
                     "日期\nDate",
                     "收据编号 \nOfficial Receipt No",
@@ -2652,373 +2668,235 @@ def finance_upload():
                     "Total Amt",
                 ]
 
-                # 防止异常巨大的 Excel 上传直接吃光 Render 内存。
-                # FileStorage.stream 可 seek，因此检查后把指针移回开头。
-                file.stream.seek(0, os.SEEK_END)
-                upload_size = file.stream.tell()
-                file.stream.seek(0)
-
-                max_upload_bytes = 15 * 1024 * 1024  # 15 MB
-                if upload_size > max_upload_bytes:
-                    raise ValueError(
-                        f"Excel 文件过大（{upload_size / 1024 / 1024:.1f} MB）。"
-                        "请把文件缩小至 15 MB 以下再上传。"
-                    )
-
-                df = pd.read_excel(
-                    file,
-                    usecols=required_columns,
-                    engine="openpyxl",
+                workbook = load_workbook(
+                    file.stream, read_only=True, data_only=True, keep_links=False
                 )
+                ws = workbook.active
+                row_iter = ws.iter_rows(values_only=True)
+                try:
+                    header_values = next(row_iter)
+                except StopIteration:
+                    raise ValueError("Excel 是空白文件。")
 
-                # 再确认模板栏位完整；错误时给管理员清楚提示。
-                missing_columns = [
-                    col for col in required_columns
-                    if col not in df.columns
-                ]
+                headers = [str(v).strip() if v is not None else "" for v in header_values]
+                header_map = {name: idx for idx, name in enumerate(headers) if name}
+                missing_columns = [c for c in required_columns if c not in header_map]
                 if missing_columns:
                     raise ValueError(
                         "Excel 缺少必要栏位："
-                        + "、".join(
-                            col.replace("\n", " / ")
-                            for col in missing_columns
-                        )
+                        + "、".join(c.replace("\n", " / ") for c in missing_columns)
                     )
 
-                df = df.dropna(subset=["编号 No/"])
+                def cell_value(values, column_name):
+                    idx = header_map[column_name]
+                    return values[idx] if idx < len(values) else None
 
-                # 防止 Excel 因整栏格式/异常有效范围产生极大量资料行。
-                # 正常月费单月文件远低于这个数量。
-                max_import_rows = 10000
-                if len(df) > max_import_rows:
-                    raise ValueError(
-                        f"Excel 有 {len(df)} 行有效会员资料，超过安全上限 "
-                        f"{max_import_rows} 行。请检查工作表是否有异常格式或多余资料。"
-                    )
+                def is_blank(value):
+                    return value is None or (isinstance(value, str) and not value.strip())
+
+                def excel_date(value, field_name):
+                    if isinstance(value, datetime):
+                        return value.date()
+                    if isinstance(value, date):
+                        return value
+                    if is_blank(value):
+                        raise ValueError(f"{field_name} 不能为空")
+                    try:
+                        return pd.to_datetime(value).date()
+                    except Exception:
+                        raise ValueError(f"{field_name} 格式不正确：{value}")
+
+                def money_key(value):
+                    return round(float(value), 2)
 
                 inserted = 0
+                updated_receipts = 0
+                existing_rows = 0
                 skipped = 0
                 missing_members = 0
                 duplicate_receipts = 0
                 duplicate_months = 0
                 failed_rows = 0
-
-                # 必须放在循环外面，否则每一行都会重新清空
+                processed_rows = 0
                 name_warnings = {}
+                max_import_rows = 10000
 
-                # 整份 Excel 只开一次数据库连接
                 with get_conn() as conn:
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        # 一次性取得会员主档，避免 Excel 每一行都查询数据库。
+                        cur.execute("select member_id, name from members")
+                        member_map = {
+                            r["member_id"]: (r["name"] or "").strip()
+                            for r in cur.fetchall()
+                        }
 
-                        for row_index, row in df.iterrows():
+                        # 一次性取得现有月费。累计 Excel 的旧资料之后全部在 Python 内存快速判断。
+                        cur.execute("""
+                            select id, receipt_no, member_id, payment_date,
+                                   start_month, end_month, month_count, amount
+                            from member_payments
+                            where member_id like %s
+                        """, (f"{branch}-%",))
+                        existing_payments = cur.fetchall()
+
+                        receipt_index = {}
+                        exact_index = {}
+                        member_payment_index = {}
+                        for r in existing_payments:
+                            old_receipt = (r["receipt_no"] or "").strip().replace(" ", "")
+                            if old_receipt:
+                                receipt_index[old_receipt] = r
+                            key = (
+                                r["member_id"], r["payment_date"],
+                                r["start_month"], r["end_month"],
+                                money_key(r["amount"]),
+                            )
+                            exact_index.setdefault(key, []).append(r)
+                            member_payment_index.setdefault(r["member_id"], []).append(r)
+
+                        for excel_row_no, values in enumerate(row_iter, start=2):
+                            member_raw = cell_value(values, "编号 No/")
+                            if is_blank(member_raw):
+                                continue
+
+                            processed_rows += 1
+                            if processed_rows > max_import_rows:
+                                raise ValueError(
+                                    f"Excel 有超过 {max_import_rows} 行有效会员资料。"
+                                    "请检查工作表是否有异常资料。"
+                                )
 
                             try:
-                                # =========================
-                                # 1. 收据编号
-                                # =========================
-                                receipt_raw = row[
-                                    "收据编号 \nOfficial Receipt No"
-                                ]
-
-                                if pd.isna(receipt_raw):
-                                    receipt_no = None
-                                else:
-                                    receipt_no = (
-                                        str(receipt_raw)
-                                        .strip()
-                                        .replace(" ", "")
-                                    )
-
-                                    if not receipt_no:
-                                        receipt_no = None
-
-                                # =========================
-                                # 2. 会员编号
-                                # =========================
-                                member_no = int(row["编号 No/"])
-
-                                if branch == "STW":
-                                    member_id = f"STW-{member_no}"
-                                else:
-                                    member_id = f"CHE-{member_no}"
-
-                                # =========================
-                                # 3. 会员主档
-                                # =========================
-                                cur.execute("""
-                                    select
-                                        member_id,
-                                        name
-                                    from members
-                                    where member_id = %s
-                                    limit 1
-                                """, (member_id,))
-
-                                member_info = cur.fetchone()
-
-                                if not member_info:
+                                member_no = int(float(member_raw))
+                                member_id = f"{branch}-{member_no}"
+                                system_name = member_map.get(member_id)
+                                if system_name is None:
                                     missing_members += 1
                                     skipped += 1
-
-                                    print(
-                                        f"会员不存在，已跳过："
-                                        f"{member_id}"
-                                    )
                                     continue
 
-                                system_name = (
-                                    member_info["name"] or ""
-                                ).strip()
+                                receipt_raw = cell_value(values, "收据编号 \nOfficial Receipt No")
+                                receipt_no = None if is_blank(receipt_raw) else (
+                                    str(receipt_raw).strip().replace(" ", "") or None
+                                )
+                                payment_date = excel_date(cell_value(values, "日期\nDate"), "日期")
+                                start_month = parse_month(cell_value(values, "START MONTH"))
+                                end_month = parse_month(cell_value(values, "END MONTH"))
+                                month_count = int(float(cell_value(values, "No/ of Mth")))
+                                amount = float(cell_value(values, "Total Amt"))
+                                if start_month > end_month:
+                                    raise ValueError("开始月份不可迟于结束月份")
 
-                                excel_name_raw = row[
-                                    "捐款人\n姓名\nName"
-                                ]
-
-                                if pd.isna(excel_name_raw):
-                                    excel_name = ""
-                                else:
-                                    excel_name = str(
-                                        excel_name_raw
-                                    ).strip()
-
+                                excel_name_raw = cell_value(values, "捐款人\n姓名\nName")
+                                excel_name = "" if is_blank(excel_name_raw) else str(excel_name_raw).strip()
                                 if excel_name != system_name:
                                     name_warnings[member_id] = (
-                                        f"{member_id}："
-                                        f"Excel={excel_name or '-'}，"
-                                        f"Members={system_name or '-'}"
+                                        f"{member_id}：Excel={excel_name or '-'}，Members={system_name or '-'}"
                                     )
 
-                                # 付款记录永远使用 members 主档姓名
-                                name = system_name
-
-                                # =========================
-                                # 4. 日期及金额
-                                # =========================
-                                payment_date = pd.to_datetime(
-                                    row["日期\nDate"]
-                                ).date()
-
-                                start_month = parse_month(
-                                    row["START MONTH"]
+                                exact_key = (
+                                    member_id, payment_date, start_month, end_month, money_key(amount)
                                 )
+                                exact_matches = exact_index.get(exact_key, [])
 
-                                end_month = parse_month(
-                                    row["END MONTH"]
-                                )
-
-                                month_count = int(
-                                    row["No/ of Mth"]
-                                )
-
-                                amount = float(
-                                    row["Total Amt"]
-                                )
-
-                                if start_month > end_month:
-                                    raise ValueError(
-                                        "开始月份不可迟于结束月份"
-                                    )
-
-                                # =========================
-                                # 5. 有收据编号：
-                                #    先检查收据是否重复
-                                # =========================
-                                if receipt_no:
-
-                                    cur.execute("""
-                                        select
-                                            id,
-                                            member_id
-                                        from member_payments
-                                        where receipt_no = %s
-                                        limit 1
-                                    """, (receipt_no,))
-
-                                    existing_receipt = cur.fetchone()
-
-                                    if existing_receipt:
-                                        duplicate_receipts += 1
-                                        skipped += 1
-
-                                        print(
-                                            f"重复收据，已跳过："
-                                            f"{receipt_no}"
-                                        )
-                                        continue
-
-                                # =========================
-                                # 6. 检查月份是否重叠
-                                #
-                                # 只要同一会员已有任何月份
-                                # 落在新记录范围内，就不再导入
-                                #
-                                # 例如已有：
-                                # 2026-05 至 2026-06
-                                #
-                                # 新资料若是：
-                                # 2026-05 至 2026-06
-                                # 2026-04 至 2026-05
-                                # 2026-06 至 2026-07
-                                #
-                                # 全部都会被识别为重复月份
-                                # =========================
-                                cur.execute("""
-                                    select
-                                        id,
-                                        receipt_no,
-                                        start_month,
-                                        end_month,
-                                        amount
-                                    from member_payments
-                                    where member_id = %s
-                                    and start_month <= %s
-                                    and end_month >= %s
-                                    order by start_month, id
-                                    limit 1
-                                """, (
-                                    member_id,
-                                    end_month,
-                                    start_month
-                                ))
-
-                                overlapping_payment = cur.fetchone()
-
-                                if overlapping_payment:
-                                    duplicate_months += 1
+                                # A. 收据已经在系统：这是旧资料，立即跳过。
+                                if receipt_no and receipt_no in receipt_index:
+                                    duplicate_receipts += 1
+                                    existing_rows += 1
                                     skipped += 1
-
-                                    old_start = (
-                                        overlapping_payment[
-                                            "start_month"
-                                        ]
-                                    )
-
-                                    old_end = (
-                                        overlapping_payment[
-                                            "end_month"
-                                        ]
-                                    )
-
-                                    print(
-                                        f"月份重复，已跳过："
-                                        f"{member_id} | "
-                                        f"新资料 {start_month} ~ "
-                                        f"{end_month} | "
-                                        f"原记录 {old_start} ~ "
-                                        f"{old_end}"
-                                    )
                                     continue
 
-                                # =========================
-                                # 7. 新增付款记录
-                                # =========================
+                                # B. Excel 现在有收据，但系统同一笔旧记录的收据仍为空：补回收据。
+                                if receipt_no:
+                                    blank_match = next(
+                                        (r for r in exact_matches if not (r["receipt_no"] or "").strip()),
+                                        None
+                                    )
+                                    if blank_match:
+                                        cur.execute(
+                                            "update member_payments set receipt_no = %s where id = %s",
+                                            (receipt_no, blank_match["id"])
+                                        )
+                                        blank_match["receipt_no"] = receipt_no
+                                        receipt_index[receipt_no] = blank_match
+                                        updated_receipts += 1
+                                        continue
+
+                                # C. Excel 收据仍为空，而且完全相同的银行过账已经存在：跳过，不重复新增。
+                                if not receipt_no and exact_matches:
+                                    existing_rows += 1
+                                    skipped += 1
+                                    continue
+
+                                # D. 真正的新资料才检查月份重叠。
+                                overlapping = None
+                                for old in member_payment_index.get(member_id, []):
+                                    if old["start_month"] <= end_month and old["end_month"] >= start_month:
+                                        overlapping = old
+                                        break
+                                if overlapping:
+                                    duplicate_months += 1
+                                    skipped += 1
+                                    continue
+
                                 cur.execute("""
                                     insert into member_payments
-                                    (
-                                        receipt_no,
-                                        member_id,
-                                        name,
-                                        payment_date,
-                                        start_month,
-                                        end_month,
-                                        month_count,
-                                        amount
-                                    )
-                                    values
-                                    (
-                                        %s, %s, %s, %s,
-                                        %s, %s, %s, %s
-                                    )
+                                    (receipt_no, member_id, name, payment_date,
+                                     start_month, end_month, month_count, amount)
+                                    values (%s, %s, %s, %s, %s, %s, %s, %s)
                                     returning id
                                 """, (
-                                    receipt_no,
-                                    member_id,
-                                    name,
-                                    payment_date,
-                                    start_month,
-                                    end_month,
-                                    month_count,
-                                    amount
+                                    receipt_no, member_id, system_name, payment_date,
+                                    start_month, end_month, month_count, amount
                                 ))
-
-                                inserted_row = cur.fetchone()
-
-                                if inserted_row:
-                                    inserted += 1
-                                else:
-                                    skipped += 1
+                                new_id = cur.fetchone()["id"]
+                                new_row = {
+                                    "id": new_id, "receipt_no": receipt_no,
+                                    "member_id": member_id, "payment_date": payment_date,
+                                    "start_month": start_month, "end_month": end_month,
+                                    "month_count": month_count, "amount": amount,
+                                }
+                                inserted += 1
+                                member_payment_index.setdefault(member_id, []).append(new_row)
+                                exact_index.setdefault(exact_key, []).append(new_row)
+                                if receipt_no:
+                                    receipt_index[receipt_no] = new_row
 
                             except Exception as row_error:
                                 failed_rows += 1
                                 skipped += 1
+                                print(f"第 {excel_row_no} 行导入失败：{row_error}")
 
-                                print(
-                                    f"第 {row_index + 2} 行导入失败：",
-                                    row.to_dict(),
-                                    row_error
-                                )
-
-                        # 整份 Excel 完成后只提交一次
                         conn.commit()
 
-                # =========================
-                # 上传结果
-                # =========================
                 msg = (
-                    f"上传完成：读取 {len(df)} 行，"
-                    f"新增 {inserted} 行，"
-                    f"跳过 {skipped} 行。"
+                    f"上传完成：Excel 有效记录 {processed_rows} 行；"
+                    f"已存在 {existing_rows + duplicate_receipts} 行；"
+                    f"新增 {inserted} 行；补回收据 {updated_receipts} 行。"
                 )
-
                 details = []
-
-                if duplicate_receipts:
-                    details.append(
-                        f"重复收据 {duplicate_receipts} 行"
-                    )
-
                 if duplicate_months:
-                    details.append(
-                        f"重复月份 {duplicate_months} 行"
-                    )
-
+                    details.append(f"月份重叠 {duplicate_months} 行")
                 if missing_members:
-                    details.append(
-                        f"会员不存在 {missing_members} 行"
-                    )
-
+                    details.append(f"会员不存在 {missing_members} 行")
                 if failed_rows:
-                    details.append(
-                        f"格式或资料错误 {failed_rows} 行"
-                    )
-
+                    details.append(f"格式或资料错误 {failed_rows} 行")
                 if name_warnings:
-                    details.append(
-                        f"姓名不一致 {len(name_warnings)} 位，"
-                        f"已使用系统主档姓名"
-                    )
-
+                    details.append(f"姓名不一致 {len(name_warnings)} 位，已使用系统主档姓名")
                 if details:
                     msg += " " + "；".join(details) + "。"
-
-                if name_warnings:
-                    print("=" * 60)
-                    print(
-                        f"发现 {len(name_warnings)} "
-                        f"位会员姓名不一致："
-                    )
-
-                    for warning in sorted(
-                        name_warnings.values()
-                    ):
-                        print(warning)
-
-                    print("=" * 60)
 
             except Exception as e:
                 print("上传失败:", e)
                 error = f"上传失败：{e}"
-   
+            finally:
+                if workbook is not None:
+                    try:
+                        workbook.close()
+                    except Exception:
+                        pass
+
+
     # 搜索记录
     try:
         if q:
