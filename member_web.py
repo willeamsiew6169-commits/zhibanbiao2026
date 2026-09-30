@@ -2399,6 +2399,10 @@ def finance_upload():
     history_rows = []
     safety_issues = []
     safety_checked = request.args.get("safety_check") == "1"
+    upload_missing_details = []
+    upload_overlap_details = []
+    upload_failed_details = []
+    upload_name_details = []
 
     q = request.args.get("q", "").strip()
     branch = request.args.get("branch", "CHE").strip().upper()
@@ -2773,6 +2777,18 @@ def finance_upload():
                                 if system_name is None:
                                     missing_members += 1
                                     skipped += 1
+                                    raw_name = cell_value(values, "捐款人\n姓名\nName")
+                                    raw_amount = cell_value(values, "Total Amt")
+                                    try:
+                                        amount_text = f"RM {float(raw_amount):,.2f}"
+                                    except Exception:
+                                        amount_text = str(raw_amount or "-")
+                                    upload_missing_details.append({
+                                        "row": excel_row_no,
+                                        "member_id": member_id,
+                                        "name": str(raw_name or "-").strip(),
+                                        "amount": amount_text,
+                                    })
                                     continue
 
                                 receipt_raw = cell_value(values, "收据编号 \nOfficial Receipt No")
@@ -2837,6 +2853,15 @@ def finance_upload():
                                 if overlapping:
                                     duplicate_months += 1
                                     skipped += 1
+                                    upload_overlap_details.append({
+                                        "row": excel_row_no,
+                                        "member_id": member_id,
+                                        "name": system_name or excel_name or "-",
+                                        "start": start_month,
+                                        "end": end_month,
+                                        "old_start": overlapping["start_month"],
+                                        "old_end": overlapping["end_month"],
+                                    })
                                     continue
 
                                 cur.execute("""
@@ -2865,14 +2890,19 @@ def finance_upload():
                             except Exception as row_error:
                                 failed_rows += 1
                                 skipped += 1
+                                upload_failed_details.append({
+                                    "row": excel_row_no,
+                                    "error": str(row_error),
+                                })
                                 print(f"第 {excel_row_no} 行导入失败：{row_error}")
 
                         conn.commit()
 
+                upload_name_details = list(name_warnings.values())
                 msg = (
-                    f"上传完成：Excel 有效记录 {processed_rows} 行；"
-                    f"已存在 {existing_rows + duplicate_receipts} 行；"
-                    f"新增 {inserted} 行；补回收据 {updated_receipts} 行。"
+                    f"上传检查完成：Excel 有效记录 {processed_rows} 笔；"
+                    f"已存在 {existing_rows} 笔；"
+                    f"新增 {inserted} 笔；补回收据 {updated_receipts} 笔。"
                 )
                 details = []
                 if duplicate_months:
@@ -3145,6 +3175,49 @@ def finance_upload():
 
         {% if msg %}
         <div class="alert alert-success">✅ {{ msg }}</div>
+
+        {% if upload_missing_details %}
+        <div class="alert alert-danger" style="margin-top:12px;">
+            <strong>❌ 会员不存在／已跳过（{{ upload_missing_details|length }} 笔）</strong>
+            <div style="margin-top:8px; line-height:1.8;">
+            {% for item in upload_missing_details %}
+                <div>Excel 第 {{ item.row }} 行｜{{ item.member_id }}｜{{ item.name }}｜{{ item.amount }}</div>
+            {% endfor %}
+            </div>
+            <div style="margin-top:8px;">如果是新会员，请先到「人员管理中心」建立月费会员，再重新上传同一份 Excel；如果是编号错误，请修正 Excel 后重新上传。</div>
+        </div>
+        {% endif %}
+
+        {% if upload_overlap_details %}
+        <div class="alert alert-warning" style="margin-top:12px;">
+            <strong>⚠️ 月份重叠／已跳过（{{ upload_overlap_details|length }} 笔）</strong>
+            <div style="margin-top:8px; line-height:1.8;">
+            {% for item in upload_overlap_details %}
+                <div>Excel 第 {{ item.row }} 行｜{{ item.member_id }}｜{{ item.name }}｜{{ item.start.strftime('%Y-%m') }} → {{ item.end.strftime('%Y-%m') }}｜系统已有 {{ item.old_start.strftime('%Y-%m') }} → {{ item.old_end.strftime('%Y-%m') }}</div>
+            {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        {% if upload_failed_details %}
+        <div class="alert alert-danger" style="margin-top:12px;">
+            <strong>❌ 格式或资料错误／已跳过（{{ upload_failed_details|length }} 笔）</strong>
+            <div style="margin-top:8px; line-height:1.8;">
+            {% for item in upload_failed_details %}
+                <div>Excel 第 {{ item.row }} 行｜{{ item.error }}</div>
+            {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        {% if upload_name_details %}
+        <details class="alert alert-warning" style="margin-top:12px;">
+            <summary style="cursor:pointer;"><strong>⚠️ 姓名不一致（{{ upload_name_details|length }} 位）— 已采用系统主档姓名，点击查看</strong></summary>
+            <div style="margin-top:8px; line-height:1.8;">
+            {% for item in upload_name_details %}<div>{{ item }}</div>{% endfor %}
+            </div>
+        </details>
+        {% endif %}
         {% endif %}
 
         <div class="member-grid">
@@ -3425,7 +3498,11 @@ def finance_upload():
     timedelta=timedelta,
     safety_issues=safety_issues,
     safety_checked=safety_checked,
-    history_rows=history_rows
+    history_rows=history_rows,
+    upload_missing_details=upload_missing_details,
+    upload_overlap_details=upload_overlap_details,
+    upload_failed_details=upload_failed_details,
+    upload_name_details=upload_name_details
     )
 
 MEMBER_HTML = """
