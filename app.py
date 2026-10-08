@@ -66,18 +66,12 @@ from attendance_service import (
     ENABLE_AUTO_SIGNOUT,
     AUTO_SIGNOUT_TIME,
     AUTO_SIGNOUT_DISPLAY,
-    TODAY_CODE_ENABLED,
 )
 
 from utils import (
     MY_TZ,
-    TODAY_CODE_ENABLED,
-    TODAY_CODE_LIST,
     now_date_str,
     now_time_str,
-    get_today_code,
-    get_display_today_code,
-    verify_today_code,
     parse_time,
     parse_time_to_datetime,
     calc_hours,
@@ -674,6 +668,8 @@ PAGE = """
           action="{{ url_for('do_sign_in') }}"
           onsubmit="return quickSignIn();">
 
+      <input type="hidden" id="assignment_id" name="assignment_id" value="">
+
       <div class="login-row">
 
         <div class="form-group">
@@ -724,23 +720,6 @@ PAGE = """
         </div>
 
       </div>
-      {% if today_code %}
-      {% if today_code_enabled %}
-      <div class="form-group">
-        <label class="form-label">{{ t.today_code }}</label>
-        <input
-          class="form-input"
-          id="today_code"
-          type="tel"
-          name="today_code"
-          inputmode="numeric"
-          pattern="[0-9]*"
-          placeholder="{{ t.today_code_placeholder }}"
-          required
-        >
-      </div>
-      {% endif %}
-      {% endif %}
       <div class="btn-row single-btn-row">
         <button type="button"
                 class="btn-tool btn-primary"
@@ -798,12 +777,15 @@ PAGE = """
       <div class="btn-row">
         <button id="signInBtn"
                 class="btn-tool btn-success"
-                type="submit">
+                type="submit"
+                style="display:none;">
             {{ t.check_in }}
         </button>
 
-        <button class="btn-tool btn-danger"
+        <button id="signOutBtn"
+                class="btn-tool btn-danger"
                 type="button"
+                style="display:none;"
                 onclick="submitQuickSignOut();">
             {{ t.sign_out }}
         </button>
@@ -816,6 +798,7 @@ PAGE = """
           action="{{ url_for('do_sign_out') }}">
       <input type="hidden" id="signout_volunteer_id" name="volunteer_id">
       <input type="hidden" id="signout_pin" name="pin">
+      <input type="hidden" id="signout_assignment_id" name="assignment_id">
     </form>
 
     <div class="small-note">
@@ -961,8 +944,7 @@ async function lookupVolunteer() {
     box.className = 'alert alert-success';
 
     let html =
-      `${TXT.name}：<b>${data.volunteer.姓名}</b><br>` +
-      `${TXT.status}：${data.volunteer.状态 || '-'}`;
+  `${TXT.name}：<b>${data.volunteer.姓名}</b>`;
 
     if (data.volunteer.pin_ok) {
       html += `<br>${TXT.phone}：${data.volunteer.电话号码 || '-'}`;
@@ -977,25 +959,42 @@ async function lookupVolunteer() {
     }
 
     if (data.today_assignments && data.today_assignments.length > 0) {
-
-      html += `<br><hr>`;
-      html += `<b>📅 今天正式安排</b>`;
-
+      html += `<br><hr><b>📅 今天正式安排</b>`;
       data.today_assignments.forEach(a => {
+        const mark = a.state === "completed" ? "✅ 已完成" :
+                     a.state === "active" ? "🟢 进行中" : "🕒 待值班";
         html += `
           <div style="margin-top:10px;">
+            ${mark}<br>
             地点：<b>${a.assigned_place || "-"}</b><br>
             岗位：${a.role || "-"}<br>
             时间：${a.start_time || "-"} ～ ${a.end_time || "-"}
-          </div>
-        `;
+          </div>`;
       });
-
     } else {
-      html += `
-        <br><hr>
-        <b style="color:#b02a37;">今天没有正式安排</b>
-      `;
+      html += `<br><hr><b style="color:#b02a37;">今天没有正式安排</b>`;
+    }
+
+    const signInBtn = document.getElementById('signInBtn');
+    const signOutBtn = document.getElementById('signOutBtn');
+    const assignmentInput = document.getElementById('assignment_id');
+    signInBtn.style.display = 'none';
+    signOutBtn.style.display = 'none';
+    assignmentInput.value = '';
+
+    if (data.attendance_action === 'signout') {
+      signOutBtn.style.display = '';
+      assignmentInput.value = data.current_assignment_id || '';
+      html += `<br><hr><b style="color:#198754;">当前状态：已签到，请完成后签退。</b>`;
+    } else if (data.attendance_action === 'signin') {
+      signInBtn.style.display = '';
+      assignmentInput.value = data.current_assignment_id || '';
+      html += `<br><hr><b style="color:#0d6efd;">当前可签到：${data.current_assignment_text || ''}</b>`;
+    } else if (data.attendance_action === 'completed') {
+      html += `<br><hr><b style="color:#198754;">✅ 今日正式值班已完成</b>`;
+    } else {
+      // 试用期：没有正式排班时仍保留现场签到。
+      signInBtn.style.display = '';
     }
 
     box.innerHTML = html;
@@ -1131,6 +1130,8 @@ function confirmSignOut() {
 
   document.getElementById("signout_volunteer_id").value = pendingSignOutId;
   document.getElementById("signout_pin").value = pin;
+  document.getElementById("signout_assignment_id").value =
+      document.getElementById("assignment_id").value || "";
 
   document.getElementById("quickSignOutForm").submit();
 }
@@ -1150,7 +1151,6 @@ setTimeout(() => {
 
 const volunteerIdInput = document.getElementById('volunteer_id');
 const pinInput = document.getElementById('pin');
-const todayCodeInput = document.getElementById('today_code');
 
 if (volunteerIdInput && pinInput) {
   volunteerIdInput.addEventListener('keydown', function(e) {
@@ -1161,29 +1161,10 @@ if (volunteerIdInput && pinInput) {
   });
 }
 
-if (pinInput && todayCodeInput) {
-  pinInput.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      todayCodeInput.focus();
-    }
-  });
-}
-
-if (todayCodeInput) {
-  todayCodeInput.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      lookupVolunteer();
-    }
-  });
-}
-
 window.addEventListener("load", function() {
   const adminPin = document.getElementById("admin_pin");
 
   if (pinInput) pinInput.value = "";
-  if (todayCodeInput) todayCodeInput.value = "";
   if (adminPin) adminPin.value = "";
 
   toggleCardNoBox();
@@ -1553,7 +1534,6 @@ def index():
         role_label=role_label,
         open_records=get_today_open_records(),
         today_records=get_today_records(limit=20),
-        today_code_enabled=TODAY_CODE_ENABLED,
         today_count=stats["total"],
         not_out=stats["open"],
         done_out=stats["finished"],
@@ -1598,18 +1578,12 @@ def do_sign_in():
 
               return redirect(url_for("index"))
     
-    if TODAY_CODE_ENABLED:
-      input_code = request.form.get("today_code", "").strip()
-
-      if not verify_today_code(input_code):
-          flash("今日签到码错误，请看现场公布的号码", "bad")
-          return redirect(url_for("index"))
-
     ok, msg = sign_in(
         volunteer_id,
         request.form.get("pin", ""),
         role,
         request.form.get("card_no", ""),
+        request.form.get("assignment_id", ""),
     )
 
     if ok:
@@ -1677,7 +1651,11 @@ def do_sign_out():
             flash("今天没有找到未签退记录", "bad")
             return redirect(url_for("index"))
 
-    ok, msg = sign_out(volunteer_id, pin)
+    ok, msg = sign_out(
+        volunteer_id,
+        pin,
+        request.form.get("assignment_id", "")
+    )
 
     if ok:
         flash(f"{msg}｜签退时间：{now_time_str()}", "ok")
@@ -1882,6 +1860,7 @@ def api_volunteer(volunteer_id):
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
                     select
+                        id,
                         role,
                         assigned_place,
                         start_time,
@@ -1898,6 +1877,66 @@ def api_volunteer(volunteer_id):
                 ))
 
                 today_assignments = cur.fetchall()
+
+        # 多轮值班状态：每个 assignment 独立签到 / 签退。
+        open_log = db_query("""
+            select assignment_id
+            from volunteer_attendance_logs
+            where volunteer_id = %s
+              and attendance_date = %s
+              and check_out_time is null
+            order by id desc
+            limit 1
+        """, (v.get("编号"), today), fetchone=True)
+
+        completed_rows = db_query("""
+            select assignment_id
+            from volunteer_attendance_logs
+            where volunteer_id = %s
+              and attendance_date = %s
+              and check_out_time is not null
+              and assignment_id is not null
+        """, (v.get("编号"), today), fetchall=True) or []
+        completed_ids = {int(x["assignment_id"]) for x in completed_rows if x.get("assignment_id") is not None}
+        open_assignment_id = int(open_log["assignment_id"]) if open_log and open_log.get("assignment_id") is not None else None
+
+        attendance_action = "walkin"
+        current_assignment_id = None
+        current_assignment_text = ""
+
+        for a in today_assignments:
+            aid = int(a.get("id") or 0)
+            if aid == open_assignment_id:
+                a["state"] = "active"
+            elif aid in completed_ids:
+                a["state"] = "completed"
+            else:
+                a["state"] = "pending"
+
+        if open_assignment_id is not None:
+            attendance_action = "signout"
+            current_assignment_id = open_assignment_id
+        elif not today_assignments:
+            # 试用期：没有正式排班时，依据 attendance 的未签退记录切换按钮。
+            # 不改变正式排班的多轮签到逻辑。
+            trial_open = db_query("""
+                select id
+                from attendance
+                where volunteer_id = %s
+                  and date = %s
+                  and (end_time is null or end_time = '')
+                order by id desc
+                limit 1
+            """, (v.get("编号"), now_date_str()), fetchone=True)
+            attendance_action = "signout" if trial_open else "walkin"
+        elif today_assignments:
+            pending = next((a for a in today_assignments if a.get("state") == "pending"), None)
+            if pending:
+                attendance_action = "signin"
+                current_assignment_id = pending.get("id")
+                current_assignment_text = f"{pending.get('start_time') or ''} ～ {pending.get('end_time') or ''} {pending.get('assigned_place') or ''}".strip()
+            else:
+                attendance_action = "completed"
 
         safe_v = {
             "编号": v.get("编号", ""),
@@ -1922,7 +1961,10 @@ def api_volunteer(volunteer_id):
         return jsonify({
             "ok": True,
             "volunteer": safe_v,
-            "today_assignments": today_assignments
+            "today_assignments": today_assignments,
+            "attendance_action": attendance_action,
+            "current_assignment_id": current_assignment_id,
+            "current_assignment_text": current_assignment_text
         })
 
     except Exception as e:

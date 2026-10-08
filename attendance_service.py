@@ -19,8 +19,6 @@ ENABLE_AUTO_SIGNOUT = False           # 自动签退
 AUTO_SIGNOUT_TIME = "19:00"           # 系统几点执行自动签退
 AUTO_SIGNOUT_DISPLAY = "18:30"        # 报表显示的签退时间
 REQUIRE_ASSIGNMENT_FOR_SIGNIN = False   # 测试时 False，正式上线改 True
-# ===== 签到系统设定 =====
-TODAY_CODE_ENABLED = False
 
 
 def format_date_value(v):
@@ -121,156 +119,123 @@ ROLE_TEXT = {
 # =========================
 # 5) 签到 / 签退 / 修改
 # =========================
-def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "") -> tuple[bool, str]:
-
+def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignment_id=None) -> tuple[bool, str]:
     raw_id = str(volunteer_id or "").strip()
     role = str(role or "").strip()
     card_no = str(card_no or "").strip()
 
     if not raw_id:
         return False, "请输入编号。"
-
     if not pin:
         return False, "请输入 PIN。"
 
     volunteer = find_volunteer(raw_id)
-
     if not volunteer:
         return False, f"找不到编号：{raw_id}"
-
     if volunteer.get("状态") not in ["在册", "", None]:
         return False, f"此义工状态不是在册：{volunteer.get('状态')}"
-
     if not verify_pin_for_volunteer(volunteer, pin):
         return False, "PIN 不正确。"
 
+    # 同一时间只允许一笔进行中的签到。
     opened = db_query("""
-        select id
-        from attendance
-        where date = %s
-          and volunteer_id = %s
-          and (end_time is null or end_time = '')
-        order by id desc
-        limit 1
+        select id from attendance
+        where date=%s and volunteer_id=%s
+          and (end_time is null or end_time='')
+        order by id desc limit 1
     """, (now_date_str(), volunteer["编号"]), fetchone=True)
-
     if opened:
-        return False, f"{volunteer['姓名']} 今天已经签到，还没签退。请先签退。"
+        return False, f"{volunteer['姓名']} 已经签到，还没签退。请先签退。"
 
     assignments = load_today_assignments_for_volunteer(volunteer, raw_id)
 
+    # 有正式排班时：一轮 assignment = 一次签到。
     if assignments:
-        job_lines = [
-            format_assignment_for_attendance(a)
-            for a in assignments
-        ]
+        selected = None
+        if assignment_id not in (None, ""):
+            try:
+                aid = int(assignment_id)
+            except Exception:
+                aid = 0
+            selected = next((a for a in assignments if int(a.get("id") or 0) == aid), None)
+            if not selected:
+                return False, "找不到这轮正式排班，请重新查询后再签到。"
+        else:
+            # 兼容旧页面：自动找第一轮尚未完成的排班。
+            for a in assignments:
+                done = db_query("""
+                    select 1 from volunteer_attendance_logs
+                    where assignment_id=%s and volunteer_id=%s
+                      and attendance_date=%s and check_out_time is not null
+                    limit 1
+                """, (a["id"], volunteer["编号"], now_date_str()), fetchone=True)
+                if not done:
+                    selected = a
+                    break
 
-        role_text = " / ".join(job_lines)
+        if not selected:
+            return False, f"{volunteer['姓名']} 今天的正式排班已经全部完成。"
 
+        # 防止同一轮重复签到（包括已经完成的轮次）。
+        existing_log = db_query("""
+            select check_out_time from volunteer_attendance_logs
+            where assignment_id=%s and volunteer_id=%s and attendance_date=%s
+            order by id desc limit 1
+        """, (selected["id"], volunteer["编号"], now_date_str()), fetchone=True)
+        if existing_log:
+            if existing_log.get("check_out_time"):
+                return False, "这一轮值班已经完成，不能重复签到。"
+            return False, "这一轮已经签到，请先签退。"
+
+        job_text = format_assignment_for_attendance(selected)
         db_query("""
             insert into attendance
             (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
-            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
-            now_date_str(),
-            volunteer["编号"],
-            volunteer["姓名"],
-            1,
-            1,
-            role_text,
-            now_time_str(),
-            "",
-            None,
-            card_no,
-            "按排班签到"
+            now_date_str(), volunteer["编号"], volunteer["姓名"], 1, 1,
+            job_text, now_time_str(), "", None, card_no,
+            f"按排班签到｜assignment_id={selected['id']}"
         ))
 
-        for a in assignments:
-            db_query("""
-                insert into volunteer_attendance_logs (
-                    assignment_id,
-                    volunteer_id,
-                    name,
-                    attendance_date,
-                    actual_role,
-                    actual_place,
-                    walk_in,
-                    remarks
-                )
-                values (%s, %s, %s, %s, %s, %s, false, '按排班签到')
-            """, (
-                a["id"],
-                a["volunteer_id"],
-                a["name"],
-                a["assignment_date"],
-                a["role"],
-                a["assigned_place"],
-            ))
+        db_query("""
+            insert into volunteer_attendance_logs (
+                assignment_id, volunteer_id, name, attendance_date,
+                actual_role, actual_place, walk_in, remarks
+            ) values (%s,%s,%s,%s,%s,%s,false,'按排班签到')
+        """, (
+            selected["id"], selected["volunteer_id"], selected["name"],
+            selected["assignment_date"], selected["role"], selected["assigned_place"]
+        ))
 
-        jobs_display = "\n".join([f"・{x}" for x in job_lines])
+        return True, f"{volunteer['姓名']} 已签到\n\n本轮岗位：\n・{job_text}\n\n完成后请记得签退。"
 
-        return True, f"""{volunteer['姓名']} 已签到
-
-今天岗位：
-{jobs_display}
-
-完成后请记得签退。"""
-
-    # 没有排班，才需要义工选择岗位
+    # 没有正式排班：保留试用期现场签到逻辑。
     if role not in ROLES:
         return False, "今天没有排班记录，请选择实际协助岗位。"
 
     db_query("""
         insert into attendance
         (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, (
-        now_date_str(),
-        volunteer["编号"],
-        volunteer["姓名"],
-        0,
-        1,
-        role,
-        now_time_str(),
-        "",
-        None,
-        card_no,
-        f"现场签到：{role}"
+        now_date_str(), volunteer["编号"], volunteer["姓名"], 0, 1, role,
+        now_time_str(), "", None, card_no, f"现场签到：{role}"
     ))
-
     db_query("""
         insert into volunteer_attendance_logs (
-            assignment_id,
-            volunteer_id,
-            name,
-            attendance_date,
-            actual_role,
-            actual_place,
-            walk_in,
-            remarks
-        )
-        values (null, %s, %s, %s, %s, %s, true, %s)
+            assignment_id, volunteer_id, name, attendance_date,
+            actual_role, actual_place, walk_in, remarks
+        ) values (null,%s,%s,%s,%s,%s,true,%s)
     """, (
-        volunteer["编号"],
-        volunteer["姓名"],
-        now_date_str(),
-        role,
-        role,
+        volunteer["编号"], volunteer["姓名"], now_date_str(), role, role,
         f"现场签到：{role}"
     ))
+    return True, f"{volunteer['姓名']} 已签到\n\n今天没有正式排班记录。\n已登记：{role}\n\n完成后请记得签退。"
 
-    return True, f"""{volunteer['姓名']} 已签到
 
-    今天没有正式排班记录。
-
-    已登记：
-    {role}
-
-    完成后请记得签退。"""
-
-def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
+def sign_out(volunteer_id: str, pin: str, assignment_id=None) -> tuple[bool, str]:
     raw_id = str(volunteer_id or "").strip()
-
     if not raw_id:
         return False, "请输入编号。"
     if not pin:
@@ -279,25 +244,19 @@ def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
     volunteer = find_volunteer(raw_id)
     if not volunteer:
         return False, f"找不到编号：{raw_id}"
-
     if not verify_pin_for_volunteer(volunteer, pin):
         return False, "PIN 不正确。"
 
     row = db_query("""
-        select *
-        from attendance
-        where date = %s
-          and volunteer_id = %s
-          and (end_time is null or end_time = '')
-        order by id desc
-        limit 1
+        select * from attendance
+        where date=%s and volunteer_id=%s
+          and (end_time is null or end_time='')
+        order by id desc limit 1
     """, (now_date_str(), volunteer["编号"]), fetchone=True)
-
     if not row:
         return False, f"{volunteer['姓名']} 今天没有未签退记录。"
 
     end_time = now_time_str()
-
     try:
         start_dt = parse_time_to_datetime(row["start_time"])
         end_dt = parse_time_to_datetime(end_time)
@@ -308,22 +267,41 @@ def sign_out(volunteer_id: str, pin: str) -> tuple[bool, str]:
         hours = None
 
     db_query("""
-        update attendance
-        set end_time = %s,
-            hours = %s
-        where id = %s
+        update attendance set end_time=%s, hours=%s where id=%s
     """, (end_time, hours, row["id"]))
 
-    db_query("""
-        update volunteer_attendance_logs
-        set check_out_time = now()
-        where volunteer_id = %s
-        and attendance_date = %s
-        and check_out_time is null
-    """, (
-        volunteer["编号"],
-        now_date_str(),
-    ))
+    # 只签退本轮 assignment；现场签到则只关闭最新一笔 walk-in log。
+    aid = None
+    if assignment_id not in (None, ""):
+        try:
+            aid = int(assignment_id)
+        except Exception:
+            aid = None
+    if aid is None:
+        remark = str(row.get("remark") or "")
+        marker = "assignment_id="
+        if marker in remark:
+            try:
+                aid = int(remark.split(marker, 1)[1].split("｜", 1)[0].strip())
+            except Exception:
+                aid = None
+
+    if aid is not None:
+        db_query("""
+            update volunteer_attendance_logs
+            set check_out_time=now()
+            where assignment_id=%s and volunteer_id=%s
+              and attendance_date=%s and check_out_time is null
+        """, (aid, volunteer["编号"], now_date_str()))
+    else:
+        log = db_query("""
+            select id from volunteer_attendance_logs
+            where volunteer_id=%s and attendance_date=%s
+              and check_out_time is null
+            order by id desc limit 1
+        """, (volunteer["编号"], now_date_str()), fetchone=True)
+        if log:
+            db_query("update volunteer_attendance_logs set check_out_time=now() where id=%s", (log["id"],))
 
     return True, f"{volunteer['姓名']} 已签退。"
 
@@ -373,6 +351,19 @@ def find_volunteer(volunteer_id: str):
         limit 1
     """, tuple(ids), fetchone=True)
 
+    # 兼容仍使用800系列旧义工编号、但已有正式月费编号的人员。
+    # 只在正式义工编号查询不到时查找，且必须唯一匹配，避免误认他人。
+    if not result:
+        member_ids = [x for x in ids if x.upper().startswith(('CHE-', 'STW-'))]
+        if member_ids:
+            matched = db_query("""
+                select id as "编号", name as "姓名", status as "状态",
+                       phone as "电话号码", pin as "PIN", branch as "分会"
+                from volunteers where member_id = any(%s)
+                limit 2
+            """, (member_ids,), fetchall=True) or []
+            if len(matched) == 1:
+                return matched[0]
     return result
 
 def verify_pin_for_volunteer(volunteer, pin):

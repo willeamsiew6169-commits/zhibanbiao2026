@@ -7257,12 +7257,21 @@ def monthly_fee_batch(branch):
         else ""
     )
 
+    payment_method = request.form.get(
+        "payment_method",
+        "现金"
+    )
+
     receipt_start_raw = request.form.get(
         "receipt_start",
         ""
     ).strip().upper()
 
-    if not receipt_start_raw:
+    # GET / 现金：默认带出下一张收条。
+    # 银行过账 POST：允许收条号码留空，确认后再补，不占用 OR 号码。
+    if not receipt_start_raw and not (
+        request.method == "POST" and payment_method == "银行过账"
+    ):
         receipt_start_raw = next_receipt_raw
 
     receipt_start = normalize_monthly_receipt_no(
@@ -7272,11 +7281,6 @@ def monthly_fee_batch(branch):
     default_receipt_date = (
         request.form.get("receipt_date")
         or date.today().isoformat()
-    )
-
-    payment_method = request.form.get(
-        "payment_method",
-        "现金"
     )
 
     receipt_book_no = (
@@ -7333,389 +7337,213 @@ def monthly_fee_batch(branch):
             return "INVALID"
 
     def build_preview():
+        """建立预览。一次预载会员/月费/收条资料，避免逐行访问 Supabase。"""
         rows = []
         current_receipt_date = default_receipt_date
         receipt_index = 0
         data_row_index = 0
         today_date = date.today()
 
-        for line_no, original_line in enumerate(
-            raw_text.splitlines(),
-            start=1
-        ):
-            line = original_line.strip()
+        # 一次取得需要的资料；原本每一位会员约 5 次数据库 round-trip。
+        all_members = db_query("""
+            select * from members
+        """, fetchall=True) or []
+        all_payments = db_query("""
+            select member_id, end_month, receipt_no, receipt_date, amount
+            from member_payments
+            where coalesce(status, 'active') = 'active'
+        """, fetchall=True) or []
+        finance_receipts = db_query("""
+            select receipt_no
+            from finance_records
+            where coalesce(trim(receipt_no), '') <> ''
+        """, fetchall=True) or []
 
+        members_by_id = {}
+        members_by_name = {}
+        members_by_phone = {}
+        for m in all_members:
+            mid = str(m.get("member_id") or "").strip().upper()
+            if mid:
+                members_by_id[mid] = m
+            for key in (m.get("name"), m.get("english_name"), m.get("姓名")):
+                k = str(key or "").strip().casefold()
+                if k:
+                    members_by_name.setdefault(k, []).append(m)
+            phone_digits = re.sub(r"[^0-9]", "", str(m.get("phone") or m.get("电话号码") or ""))
+            if phone_digits:
+                members_by_phone.setdefault(phone_digits, []).append(m)
+
+        paid_until_by_member = {}
+        payment_receipts = set()
+        same_day_by_key = {}
+        for p in all_payments:
+            mid = str(p.get("member_id") or "").strip().upper()
+            end_month = p.get("end_month")
+            if mid and end_month:
+                old = paid_until_by_member.get(mid)
+                if old is None or str(end_month) > str(old):
+                    paid_until_by_member[mid] = end_month
+            rno = str(p.get("receipt_no") or "").strip().upper()
+            if rno:
+                payment_receipts.add(rno)
+            rdate = p.get("receipt_date")
+            if mid and rdate:
+                rdate_key = rdate.isoformat() if hasattr(rdate, "isoformat") else str(rdate)[:10]
+                same_day_by_key[(mid, rdate_key)] = p
+
+        finance_receipt_set = {
+            str(x.get("receipt_no") or "").strip().upper()
+            for x in finance_receipts
+            if str(x.get("receipt_no") or "").strip()
+        }
+        month_lock_cache = {}
+
+        for line_no, original_line in enumerate(raw_text.splitlines(), start=1):
+            line = original_line.strip()
             if not line:
                 continue
 
             if line.startswith("@"):
                 parsed_date = parse_date_header(line)
-
                 if parsed_date == "INVALID":
-                    rows.append({
-                        "error": (
-                            f"第 {line_no} 行日期无效：{line}"
-                        ),
-                        "warning": "",
-                        "raw": line,
-                        "receipt_date": "",
-                    })
-
+                    rows.append({"error": f"第 {line_no} 行日期无效：{line}", "warning": "", "raw": line, "receipt_date": ""})
                 elif not parsed_date:
-                    rows.append({
-                        "error": (
-                            f"第 {line_no} 行日期格式错误，"
-                            "请使用 @YYYY-MM-DD"
-                        ),
-                        "warning": "",
-                        "raw": line,
-                        "receipt_date": "",
-                    })
-
+                    rows.append({"error": f"第 {line_no} 行日期格式错误，请使用 @YYYY-MM-DD", "warning": "", "raw": line, "receipt_date": ""})
                 else:
                     current_receipt_date = parsed_date
-
                 continue
 
-            # 新版工作台不需要手动输入 @日期。
-            # 每一笔的日期由前端隐藏字段 batch_row_dates 保存。
             if data_row_index < len(batch_row_dates):
                 saved_row_date = batch_row_dates[data_row_index]
                 try:
-                    current_receipt_date = date.fromisoformat(
-                        saved_row_date
-                    ).isoformat()
+                    current_receipt_date = date.fromisoformat(saved_row_date).isoformat()
                 except ValueError:
                     current_receipt_date = default_receipt_date
             else:
                 current_receipt_date = default_receipt_date
             data_row_index += 1
 
-            # 支持普通金额与月数倍数：
-            # 108 -> 默认 RM50；108 100 -> RM100
-            # 108 3 / 108*3 / 108,3 -> 3个月 = RM150
-            multiplier_match = re.match(
-                r"^(.+?)[*,，]\s*(\d{1,2})$",
-                line
-            )
-
+            multiplier_match = re.match(r"^(.+?)[*,，]\s*(\d{1,2})$", line)
             if multiplier_match:
                 raw_member_keyword = multiplier_match.group(1).strip()
-                month_multiplier = int(multiplier_match.group(2))
-                amount = money(month_multiplier * 50)
+                amount = money(int(multiplier_match.group(2)) * 50)
             else:
                 parts = line.split()
-                if (
-                    len(parts) >= 2
-                    and re.fullmatch(r"\d+(?:\.\d+)?", parts[-1])
-                ):
+                if len(parts) >= 2 and re.fullmatch(r"\d+(?:\.\d+)?", parts[-1]):
                     last_number = money(parts[-1])
                     raw_member_keyword = " ".join(parts[:-1]).strip()
-                    if last_number == int(last_number) and 1 <= int(last_number) <= 49:
-                        amount = money(int(last_number) * 50)
-                    else:
-                        amount = last_number
+                    amount = money(int(last_number) * 50) if last_number == int(last_number) and 1 <= int(last_number) <= 49 else last_number
                 else:
                     amount = default_amount
                     raw_member_keyword = line
 
-            receipt_no = make_receipt_no(
-                receipt_start,
-                receipt_index
-            )
-            receipt_index += 1
+            # 银行过账且没有收条时保持空白；不会消耗下一张 OR。
+            receipt_no = make_receipt_no(receipt_start, receipt_index) if receipt_start else ""
+            if receipt_start:
+                receipt_index += 1
 
             error_messages = []
             warning_messages = []
-
-            # A. 金额基本检查
             if amount <= 0:
-                error_messages.append(
-                    f"第 {line_no} 行金额无效：{line}"
-                )
-
-            # 月费必须是 RM50 的倍数
+                error_messages.append(f"第 {line_no} 行金额无效：{line}")
             elif amount % 50 != 0:
-                error_messages.append(
-                    f"月费 RM{amount:.2f} "
-                    "不是 RM50 的倍数"
-                )
+                error_messages.append(f"月费 RM{amount:.2f} 不是 RM50 的倍数")
 
-            # B. 日期检查
             try:
-                receipt_date_obj = date.fromisoformat(
-                    current_receipt_date
-                )
-
-                month_lock_error = require_finance_month_open(
-                    current_receipt_date,
-                    get_fund_account(
-                        "月费",
-                        branch=branch
+                receipt_date_obj = date.fromisoformat(current_receipt_date)
+                if current_receipt_date not in month_lock_cache:
+                    month_lock_cache[current_receipt_date] = require_finance_month_open(
+                        current_receipt_date, get_fund_account("月费", branch=branch)
                     )
-                )
-
+                month_lock_error = month_lock_cache[current_receipt_date]
                 if month_lock_error:
-                    error_messages.append(
-                        month_lock_error
-                    )
-
+                    error_messages.append(month_lock_error)
                 if receipt_date_obj > today_date:
-                    error_messages.append(
-                        "收条日期是未来日期"
-                    )
-
+                    error_messages.append("收条日期是未来日期")
                 else:
-                    days_old = (
-                        today_date - receipt_date_obj
-                    ).days
-
+                    days_old = (today_date - receipt_date_obj).days
                     if days_old > 30:
-                        warning_messages.append(
-                            f"收条日期距今已有 "
-                            f"{days_old} 天，"
-                            "请确认是否为旧账补录"
-                        )
-
+                        warning_messages.append(f"收条日期距今已有 {days_old} 天，请确认是否为旧账补录")
             except (TypeError, ValueError):
-                error_messages.append(
-                    "收条日期格式无效"
-                )
+                error_messages.append("收条日期格式无效")
 
             if error_messages:
-                rows.append({
-                    "error": "；".join(error_messages),
-                    "warning": "；".join(warning_messages),
-                    "raw": line,
-                    "receipt_no": receipt_no,
-                    "receipt_date": current_receipt_date,
-                })
+                rows.append({"error": "；".join(error_messages), "warning": "；".join(warning_messages), "raw": line, "receipt_no": receipt_no, "receipt_date": current_receipt_date})
                 continue
 
-            # C. 会员查找
             if raw_member_keyword.isdigit():
-                member_id = (
-                    f"{branch}-{int(raw_member_keyword)}"
-                )
-
+                member_id = f"{branch}-{int(raw_member_keyword)}"
             else:
-                member_id = normalize_member_id(
-                    raw_member_keyword,
-                    default_branch=branch
-                )
+                member_id = normalize_member_id(raw_member_keyword, default_branch=branch)
 
-            # 先按会员编号查找
-            member = db_query("""
-                select *
-                from members
-                where member_id = %s
-                limit 1
-            """, (
-                member_id,
-            ), fetchone=True)
-
-            # 编号找不到时，再按中文名或英文名查找
+            member = members_by_id.get(str(member_id or "").upper())
             if not member:
-                name_matches = db_query("""
-                    select *
-                    from members
-                    where branch = %s
-                      and (
-                            lower(trim(name))
-                                = lower(trim(%s))
-                         or lower(
-                                trim(
-                                    coalesce(
-                                        english_name,
-                                        ''
-                                    )
-                                )
-                            )
-                                = lower(trim(%s))
-                         or regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g')
-                                in (%s, %s)
-                      )
-                    order by member_id
-                    limit 2
-                """, (
-                    branch,
-                    raw_member_keyword,
-                    raw_member_keyword,
-                    phone_search_variants(raw_member_keyword)[0],
-                    phone_search_variants(raw_member_keyword)[1],
-                ), fetchall=True) or []
-
-                if len(name_matches) == 1:
-                    member = name_matches[0]
-
-                elif len(name_matches) > 1:
-                    rows.append({
-                        "error": (
-                            f"第 {line_no} 行姓名有重复，"
-                            "请改用会员编号："
-                            f"{raw_member_keyword}"
-                        ),
-                        "warning": "",
-                        "raw": line,
-                        "receipt_no": receipt_no,
-                        "receipt_date": current_receipt_date,
-                    })
+                candidates = members_by_name.get(raw_member_keyword.casefold(), [])
+                if not candidates:
+                    for pv in phone_search_variants(raw_member_keyword):
+                        pdigits = re.sub(r"[^0-9]", "", str(pv or ""))
+                        if pdigits and pdigits in members_by_phone:
+                            candidates.extend(members_by_phone[pdigits])
+                # 保留当前分会优先，并去重
+                unique = {}
+                for m in candidates:
+                    if str(m.get("branch") or "").upper() == branch:
+                        unique[str(m.get("member_id"))] = m
+                candidates = list(unique.values())
+                if len(candidates) == 1:
+                    member = candidates[0]
+                elif len(candidates) > 1:
+                    rows.append({"error": f"第 {line_no} 行姓名有重复，请改用会员编号：{raw_member_keyword}", "warning": "", "raw": line, "receipt_no": receipt_no, "receipt_date": current_receipt_date})
                     continue
 
             if not member:
-                rows.append({
-                    "error": (
-                        f"第 {line_no} 行找不到会员："
-                        f"{raw_member_keyword}"
-                    ),
-                    "warning": "",
-                    "raw": line,
-                    "receipt_no": receipt_no,
-                    "receipt_date": current_receipt_date,
-                })
+                rows.append({"error": f"第 {line_no} 行找不到会员：{raw_member_keyword}", "warning": "", "raw": line, "receipt_no": receipt_no, "receipt_date": current_receipt_date})
                 continue
 
-            # 姓名查找成功后，必须改用数据库里的正式编号
             member_id = member["member_id"]
-
-            # D. 计算供养月份
-            paid = db_query("""
-                select max(end_month) as paid_until
-                from member_payments
-                where member_id = %s
-                  and coalesce(status, 'active') = 'active'
-            """, (
-                member_id,
-            ), fetchone=True)
-
-            paid_until_date = (
-                paid["paid_until"]
-                if paid
-                else None
-            )
-
-            month_from = next_month_ym(
-                paid_until_date
-            )
-
+            paid_until_date = paid_until_by_member.get(str(member_id).upper())
+            month_from = next_month_ym(paid_until_date)
             month_count = int(amount / 50)
+            month_to = add_months_ym(month_from, month_count - 1)
 
-            month_to = add_months_ym(
-                month_from,
-                month_count - 1
-            )
+            # 只有真正有收条号码才做重复收条检查。
+            if receipt_no:
+                rkey = receipt_no.upper()
+                existing_finance = rkey in finance_receipt_set
+                existing_payment = rkey in payment_receipts
+                if existing_finance and existing_payment:
+                    error_messages.append("收条已存在于财政记录和月费查询")
+                elif existing_finance:
+                    error_messages.append("收条已存在于财政记录")
+                elif existing_payment:
+                    error_messages.append("收条已存在于月费查询")
 
-            # E. 收条重复检查
-            existing_finance = db_query("""
-                select id
-                from finance_records
-                where receipt_no = %s
-                limit 1
-            """, (
-                receipt_no,
-            ), fetchone=True)
-
-            existing_payment = db_query("""
-                select id
-                from member_payments
-                where receipt_no = %s
-                  and coalesce(status, 'active') = 'active'
-                limit 1
-            """, (
-                receipt_no,
-            ), fetchone=True)
-
-            if existing_finance and existing_payment:
-                error_messages.append(
-                    "收条已存在于财政记录和月费查询"
-                )
-
-            elif existing_finance:
-                error_messages.append(
-                    "收条已存在于财政记录"
-                )
-
-            elif existing_payment:
-                error_messages.append(
-                    "收条已存在于月费查询"
-                )
-
-            # F. 同一会员、同一天重复月费提醒
-            same_day_payment = db_query("""
-                select
-                    receipt_no,
-                    amount
-                from member_payments
-                where member_id = %s
-                  and receipt_date = %s
-                  and coalesce(status, 'active') = 'active'
-                order by id desc
-                limit 1
-            """, (
-                member_id,
-                current_receipt_date,
-            ), fetchone=True)
-
+            same_day_payment = same_day_by_key.get((str(member_id).upper(), current_receipt_date))
             if same_day_payment:
-                old_receipt = (
-                    same_day_payment.get("receipt_no")
-                    or "无收条编号"
-                )
+                old_receipt = same_day_payment.get("receipt_no") or "无收条编号"
+                old_amount = float(same_day_payment.get("amount") or 0)
+                warning_messages.append(f"此会员同一天已有月费记录：{old_receipt}，RM{old_amount:.2f}")
 
-                old_amount = float(
-                    same_day_payment.get("amount")
-                    or 0
-                )
-
-                warning_messages.append(
-                    "此会员同一天已有月费记录："
-                    f"{old_receipt}，"
-                    f"RM{old_amount:.2f}"
-                )
-
-            # G. 银行付款日期检查
             if payment_method == "银行过账":
                 row_payment_date = bank_payment_date
-
                 try:
-                    payment_date_obj = date.fromisoformat(
-                        row_payment_date
-                    )
-
-                    if payment_date_obj > today_date:
-                        error_messages.append(
-                            "银行付款日期是未来日期"
-                        )
-
+                    if date.fromisoformat(row_payment_date) > today_date:
+                        error_messages.append("银行付款日期是未来日期")
                 except (TypeError, ValueError):
-                    error_messages.append(
-                        "银行付款日期格式无效"
-                    )
-
+                    error_messages.append("银行付款日期格式无效")
             else:
                 row_payment_date = current_receipt_date
 
             rows.append({
-                "error": "；".join(error_messages),
-                "warning": "；".join(warning_messages),
-                "receipt_no": receipt_no,
-                "receipt_date": current_receipt_date,
-                "payment_date": row_payment_date,
-                "member_id": member_id,
-                "name": (
-                    member.get("姓名")
-                    or member.get("name")
-                ),
-                "phone": (
-                    member.get("电话号码")
-                    or member.get("phone")
-                ),
-                "amount": amount,
-                "month_from": month_from,
-                "month_to": month_to,
+                "error": "；".join(error_messages), "warning": "；".join(warning_messages),
+                "receipt_no": receipt_no, "receipt_date": current_receipt_date,
+                "payment_date": row_payment_date, "member_id": member_id,
+                "name": member.get("姓名") or member.get("name"),
+                "phone": member.get("电话号码") or member.get("phone"),
+                "amount": amount, "month_from": month_from, "month_to": month_to,
                 "month_count": month_count,
             })
-
         return rows
 
     if request.method == "POST":
@@ -7730,10 +7558,10 @@ def monthly_fee_batch(branch):
 
             current_book_no = receipt_book_no
 
-        if not receipt_start:
-            message = "请填写收条开始号码"
+        if payment_method == "现金" and not receipt_start:
+            message = "现金月费必须填写收条开始号码"
 
-        elif not re.match(
+        elif receipt_start and not re.match(
             rf"^{branch}\d+$",
             receipt_start
         ):
@@ -7963,7 +7791,7 @@ body{background:#eef4fa}
 .box-label{display:block;margin-bottom:7px;font-weight:850;color:#23384d}
 .date-controls{display:grid;grid-template-columns:42px minmax(220px,1fr) 42px 110px;gap:8px}
 .date-controls button,.date-controls input{height:44px;border:1px solid #b9c9d8;border-radius:9px;background:#fff;font-size:16px;font-weight:800}
-.date-controls input{width:100%;padding:0 10px;color:#163b5b}.date-controls .f2{background:#1769aa;color:#fff;border-color:#1769aa}
+.date-controls input{width:100%;padding:0 10px;color:#163b5b;text-align:center}.date-controls .f2{background:#1769aa;color:#fff;border-color:#1769aa}
 .date-status{margin-top:7px;color:#667085;font-size:13px}
 .receipt-top{display:flex;flex-direction:column;gap:10px}.or-row{display:grid;grid-template-columns:120px minmax(140px,220px);gap:10px;align-items:center}.or-row .box-label{margin:0}.or-row input{width:100%;min-width:0}.receipt-number-row{display:grid;grid-template-columns:120px minmax(0,1fr);gap:10px;align-items:start}.receipt-number-row>.box-label{margin:11px 0 0}.receipt-input{display:grid;grid-template-columns:62px minmax(180px,1fr);gap:8px}.prefix{display:flex;align-items:center;justify-content:center;min-width:0;border-radius:9px;background:#eaf4ff;color:#1769aa;font-weight:850}.receipt-input input{width:100%;min-width:0}
 .form-input,.form-select,textarea{border:1px solid #c8d4e0;border-radius:10px;background:#fff;padding:10px 12px;font-size:17px}
@@ -8032,10 +7860,10 @@ body{background:#eef4fa}
             <label class="box-label">📅 默认开收条日期</label>
             <div class="date-controls">
               <button type="button" onclick="changeBatchDate(-1)">←</button>
-              <input id="batch_insert_date" name="receipt_date" type="date" value="{{ default_receipt_date }}">
+              <input id="batch_insert_date_display" type="text" inputmode="numeric" placeholder="DD/MM/YYYY" autocomplete="off"><input id="batch_insert_date" name="receipt_date" type="hidden" value="{{ default_receipt_date }}">
               <button type="button" onclick="changeBatchDate(1)">→</button>
             </div>
-            <div id="batch_date_status" class="date-status">当前日期：{{ default_receipt_date }}；之后加入的记录会使用这个日期。</div>
+            <div id="batch_date_status" class="date-status">当前日期；之后加入的记录会使用这个日期。</div>
           </div>
         </div>
         <div class="quick-section">
@@ -8055,6 +7883,7 @@ body{background:#eef4fa}
 
       <section class="panel">
         <h2 class="panel-title"><span class="badge">2</span>待录入清单与付款资料</h2>
+        <div class="date-status" style="margin:0 0 8px"><strong>📅 当前录入日期：</strong><span id="pending_date_display"></span></div>
         <textarea id="raw_text" class="batch-textarea" name="raw_text" placeholder="单笔加入会自动逐行排列；每位会员一行。也可直接贴上多位会员资料。&#10;&#10;例如：&#10;108 50&#10;188 100">{{ raw_text }}</textarea>
         <input type="hidden" id="batch_row_dates" name="batch_row_dates" value="{{ batch_row_dates_raw }}">
         <div class="receipt-check">
@@ -8063,23 +7892,27 @@ body{background:#eef4fa}
           <div id="receipt_check_summary" class="receipt-summary">共 0 张 · RM 0.00</div>
         </div>
         <div class="payment-grid">
-          <div><label class="form-label">付款方式</label><select id="payment_method" class="form-select" name="payment_method" onchange="togglePaymentDate()"><option value="现金" {% if payment_method=='现金' %}selected{% endif %}>现金</option><option value="银行过账" {% if payment_method=='银行过账' %}selected{% endif %}>银行过账</option></select></div>
-          <div id="payment_date_box"><label class="form-label">银行付款日期</label><input class="form-input" name="payment_date" type="date" value="{{ bank_payment_date }}"></div>
+          <div><label class="form-label">收条／记录日期</label><input id="payment_receipt_date_display" class="form-input" type="text" readonly></div>
+          <div><label class="form-label">付款方式</label><select id="payment_method" class="form-select" name="payment_method" onchange="togglePaymentDate(true)"><option value="现金" {% if payment_method=='现金' %}selected{% endif %}>现金</option><option value="银行过账" {% if payment_method=='银行过账' %}selected{% endif %}>银行过账</option></select></div>
+          <div id="payment_date_box"><label class="form-label">银行付款日期</label><input id="bank_payment_date_display" class="form-input" type="text" inputmode="numeric" placeholder="DD/MM/YYYY" autocomplete="off"><input id="bank_payment_date" name="payment_date" type="hidden" value="{{ bank_payment_date }}"></div>
         </div>
         <div class="actions {% if not (preview_rows and not has_preview_error) %}single{% endif %}"><button class="preview-btn" type="submit" name="action" value="preview">👁️ 预览资料</button>{% if preview_rows and not has_preview_error %}<button class="confirm-btn" type="submit" name="action" value="confirm" onclick="return confirm('确定全部入账？')">✅ 确认全部入账</button>{% endif %}</div>
       </section>
 
       {% if preview_rows %}
-      <section class="panel preview-card"><h2 class="panel-title"><span class="badge">3</span>月费录入预览</h2><div class="table-responsive"><table class="record-table"><thead><tr><th>收条</th><th>日期</th><th>会员编号</th><th>姓名</th><th>金额</th><th>开始月份</th><th>缴费至</th><th>月数</th><th>检查</th></tr></thead><tbody>{% for r in preview_rows %}<tr><td>{{ r.receipt_no or '-' }}</td><td>{{ r.receipt_date or '-' }}</td><td><strong>{{ r.member_id or '-' }}</strong></td><td>{{ r.name or '-' }}</td><td>{% if r.amount %}RM {{ '%.2f'|format(r.amount) }}{% else %}-{% endif %}</td><td>{{ r.month_from or '-' }}</td><td>{{ r.month_to or '-' }}</td><td>{% if r.month_count %}{{ r.month_count }}个月{% else %}-{% endif %}</td><td>{% if r.error %}<span class="err">❌ {{ r.error }}</span>{% elif r.warning %}<span class="warn">⚠️ {{ r.warning }}</span>{% else %}<span class="ok">✅ 可以入账</span>{% endif %}</td></tr>{% endfor %}</tbody></table></div></section>
+      <section class="panel preview-card"><h2 class="panel-title"><span class="badge">3</span>月费录入预览</h2><div class="table-responsive"><table class="record-table"><thead><tr><th>收条</th><th>日期</th><th>会员编号</th><th>姓名</th><th>金额</th><th>开始月份</th><th>缴费至</th><th>月数</th><th>检查</th></tr></thead><tbody>{% for r in preview_rows %}<tr><td>{{ r.receipt_no or '-' }}</td><td>{{ display_date(r.receipt_date) if r.receipt_date else '-' }}</td><td><strong>{{ r.member_id or '-' }}</strong></td><td>{{ r.name or '-' }}</td><td>{% if r.amount %}RM {{ '%.2f'|format(r.amount) }}{% else %}-{% endif %}</td><td>{{ r.month_from or '-' }}</td><td>{{ r.month_to or '-' }}</td><td>{% if r.month_count %}{{ r.month_count }}个月{% else %}-{% endif %}</td><td>{% if r.error %}<span class="err">❌ {{ r.error }}</span>{% elif r.warning %}<span class="warn">⚠️ {{ r.warning }}</span>{% else %}<span class="ok">✅ 可以入账</span>{% endif %}</td></tr>{% endfor %}</tbody></table></div></section>
       {% endif %}
     </div>
   </form>
 </div>
 <script>
 function iso(d){return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")}
+function displayDate(v){if(!v)return "";const p=String(v).slice(0,10).split("-");return p.length===3?p[2]+"/"+p[1]+"/"+p[0]:v}
+function parseDisplayDate(v){const m=String(v||"").trim().match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);if(!m)return "";const d=new Date(Number(m[3]),Number(m[2])-1,Number(m[1]));if(d.getFullYear()!=Number(m[3])||d.getMonth()!=Number(m[2])-1||d.getDate()!=Number(m[1]))return "";return iso(d)}
 function selectedReceiptDate(){const i=document.getElementById("batch_insert_date");return i&&i.value?i.value:"{{ default_receipt_date }}"}
-function changeBatchDate(days){const i=document.getElementById("batch_insert_date");const d=i.value?new Date(i.value+"T00:00:00"):new Date();d.setDate(d.getDate()+days);i.value=iso(d);updateDateStatus();}
-function updateDateStatus(){const i=document.getElementById("batch_insert_date"),s=document.getElementById("batch_date_status");if(s)s.textContent="当前日期："+(i.value||"未选择")+"；之后加入的记录会使用这个日期。"}
+function changeBatchDate(days){const i=document.getElementById("batch_insert_date");const d=i.value?new Date(i.value+"T00:00:00"):new Date();d.setDate(d.getDate()+days);i.value=iso(d);syncDateDisplays();updateDateStatus();}
+function syncDateDisplays(){const isoValue=selectedReceiptDate(),shown=displayDate(isoValue);["batch_insert_date_display","pending_date_display","payment_receipt_date_display"].forEach(id=>{const e=document.getElementById(id);if(e)e.value!==undefined?e.value=shown:e.textContent=shown})}
+function updateDateStatus(){const i=document.getElementById("batch_insert_date"),s=document.getElementById("batch_date_status");if(s)s.textContent="当前日期："+displayDate(i.value||"")+"；之后加入的记录会使用这个日期。";syncDateDisplays()}
 let batchRowDates=[];
 function saveBatchRowDates(){const h=document.getElementById("batch_row_dates");if(h)h.value=batchRowDates.join(",")}
 function countDataRows(){return document.getElementById("raw_text").value.split(/\r?\n/).filter(x=>{const v=x.trim();return v&&!v.startsWith("@")} ).length}
@@ -8132,11 +7965,11 @@ function refreshReceiptCheck(){
     const start=parseInt(String(startEl.value||"").replace(/\D/g,""),10),rows=[];let total=0,rowIndex=0;
     t.value.split(/\r?\n/).forEach(raw=>{const line=raw.trim();if(!line||line.startsWith("@"))return;const row=parseReceiptRow(line);row.receiptDate=batchRowDates[rowIndex]||selectedReceiptDate();rowIndex+=1;rows.push(row);total+=row.amount});
     body.innerHTML="";
-    if(Number.isFinite(start))rows.forEach((r,i)=>{
+    rows.forEach((r,i)=>{
         const tr=document.createElement("tr");
         const nameCell=document.createElement("td");
         nameCell.textContent="查询中…";
-        tr.innerHTML="<td>"+receiptNo(start+i)+"</td><td>"+escapeHtml(r.receiptDate)+"</td><td>"+escapeHtml(r.keyword)+"</td>";
+        const hasReceipt=Number.isFinite(start);tr.innerHTML="<td>"+(hasReceipt?receiptNo(start+i):"待补")+"</td><td>"+escapeHtml(displayDate(r.receiptDate))+"</td><td>"+escapeHtml(r.keyword)+"</td>";
         tr.appendChild(nameCell);
         const amountCell=document.createElement("td");amountCell.textContent="RM "+r.amount.toFixed(2);tr.appendChild(amountCell);body.appendChild(tr);
         lookupMonthlyMember(r.keyword).then(member=>{
@@ -8145,13 +7978,14 @@ function refreshReceiptCheck(){
         })
     });
     empty.style.display=rows.length?"none":"block";
-    next.textContent="下一张："+(Number.isFinite(start)?receiptNo(start+rows.length):"—");
+    const isBank=document.getElementById("payment_method").value==="银行过账";next.textContent=(isBank&&!Number.isFinite(start))?"银行过账：收条待补，不占用 OR":"下一张："+(Number.isFinite(start)?receiptNo(start+rows.length):"—");
     sum.textContent="共 "+rows.length+" 张 · RM "+total.toFixed(2)
 }
-function togglePaymentDate(){const m=document.getElementById("payment_method"),b=document.getElementById("payment_date_box");b.style.display=m.value==="银行过账"?"block":"none"}
-document.addEventListener("DOMContentLoaded",()=>{const k=document.getElementById("quick_member_keyword"),status=document.getElementById("space_mode_status");let mode=false;function setMode(v){mode=v;status.classList.toggle("active",v);status.textContent=v?"金额快捷模式：请按 1～0（1=RM50，2=RM100…0=RM500）":"输入编号后按 Space，再按 1～0；例如 208 → Space → 2 → Enter = RM100"}k.addEventListener("keydown",e=>{if(e.key===" "&&k.value.trim()&&!mode){e.preventDefault();setMode(true);return}if(mode&&/^[0-9]$/.test(e.key)){e.preventDefault();const n=e.key==="0"?10:Number(e.key),btn=document.querySelector('.multi-btn[data-months="'+n+'"]');setMonthMultiplier(n,btn);setMode(false);return}if(e.key==="Enter"){e.preventDefault();setMode(false);addQuickMember()}if(e.key==="Escape"&&mode){e.preventDefault();setMode(false)}});document.getElementById("batch_insert_date").addEventListener("change",()=>updateDateStatus());document.getElementById("raw_text").addEventListener("input",refreshReceiptCheck);document.querySelector('[name="receipt_start"]').addEventListener("input",refreshReceiptCheck);const hiddenDates=document.getElementById("batch_row_dates");batchRowDates=(hiddenDates&&hiddenDates.value?hiddenDates.value.split(",").filter(Boolean):[]);
+function togglePaymentDate(userChange=false){const m=document.getElementById("payment_method"),b=document.getElementById("payment_date_box"),r=document.querySelector('[name="receipt_start"]');b.style.display=m.value==="银行过账"?"block":"none";if(userChange&&m.value==="银行过账"){r.value=""}if(m.value==="银行过账"&&!r.value.trim()){r.placeholder="银行过账可留空，确认后再补收条"}else{r.placeholder=""}refreshReceiptCheck()}
+document.addEventListener("DOMContentLoaded",()=>{const k=document.getElementById("quick_member_keyword"),status=document.getElementById("space_mode_status");let mode=false;function setMode(v){mode=v;status.classList.toggle("active",v);status.textContent=v?"金额快捷模式：请按 1～0（1=RM50，2=RM100…0=RM500）":"输入编号后按 Space，再按 1～0；例如 208 → Space → 2 → Enter = RM100"}k.addEventListener("keydown",e=>{if(e.key===" "&&k.value.trim()&&!mode){e.preventDefault();setMode(true);return}if(mode&&/^[0-9]$/.test(e.key)){e.preventDefault();const n=e.key==="0"?10:Number(e.key),btn=document.querySelector('.multi-btn[data-months="'+n+'"]');setMonthMultiplier(n,btn);setMode(false);return}if(e.key==="Enter"){e.preventDefault();setMode(false);addQuickMember()}if(e.key==="Escape"&&mode){e.preventDefault();setMode(false)}});const dateDisplay=document.getElementById("batch_insert_date_display");dateDisplay.addEventListener("change",()=>{const v=parseDisplayDate(dateDisplay.value);if(!v){alert("日期请使用 DD/MM/YYYY，例如 01/10/2026");dateDisplay.value=displayDate(selectedReceiptDate());return}document.getElementById("batch_insert_date").value=v;updateDateStatus();refreshReceiptCheck()});document.getElementById("raw_text").addEventListener("input",refreshReceiptCheck);document.querySelector('[name="receipt_start"]').addEventListener("input",refreshReceiptCheck);const hiddenDates=document.getElementById("batch_row_dates");batchRowDates=(hiddenDates&&hiddenDates.value?hiddenDates.value.split(",").filter(Boolean):[]);
 const rawText=document.getElementById("raw_text");rawText.addEventListener("input",()=>{syncBatchRowDates();refreshReceiptCheck()});
-const dateInput=document.getElementById("batch_insert_date");dateInput.addEventListener("change",()=>{updateDateStatus();if(countDataRows()===0){batchRowDates=[];saveBatchRowDates()}refreshReceiptCheck()});
+const dateInput=document.getElementById("batch_insert_date");
+const bankHidden=document.getElementById("bank_payment_date"),bankDisplay=document.getElementById("bank_payment_date_display");if(bankDisplay&&bankHidden){bankDisplay.value=displayDate(bankHidden.value);bankDisplay.addEventListener("change",()=>{const v=parseDisplayDate(bankDisplay.value);if(!v){alert("银行付款日期请使用 DD/MM/YYYY");bankDisplay.value=displayDate(bankHidden.value);return}bankHidden.value=v})}
 document.addEventListener("keydown",e=>{if(e.ctrlKey&&e.key==="Enter"){e.preventDefault();document.querySelector('button[value="preview"]').click()}});togglePaymentDate();updateDateStatus();syncBatchRowDates();refreshReceiptCheck()});
 </script>
 </body>
@@ -8169,6 +8003,7 @@ document.addEventListener("keydown",e=>{if(e.ctrlKey&&e.key==="Enter"){e.prevent
         payment_method=payment_method,
         preview_rows=preview_rows,
         has_preview_error=any(row.get("error") for row in preview_rows),
+        display_date=lambda v: (date.fromisoformat(str(v)[:10]).strftime("%d/%m/%Y") if v else ""),
     )
 
 STW_BANK_IMPORT_DIR = Path(

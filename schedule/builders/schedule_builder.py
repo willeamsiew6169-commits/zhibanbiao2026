@@ -192,9 +192,16 @@ def build_master_table_section(arranged):
 
 
 def patch_schedule_for_date(date_str, only_signup_id=None):
+    """
+    发布后的补排。
+
+    - 正常先走原有整日计算逻辑。
+    - only_signup_id 有值时，只写入这一次报名的 assignment。
+    - 如果正常算法没有产生这位「值班」报名，则启动单人 fallback，
+      让发布后的临时报名不会一直卡在 pending。
+    """
 
     try:
-
         date_obj, arranged, assigned_rows, special_info, remove_info = \
             calculate_schedule_for_date(
                 date_str,
@@ -203,17 +210,168 @@ def patch_schedule_for_date(date_str, only_signup_id=None):
 
         print("========== PATCH DEBUG ==========")
         print("日期:", date_str)
+        print("only_signup_id:", only_signup_id)
         print("理论排班数量:", len(assigned_rows))
 
         for r in assigned_rows:
             print(
-                r["signup_id"],
-                r["role"],
-                r["assigned_place"],
+                r.get("signup_id"),
+                r.get("role"),
+                r.get("assigned_place"),
                 r.get("shift_label"),
                 r.get("start_time"),
                 r.get("end_time")
             )
+
+        # =========================================================
+        # 发布后单笔补排保险：只针对「值班」
+        # =========================================================
+        if only_signup_id is not None:
+            target_id = int(only_signup_id)
+
+            target_rows = [
+                r for r in assigned_rows
+                if r.get("signup_id") is not None
+                and int(r.get("signup_id")) == target_id
+            ]
+
+            if not target_rows:
+                signup = db_query("""
+                    select
+                        id,
+                        volunteer_id,
+                        name,
+                        signup_date,
+                        role,
+                        start_time,
+                        end_time,
+                        status
+                    from volunteer_schedule_signups
+                    where id = %s
+                    and coalesce(status, 'pending') <> 'cancelled'
+                """, (target_id,), fetchone=True)
+
+                if signup and signup.get("role") == "值班":
+
+                    def _to_minutes(value):
+                        if value is None:
+                            return None
+
+                        txt = str(value).strip().lower().replace(" ", "")
+
+                        if re.match(r"^\d{1,2}(am|pm)$", txt):
+                            txt = txt.replace("am", ":00am").replace("pm", ":00pm")
+
+                        for fmt in ("%H:%M", "%H:%M:%S", "%I:%M%p"):
+                            try:
+                                dt = datetime.strptime(txt, fmt)
+                                return dt.hour * 60 + dt.minute
+                            except Exception:
+                                pass
+
+                        return None
+
+                    def _to_ampm(minutes):
+                        hour = minutes // 60
+                        minute = minutes % 60
+                        suffix = "am" if hour < 12 else "pm"
+                        hour12 = hour % 12 or 12
+                        return f"{hour12}:{minute:02d}{suffix}"
+
+                    def _shift_of(minutes):
+                        if minutes < 10 * 60:
+                            return "绿"
+                        if minutes < 14 * 60:
+                            return "橙"
+                        return "黄"
+
+                    def _choose_place(shift, volunteer_id):
+                        # 财政特殊规则：STW-152 永远活动中心
+                        if str(volunteer_id or "").strip().upper() == "STW-152":
+                            return "活动中心"
+
+                        rows = db_query("""
+                            select assigned_place, count(*) as cnt
+                            from volunteer_schedule_assignments
+                            where assignment_date = %s
+                            and role = '值班'
+                            and shift_label = %s
+                            and assigned_place in ('观音堂', '活动中心')
+                            group by assigned_place
+                        """, (date_str, shift), fetchall=True) or []
+
+                        counts = {"观音堂": 0, "活动中心": 0}
+                        for row in rows:
+                            place = row.get("assigned_place")
+                            if place in counts:
+                                counts[place] = int(row.get("cnt") or 0)
+
+                        if counts["观音堂"] <= counts["活动中心"]:
+                            return "观音堂"
+                        return "活动中心"
+
+                    start_min = _to_minutes(signup.get("start_time"))
+                    end_min = _to_minutes(signup.get("end_time"))
+
+                    if start_min is None:
+                        start_min = 10 * 60
+                    if end_min is None:
+                        end_min = 14 * 60
+
+                    if end_min > start_min:
+                        segments = []
+
+                        # 4 小时或以上：与原有发布后补排规则一致，拆两段
+                        if end_min - start_min >= 4 * 60:
+                            mid = start_min + ((end_min - start_min) // 2)
+                            segments = [
+                                (start_min, mid),
+                                (mid, end_min),
+                            ]
+                        else:
+                            segments = [(start_min, end_min)]
+
+                        last_place = None
+
+                        for seg_start, seg_end in segments:
+                            shift = _shift_of(seg_start)
+                            place = _choose_place(
+                                shift,
+                                signup.get("volunteer_id")
+                            )
+
+                            # 两段时尽量换地点；STW-152 除外
+                            if (
+                                last_place is not None
+                                and str(signup.get("volunteer_id") or "").strip().upper() != "STW-152"
+                                and place == last_place
+                            ):
+                                place = "活动中心" if place == "观音堂" else "观音堂"
+
+                            target_rows.append({
+                                "signup_id": target_id,
+                                "volunteer_id": signup.get("volunteer_id"),
+                                "name": signup.get("name"),
+                                "role": "值班",
+                                "shift_label": shift,
+                                "assigned_place": place,
+                                "start_time": _to_ampm(seg_start),
+                                "end_time": _to_ampm(seg_end),
+                            })
+
+                            last_place = place
+
+                        print(
+                            "✅ fallback 自动补排：",
+                            signup.get("name"),
+                            len(target_rows),
+                            "笔"
+                        )
+
+            # 单笔 patch 只交目标 signup 的 rows 给数据库
+            if target_rows:
+                assigned_rows = target_rows
+
         print("=================================")
 
         inserted = sync_patch_assignments(
@@ -223,16 +381,13 @@ def patch_schedule_for_date(date_str, only_signup_id=None):
         )
 
         print(f"✅ Patch 完成，共新增 {inserted} 笔 assignment")
-
         return inserted
 
     except Exception as e:
-
         print("❌ patch_schedule_for_date 失败：", e)
         traceback.print_exc()
-
         return 0
-    
+
 def sync_schedule_after_signup_change(signup_id, action="upsert", changed_by="system"):
     """
     V2 统一同步函数

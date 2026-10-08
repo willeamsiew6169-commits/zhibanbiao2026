@@ -392,31 +392,54 @@ def volunteer_signup():
                 food_offering_task = None
                 food_offering_item = None
 
-            # 检查是否已经有相同岗位、相同细项的报名
-            cur.execute("""
-                select id
-                from volunteer_schedule_signups
-                where volunteer_id = %s
-                and signup_date = %s
-                and role = %s
-                and (
-                        role <> '供台'
-                        or coalesce(supply_task, 'setup')
-                        = coalesce(%s, 'setup')
-                    )
-                and (
-                        role <> '素食结缘'
-                        or food_offering_task = %s
-                    )
-                and coalesce(status, 'pending') <> 'cancelled'
-                limit 1
-            """, (
-                vol_id,
-                signup_date,
-                role,
-                supply_task,
-                food_offering_task
-            ))
+            # ============================================================
+            # 检查重复报名
+            #
+            # 值班：同一天允许多轮；只有开始、结束时间都相同才算重复。
+            # 其他岗位：维持原本规则（同岗位 / 同细项只保留一笔）。
+            # ============================================================
+            if role == "值班":
+                cur.execute("""
+                    select id
+                    from volunteer_schedule_signups
+                    where volunteer_id = %s
+                    and signup_date = %s
+                    and role = '值班'
+                    and start_time = %s
+                    and end_time = %s
+                    and coalesce(status, 'pending') <> 'cancelled'
+                    limit 1
+                """, (
+                    vol_id,
+                    signup_date,
+                    start_time,
+                    end_time
+                ))
+            else:
+                cur.execute("""
+                    select id
+                    from volunteer_schedule_signups
+                    where volunteer_id = %s
+                    and signup_date = %s
+                    and role = %s
+                    and (
+                            role <> '供台'
+                            or coalesce(supply_task, 'setup')
+                            = coalesce(%s, 'setup')
+                        )
+                    and (
+                            role <> '素食结缘'
+                            or food_offering_task = %s
+                        )
+                    and coalesce(status, 'pending') <> 'cancelled'
+                    limit 1
+                """, (
+                    vol_id,
+                    signup_date,
+                    role,
+                    supply_task,
+                    food_offering_task
+                ))
 
             existing = cur.fetchone()
 
@@ -1305,6 +1328,30 @@ def volunteer_my_schedule():
             """, (vol_id,))
             rows = cur.fetchall()
 
+            # 正式排班必须以 assignments 为准，不能只看 signup.status / assigned_place
+            cur.execute("""
+                select
+                    signup_id,
+                    role,
+                    shift_label,
+                    assigned_place,
+                    start_time,
+                    end_time
+                from volunteer_schedule_assignments
+                where volunteer_id = %s
+                and coalesce(status, 'assigned') <> 'cancelled'
+                order by assignment_date, start_time, id
+            """, (vol_id,))
+
+            assignment_rows = cur.fetchall()
+
+    assignments_by_signup = {}
+    for a in assignment_rows:
+        sid = a.get("signup_id")
+        if sid is None:
+            continue
+        assignments_by_signup.setdefault(int(sid), []).append(a)
+
     html = f"""
     <!doctype html>
     <html>
@@ -1393,22 +1440,66 @@ def volunteer_my_schedule():
         """
     else:
         for r in rows:
-            assigned_place = r.get("assigned_place") or "尚未安排"
+            signup_id = int(r["id"])
+            formal_rows = assignments_by_signup.get(signup_id, [])
             status = str(r.get("status") or "pending")
 
-            if status == "pending":
-                status_text = "🟡 等待负责人安排"
-            elif status == "assigned":
-                status_text = "🟢 已安排"
+            # ===============================================
+            # 我的报名：正式安排一律读取 assignments
+            # ===============================================
+            if formal_rows:
+                status_text = "🟢 已正式安排"
+
+                assignment_html = ""
+                for a in formal_rows:
+                    shift = a.get("shift_label") or ""
+                    place = a.get("assigned_place") or ""
+                    a_start = a.get("start_time") or ""
+                    a_end = a.get("end_time") or ""
+
+                    assignment_html += f"""
+                    <div style="
+                        margin-top:10px;
+                        padding:12px 14px;
+                        background:#e8f5e9;
+                        border-radius:10px;
+                        line-height:1.5;
+                    ">
+                        📍 <b>{place}</b><br>
+                        🕐 {a_start} ~ {a_end}
+                        {f'<br>班段：{shift}' if shift else ''}
+                    </div>
+                    """
+
+                system_arrangement_html = f"""
+                    <div style="margin-top:8px;">
+                        <b>系统正式安排：</b>
+                        {assignment_html}
+                    </div>
+                """
+
             else:
-                status_text = status
+                # 没有 assignment 才是真正未安排
+                if status == "pending":
+                    status_text = "🟡 等待正式安排"
+                elif status == "assigned":
+                    # 防止 signup.status 已是 assigned，但 assignment 实际不存在
+                    status_text = "🟠 正式安排尚未建立"
+                else:
+                    status_text = status
+
+                system_arrangement_html = """
+                    <div style="margin-top:8px;">
+                        <b>系统正式安排：</b>尚未安排
+                    </div>
+                """
 
             html += f"""
             <div class="card">
                 📅 <b>{r["signup_date"]}</b><br>
                 岗位：<b>{r["role"]}</b><br>
-                时间：{r["start_time"]} ~ {r["end_time"]}<br>
-                系统安排：{assigned_place}<br>
+                报名时间：{r["start_time"]} ~ {r["end_time"]}<br>
+                {system_arrangement_html}
                 状态：<span class="status">{status_text}</span>
             """
 

@@ -1486,20 +1486,52 @@ def schedule_prebook_add():
                     role_start = None
                     role_end = None
 
-                cur.execute("""
-                    select id
-                    from volunteer_schedule_signups
-                    where volunteer_id = %s
-                    and signup_date = %s
-                    and role = %s
-                    and coalesce(status, 'pending') <> 'cancelled'
-                    limit 1
-                """, (
-                    volunteer_id,
-                    signup_date,
-                    role
-                ))
+                # ============================================================
+                # 检查重复报名
+                #
+                # 值班：
+                #   同一天允许多轮值班
+                #   只有「开始时间 + 结束时间」完全相同才算重复
+                #
+                # 其他岗位：
+                #   同一天同岗位只允许一笔
+                # ============================================================
 
+                if role == "值班":
+
+                    cur.execute("""
+                        select id
+                        from volunteer_schedule_signups
+                        where volunteer_id = %s
+                        and signup_date = %s
+                        and role = '值班'
+                        and start_time = %s
+                        and end_time = %s
+                        and coalesce(status, 'pending') <> 'cancelled'
+                        limit 1
+                    """, (
+                        volunteer_id,
+                        signup_date,
+                        role_start,
+                        role_end
+                    ))
+
+                else:
+
+                    cur.execute("""
+                        select id
+                        from volunteer_schedule_signups
+                        where volunteer_id = %s
+                        and signup_date = %s
+                        and role = %s
+                        and coalesce(status, 'pending') <> 'cancelled'
+                        limit 1
+                    """, (
+                        volunteer_id,
+                        signup_date,
+                        role
+                    ))
+                
                 exists = cur.fetchone()
 
                 if exists:
@@ -2186,17 +2218,23 @@ def schedule_parse_raw():
                 volunteer_id = str(vol["id"])
                 real_name = str(vol["name"])
 
+                # 同一位义工同一天可以报名多轮值班。
+                # 只有日期、岗位、开始时间、结束时间全部相同，才视为重复报名。
                 cur.execute("""
                     select id
                     from volunteer_schedule_signups
                     where volunteer_id = %s
                     and signup_date = %s
                     and role = '值班'
+                    and start_time = %s
+                    and end_time = %s
                     and coalesce(status,'pending') <> 'cancelled'
                     limit 1
                 """, (
                     volunteer_id,
-                    signup_date
+                    signup_date,
+                    start_time,
+                    end_time
                 ))
 
                 exists = cur.fetchone()
@@ -4779,62 +4817,41 @@ html {
 
 <div class="top-bar">
     <h1>📅 负责人排班系统</h1>
+    <a class="btn-tool btn-blue" style="width:auto" href="/schedule">🏠 负责人首页</a>
 
     <a class="btn-tool btn-gray" style="width:auto;min-width:160px;" href="/schedule/logout">
         🚪 退出登录
     </a>
 </div>
 
+{% if mode not in ("day", "signup", "special", "controls") %}
 <div class="card">
-    <h2 class="section-title">📅 今日工作</h2>
-
-    <div class="btn-row">
-
-        <a class="btn-tool btn-primary"
-           href="{{ url_for(
-                'schedule.schedule_admin',
-                mode='day',
-                override_date=override_date
-           ) }}#today-schedule">
-            📅 当天安排
-        </a>
-
-        <a class="btn-tool btn-orange"
-           href="/schedule/notice_center?date={{ override_date }}">
-            📢 通知中心
-        </a>
-
-        <a class="btn-tool btn-purple"
-           href="/schedule/signups">
-            📋 报名管理
-        </a>
-
-    </div>
+ <h2 class="section-title">📊 今日报名概况 · {{ override_date }}</h2>
+ <div class="action-grid">
+  <div class="date-card">📋 已报名：<b>{{ day_summary.total }}</b></div>
+  <div class="date-card">🟠 待安排：<b>{{ day_summary.pending }}</b></div>
+  <div class="date-card">🟢 已安排：<b>{{ day_summary.assigned }}</b></div>
+  <div class="date-card">⚪ 已取消：<b>{{ day_summary.cancelled }}</b></div>
+ </div>
+ <a class="btn-tool btn-primary" href="/schedule?mode=day&override_date={{ override_date }}">⭐ 进入今日安排 →</a>
 </div>
 
 <div class="card">
-    <h2 class="section-title">⚙️ 系统功能</h2>
-
+    <h2 class="section-title">🌸 管理功能</h2>
     <div class="main-menu">
-
-        <a class="btn-tool btn-gray"
-           href="/schedule/settings">
-            ⚙️ 排班设置
-        </a>
-
-        <a class="btn-tool btn-green"
-           href="/reports">
-            📚 资料中心
-        </a>
-
-        <a class="btn-tool btn-blue"
-           href="/volunteer">
-            👥 打开义工报名页面
-        </a>
-
+      <a class="btn-tool btn-green" style="background:#159947;border-color:#159947;color:#fff" href="/schedule?mode=signup&override_date={{ override_date }}">👥 报名管理（代报名 / WhatsApp 解析）</a>
+      <a class="btn-tool btn-orange" style="background:#ef7118;border-color:#ef7118;color:#fff" href="/schedule/notice_center?date={{ override_date }}">📢 通知中心</a>
+      <a class="btn-tool btn-purple" style="background:#8039e8;border-color:#8039e8;color:#fff" href="/schedule/signups">📋 报名记录</a>
+      <a class="btn-tool btn-gray" style="background:#d64a84;border-color:#d64a84;color:#fff" href="/schedule?mode=special&override_date={{ override_date }}">🌸 供台及佛台特别安排</a>
+      <a class="btn-tool btn-gray" style="background:#078b9b;border-color:#078b9b;color:#fff" href="/schedule?mode=controls&override_date={{ override_date }}">🔧 报名开放控制</a>
+      <a class="btn-tool btn-green" style="background:#b47a17;border-color:#b47a17;color:#fff" href="/reports">📚 资料中心</a>
+      <a class="btn-tool btn-gray" style="background:#596879;border-color:#596879;color:#fff" href="/schedule/settings">⚙️ 排班设置</a>
+      <a class="btn-tool btn-blue" style="background:#275de4;border-color:#275de4;color:#fff" href="/volunteer">👥 打开义工报名页面</a>
     </div>
 </div>
+{% endif %}
 
+{% if mode in ("day", "signup", "special", "controls") %}
 {% if mode == "day" %}
 
 <div class="card today-panel" id="today-schedule">
@@ -5021,27 +5038,25 @@ html {
 
         <a href="/schedule/notice_center?date={{ override_date }}"
            class="btn-tool btn-orange">
-            📢 通知中心
-            <span class="helper-text">报名通知 / WhatsApp / 缺义工通知</span>
+            📢 报名通知／通知中心
+            <span class="helper-text">晚上7点报名通知 / WhatsApp / 缺义工通知</span>
         </a>
 
         {% if is_published %}
-        <a href="/schedule/attendance_status" class="btn-tool btn-blue">
+        <a href="/schedule/attendance_status" class="btn-tool btn-blue" style="background:#078b9b;border-color:#078b9b;color:#fff">
             📋 签到情况
             <span class="helper-text">查看义工签到纪录</span>
         </a>
         {% endif %}
 
-        <a href="/reports" class="btn-tool btn-gray">
-            📚 资料中心
-            <span class="helper-text">月报 / 年报 / 文件</span>
-        </a>
 
     </div>
 </div>
 
 
 
+{% endif %}
+{% if mode == "signup" %}
 <div class="card">
     <h2 class="section-title">📋 报名录入</h2>
     <div class="dashboard-note">负责人只需要在这里加入报名：可以人工输入，也可以贴 WhatsApp 文字解析。</div>
@@ -5151,6 +5166,8 @@ html {
 
 
 
+{% endif %}
+{% if mode == "special" %}
     <div class="card">
         <h2 class="section-title">⚙️ 特殊设置</h2>
 
@@ -5351,6 +5368,8 @@ html {
         </div>
     </div>
 
+{% endif %}
+{% if mode == "controls" %}
 <div class="card">
 
     <h2 class="section-title">⚙️ 报名开放控制</h2>
@@ -5558,12 +5577,7 @@ html {
 
 
 
-{% else %}
-
-<div class="card">
-    <h2 class="section-title center-text">请选择要做的功能</h2>
-    <p class="page-subtitle">建议先进入「当天安排」查看今日工作。</p>
-</div>
+{% endif %}
 
 {% endif %}
 

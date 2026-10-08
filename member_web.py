@@ -775,7 +775,15 @@ def member_home():
                             real_member_id
                         )
 
-                        if summary and summary["paid_until"]:
+                        # 新会员在指定月份之前不产生迟付；已有缴费的月份也不回溯到开始月以前。
+                        fee_start = member.get("fee_start_month")
+                        if isinstance(fee_start, str):
+                            fee_start = date.fromisoformat(fee_start[:7] + "-01") if fee_start else None
+                        if fee_start and date.today().replace(day=1) < fee_start:
+                            if summary is not None:
+                                summary["late_months"] = 0
+                                summary["payment_status"] = f"🟡 尚未开始供养（{fee_start:%Y-%m}开始）"
+                        elif summary and summary["paid_until"]:
 
                             today = date.today()
                             paid_until_date = summary["paid_until"]
@@ -785,6 +793,10 @@ def member_home():
                                 + (today.month - paid_until_date.month)
                             )
 
+                            if fee_start:
+                                start_index = fee_start.year * 12 + fee_start.month
+                                paid_index = paid_until_date.year * 12 + paid_until_date.month
+                                late_months = max(0, today.year * 12 + today.month - max(start_index - 1, paid_index))
                             summary["late_months"] = late_months
 
                             if late_months <= 0:
@@ -798,8 +810,14 @@ def member_home():
 
                         else:
                             if summary:
-                                summary["late_months"] = None
-                                summary["payment_status"] = "⚪ 暂无缴费记录"
+                                if fee_start:
+                                    today = date.today()
+                                    late_months = max(0, (today.year - fee_start.year) * 12 + today.month - fee_start.month + 1)
+                                    summary["late_months"] = late_months
+                                    summary["payment_status"] = (f"🟡 待缴 {late_months} 个月（从{fee_start:%Y-%m}起）" if late_months else "🟢 正常")
+                                else:
+                                    summary["late_months"] = None
+                                    summary["payment_status"] = "⚪ 暂无缴费记录"
 
         except Exception as e:
             error = f"系统错误：{e}"
@@ -1088,20 +1106,24 @@ def admin_late_members():
             m.name,
             m.phone,
             m.remark,
+            m.fee_start_month,
             max(p.end_month) as paid_until,
             max(p.payment_date) as last_payment_date
         from members m
         left join member_payments p
             on p.member_id = m.member_id
-        where coalesce(m.member_status, m.status, '') not in ('停供', '往生', '已往生')
+        where coalesce(m.member_status, m.status, '') not in ('停供', '暂停', '往生', '已往生')
+          and (m.fee_start_month is null or m.fee_start_month <= date_trunc('month', current_date)::date)
         group by
             m.member_id,
             m.name,
             m.phone,
-            m.remark
+            m.remark,
+            m.fee_start_month
         having
-            max(p.end_month) is not null
-            and max(p.end_month) < date_trunc('month', current_date)
+            (max(p.end_month) is not null and max(p.end_month) < date_trunc('month', current_date))
+            or (max(p.end_month) is null and m.fee_start_month is not null
+                and m.fee_start_month <= date_trunc('month', current_date)::date)
         order by
             paid_until asc,
             m.member_id
@@ -1112,8 +1134,14 @@ def admin_late_members():
 
     for r in rows:
         paid_until = r["paid_until"]
-        paid_index = paid_until.year * 12 + paid_until.month
-        late_months = current_month_index - paid_index
+        fee_start = r.get("fee_start_month")
+        if fee_start:
+            start_index = fee_start.year * 12 + fee_start.month
+            paid_index = paid_until.year * 12 + paid_until.month if paid_until else start_index - 1
+            late_months = max(0, current_month_index - max(paid_index, start_index - 1))
+        else:
+            paid_index = paid_until.year * 12 + paid_until.month
+            late_months = current_month_index - paid_index
 
         r["late_months"] = late_months
         r["reference_amount"] = late_months * 50
@@ -1278,7 +1306,7 @@ def admin_late_members():
                                 -
                             {% endif %}
                         </td>
-                        <td>{{ r.paid_until.strftime("%Y-%m") }}</td>
+                        <td>{{ r.paid_until.strftime("%Y-%m") if r.paid_until else "尚未缴费" }}</td>
                         <td>{{ r.late_months }} 个月</td>
                         <td>RM {{ "%.2f"|format(r.reference_amount) }}</td>
                         <td>
@@ -3808,20 +3836,26 @@ MEMBER_HTML = """
 <div class="page member-page">
 
     <div class="member-topbar">
-
-        <a class="btn-tool btn-light"
-        href="/member/admin">
-            ⚙️ 管理员<br>
-            <small>Admin</small>
+        <a class="btn-tool btn-light" href="/member/admin">
+            ⚙ 管理员入口
         </a>
-
-        <a class="btn-tool btn-danger"
-        href="/member/query-logout">
-            🚪 退出查询<br>
-            <small>Logout</small>
-        </a>
-
     </div>
+
+    <h1 class="page-title">🙏 月费查询</h1>
+    <p class="page-subtitle">请输入月费编号、姓名、英文名或电话查询供养记录</p>
+
+    {% if query_volunteer %}
+    <div class="alert alert-warning">
+        当前查询义工：
+        <b>{{ query_volunteer.id }} {{ query_volunteer.name }}</b>
+
+        <div style="margin-top:12px;">
+            <a class="btn-tool btn-danger" href="/member/query-logout">
+                🔒 退出查询
+            </a>
+        </div>
+    </div>
+    {% endif %}
 
     {% if error %}
     <div class="alert alert-danger">
@@ -3851,7 +3885,6 @@ MEMBER_HTML = """
                     <input
                         class="form-input"
                         id="member_id"
-                        autofocus
                         name="member_id"
                         placeholder="例如：108 / 张三 / 0123456789"
                         autocomplete="off"
@@ -4454,11 +4487,8 @@ PAYMENT_EDIT_HTML = """
                     class="form-input"
                     name="receipt_no"
                     value="{{ payment.receipt_no or '' }}"
-                    placeholder="银行过账可留空，日后再补收据编号"
+                    required
                 >
-                <div style="margin-top:8px;color:#6b7280;font-size:14px;">
-                    银行过账暂时没有正式收据时可以留空；日后开出收据后再回来补上。
-                </div>
             </div>
 
             <div class="form-group">
