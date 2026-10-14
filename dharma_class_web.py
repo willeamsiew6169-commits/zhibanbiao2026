@@ -225,23 +225,14 @@ def class_home():
 
     today = malaysia_now.date()
     today_str = today.isoformat()
-
-    weekday_names = [
-        "星期一",
-        "星期二",
-        "星期三",
-        "星期四",
-        "星期五",
-        "星期六",
-        "星期日",
-    ]
-
-    today_display = (
-        f"{today.year}年"
-        f"{today.month}月"
-        f"{today.day}日 "
-        f"{weekday_names[today.weekday()]}"
-    )
+    requested_date = (request.args.get("class_date") or "").strip()
+    try:
+        selected_day = date.fromisoformat(requested_date) if requested_date else today
+    except ValueError:
+        selected_day = today
+    selected_date = selected_day.isoformat()
+    weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    selected_display = f"{selected_day.year}年{selected_day.month}月{selected_day.day}日 {weekday_names[selected_day.weekday()]}"
 
     with get_conn() as conn:
         with conn.cursor(
@@ -313,11 +304,22 @@ def class_home():
                 where g.is_active = true
                 order by g.sort_order, g.id
             """, (
-                today_str,
-                today_str,
+                selected_date,
+                selected_date,
             ))
 
             group_stats = cur.fetchall()
+
+            # 最近一次有保存课程或点名的日期，不受固定上课星期限制。
+            cur.execute("""
+                select max(record_date) as last_date from (
+                    select lesson_date as record_date from dharma_class_lessons where branch='CHE'
+                    union all
+                    select class_date as record_date from dharma_attendance where branch='CHE'
+                ) recorded where record_date <= %s
+            """, (today_str,))
+            last_record_date = cur.fetchone()["last_date"]
+            last_record_date = last_record_date.isoformat() if last_record_date else None
 
             group_order = {
                 "低年组": 1,
@@ -564,6 +566,17 @@ def class_home():
    手机
    ========================================================= */
 
+/* CHE 首页：三个组别操作按钮等高对齐 */
+.today-group-card { display:flex; flex-direction:column; min-height:310px; }
+.today-group-card .che-group-action { margin-top:auto; padding-top:16px; }
+.today-group-card .che-group-action .btn-tool { display:flex; align-items:center; justify-content:center; min-height:52px; width:100%; box-sizing:border-box; text-align:center; border-radius:13px; color:#fff; font-weight:800; text-decoration:none; }
+.today-group-card:nth-child(1) .che-group-action .btn-tool { background:#2563eb; border-color:#2563eb; }
+.today-group-card:nth-child(2) .che-group-action .btn-tool { background:#d97706; border-color:#d97706; }
+.today-group-card:nth-child(3) .che-group-action .btn-tool { background:#7c3aed; border-color:#7c3aed; }
+.teacher-main-action .che-main-attendance { background:#dc2626 !important; border-color:#dc2626 !important; color:#fff !important; }
+.teacher-main-action .che-main-attendance:hover { background:#b91c1c !important; border-color:#b91c1c !important; }
+@media (max-width:760px) { .today-group-card { min-height:0; } .today-group-card .che-group-action { margin-top:18px; padding-top:0; } }
+
 @media (max-width: 760px) {
 
     .teacher-welcome {
@@ -614,13 +627,16 @@ def class_home():
 
         </div>
 
-        <div class="today-banner">
-            📅 今日：{{ today_display }}
-        </div>
-
-        <h2 class="section-title">
-            📊 今日各组情况
-        </h2>
+        <div class="today-banner">📅 {{ selected_display }}</div>
+        <form method="get" class="che-date-form" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:14px 0">
+            <label for="homeClassDate" style="font-weight:800">查看上课日期：</label>
+            <input id="homeClassDate" class="form-input" type="date" name="class_date" value="{{ selected_date }}" style="max-width:230px" onchange="this.form.submit()">
+            <button class="btn-tool btn-primary" type="submit">🔎 查看记录</button>
+            <a class="btn-tool btn-secondary" href="{{ url_for('dharma_class.class_home') }}">今天</a>
+            {% if last_record_date %}<a class="btn-tool btn-secondary" href="{{ url_for('dharma_class.class_home', class_date=last_record_date) }}">最近记录</a>{% endif %}
+        </form>
+        <h2 class="section-title">📊 所选日期各组情况</h2>
+        {% if not has_any_record %}<p style="background:#f1f5f9;padding:14px;border-radius:12px;color:#475569">这一天尚无上课或点名记录。请选择其他日期，或进入点名新增记录。</p>{% endif %}
 
         {% if group_stats %}
 
@@ -635,9 +651,7 @@ def class_home():
                         </div>
 
                         <div class="today-group-main">
-                            {{ g.attended_count or 0 }}
-                            /
-                            {{ g.total_students or 0 }}
+                            {% if g.marked_count %}{{ g.attended_count or 0 }} / {{ g.marked_count }}{% elif g.lesson_count %}已建立课程{% else %}—{% endif %}
                         </div>
 
                         <div class="today-group-detail">
@@ -685,7 +699,7 @@ def class_home():
                             </div>
 
                         {% endif %}
-
+                        <div class="che-group-action"><a class="btn-tool" href="{{ url_for('dharma_class.class_attendance', class_date=selected_date, group_id=g.id) }}">📖 查看／点名</a></div>
                     </div>
 
                 {% endfor %}
@@ -703,10 +717,8 @@ def class_home():
         <div class="teacher-main-action">
 
             <a
-                class="btn-tool btn-primary"
-                href="{{ url_for(
-                    'dharma_class.class_attendance'
-                ) }}"
+                class="btn-tool btn-primary che-main-attendance"
+                href="{{ url_for('dharma_class.class_attendance', class_date=selected_date) }}"
             >
                 📚 点名
             </a>
@@ -737,7 +749,10 @@ def class_home():
 </html>
 """,
         today_str=today_str,
-        today_display=today_display,
+        selected_display=selected_display,
+        selected_date=selected_date,
+        last_record_date=last_record_date,
+        has_any_record=any(g['marked_count'] or g['lesson_count'] for g in group_stats),
         group_stats=group_stats,
     )
 
@@ -1214,6 +1229,18 @@ def class_attendance():
                 selected_group_name,
                 []
             )
+
+            # 按所选日期、组别查询已保存的统计；不按星期限制点名。
+            cur.execute("""
+                select count(distinct student_id) as marked_count,
+                       count(distinct student_id) filter (where status='present') as present_count,
+                       count(distinct student_id) filter (where status='late') as late_count,
+                       count(distinct student_id) filter (where status='farm') as farm_count,
+                       count(distinct student_id) filter (where status in ('absent','leave')) as absent_count
+                from dharma_attendance
+                where branch='CHE' and class_date=%s and group_id=%s
+            """, (selected_date, selected_group_id))
+            attendance_summary = cur.fetchone()
 
             lesson = {
                 "teacher_name": "",
@@ -1920,7 +1947,16 @@ def class_attendance():
    页面资料提示
    ========================================================= */
 
-.current-selection {
+ .che-group-buttons {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px}
+ .che-group-button {border-radius:14px;padding:14px 8px;text-align:center;font-size:18px;font-weight:900;text-decoration:none;border:2px solid transparent;color:#1e293b;background:#dbeafe}
+ .che-group-button:nth-child(3n+2) {background:#fef3c7}
+ .che-group-button:nth-child(3n+3) {background:#ede9fe}
+ .che-group-button.active {border-color:#1e40af;box-shadow:0 0 0 2px #93c5fd inset}
+ .che-summary {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:15px}
+ .che-summary-item {padding:12px 6px;border-radius:12px;background:#f1f5f9;text-align:center;font-weight:800}
+ .che-summary-item strong {display:block;font-size:25px;margin-top:3px}
+ @media(max-width:520px){.che-group-button{font-size:15px;padding:12px 4px}.che-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
+ .current-selection {
     background: #eef6ff;
     border: 1px solid #cfe3ff;
     border-radius: 16px;
@@ -2478,39 +2514,30 @@ def class_attendance():
                     组别
                 </label>
 
-                <select
-                    class="form-input"
-                    name="group_id"
-                    onchange="
-                        document
-                            .getElementById(
-                                'attendanceFilterForm'
-                            )
-                            .submit()
-                    "
-                    required
-                >
+                <input type="hidden" name="group_id" value="{{ selected_group_id }}">
+                <div class="che-group-buttons">
                     {% for g in groups %}
-                        <option
-                            value="{{ g.id }}"
-                            {% if
-                                selected_group_id|string
-                                == g.id|string
-                            %}
-                                selected
-                            {% endif %}
-                        >
-                            {{ g.name }}
-                        </option>
+                    <a class="che-group-button {% if selected_group_id|string == g.id|string %}active{% endif %}"
+                       href="{{ url_for('dharma_class.class_attendance', class_date=selected_date, group_id=g.id) }}"
+                       onclick="return confirmCheSwitch()">{{ g.name }}</a>
                     {% endfor %}
-                </select>
+                </div>
             </div>
 
         </form>
 
-        <div class="current-selection">
-            当前记录日期：{{ selected_date }}
+        <div class="current-selection">当前记录：{{ selected_date }} · {{ selected_group_name }}</div>
+        {% if attendance_summary.marked_count %}
+        <div class="che-summary">
+          <div class="che-summary-item">已点名<strong>{{ attendance_summary.marked_count }}</strong></div>
+          <div class="che-summary-item">出席<strong>{{ attendance_summary.present_count }}</strong></div>
+          <div class="che-summary-item">迟到<strong>{{ attendance_summary.late_count }}</strong></div>
+          {% if selected_group_name == '少年组' %}<div class="che-summary-item">农舍<strong>{{ attendance_summary.farm_count }}</strong></div>{% endif %}
+          <div class="che-summary-item">缺席<strong>{{ attendance_summary.absent_count }}</strong></div>
+          <div class="che-summary-item">到课率<strong>{{ ((attendance_summary.present_count + attendance_summary.late_count + attendance_summary.farm_count) * 100 / attendance_summary.marked_count)|round(1) }}%</strong></div>
         </div>
+        <p style="font-size:13px;color:#64748b;margin-top:8px">以上为数据库已保存的点名统计；修改后请按保存更新。</p>
+        {% else %}<p style="padding:12px;background:#f1f5f9;border-radius:12px">此日期与组别尚未保存点名记录。</p>{% endif %}
 
     </div>
 
@@ -3378,8 +3405,20 @@ document.addEventListener(
     }
 );
 
+<script>
+(function(){
+ let dirty=false;
+ const form=document.getElementById('attendanceForm');
+ if(form){
+  form.addEventListener('change',()=>{dirty=true});
+  form.addEventListener('input',()=>{dirty=true});
+  form.addEventListener('submit',()=>{dirty=false});
+ }
+ window.confirmCheSwitch=function(){return !dirty || confirm('点名或功课尚未保存，确定切换组别吗？');};
+ const dateField=document.querySelector('#attendanceFilterForm input[type=date]');
+ if(dateField){dateField.addEventListener('change',function(e){if(dirty&&!confirm('尚有未保存的修改，确定切换日期吗？')){e.preventDefault();e.stopImmediatePropagation();location.reload();}},true);}
+})();
 </script>
-
 </body>
 </html>
 """,
@@ -3392,7 +3431,8 @@ document.addEventListener(
         baihua_status_labels=BAIHUA_STATUS_LABELS,
         scripture_status_labels=SCRIPTURE_STATUS_LABELS,
         lesson=lesson,
-        teacher_list=teacher_list
+        teacher_list=teacher_list,
+        attendance_summary=attendance_summary
     )
 
 @dharma_class_bp.route("/lessons")
