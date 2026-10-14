@@ -3033,9 +3033,9 @@ def class_attendance():
     </a>
 
     <button
-        class="btn-tool btn-primary"
         type="button"
-        onclick="goTop()"
+        class="btn-tool btn-primary"
+        onclick="window.scrollTo({top: 0, behavior: 'smooth'});"
     >
         ⬆ 顶部
     </button>
