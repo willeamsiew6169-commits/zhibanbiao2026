@@ -1,6 +1,9 @@
 # admin_dashboard_service.py
 
 from datetime import datetime
+from time import perf_counter
+import logging
+import os
 
 from schedule.builders.time_utils import malaysia_today
 from lunar_rules import (
@@ -32,6 +35,20 @@ from schedule.services.settings_service import (
 )
 
 
+_logger = logging.getLogger(__name__)
+
+
+def _timed(label, fn, *args, **kwargs):
+    """Optional timing diagnostics: set SCHEDULE_DASHBOARD_TIMING=1 on Render."""
+    if os.environ.get("SCHEDULE_DASHBOARD_TIMING", "0") != "1":
+        return fn(*args, **kwargs)
+    started = perf_counter()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _logger.warning("[schedule-dashboard] %s: %.3fs", label, perf_counter() - started)
+
+
 def load_admin_dashboard_data(mode, override_date):
 
     selected_date = datetime.strptime(
@@ -39,9 +56,9 @@ def load_admin_dashboard_data(mode, override_date):
         "%Y-%m-%d"
     ).date()
 
-    special_day_info = get_special_day_info(selected_date)
+    special_day_info = _timed("get_special_day_info", get_special_day_info, selected_date)
 
-    settings = get_schedule_settings()
+    settings = _timed("get_schedule_settings", get_schedule_settings, )
 
     def setting_is_on(key, default="false"):
         value = settings.get(key, default)
@@ -64,7 +81,7 @@ def load_admin_dashboard_data(mode, override_date):
         special_day_info["template_type"]
     )
 
-    remove_info = get_next_day_remove_info(selected_date)
+    remove_info = _timed("get_next_day_remove_info", get_next_day_remove_info, selected_date)
 
     try:
         supply_alert_days = int(
@@ -73,28 +90,28 @@ def load_admin_dashboard_data(mode, override_date):
     except:
         supply_alert_days = 7
 
-    shortage_summary = build_shortage_summary_for_admin(
+    shortage_summary = _timed("build_shortage_summary_for_admin", build_shortage_summary_for_admin, 
         override_date
     )
 
-    supply_signups = load_supply_signups_for_date(
+    supply_signups = _timed("load_supply_signups_for_date", load_supply_signups_for_date, 
         override_date
     )
 
-    supply_alerts = load_upcoming_supply_signup_alerts(
+    supply_alerts = _timed("load_upcoming_supply_signup_alerts", load_upcoming_supply_signup_alerts, 
         days_ahead=supply_alert_days
     )
 
-    published = is_schedule_published(
+    published = _timed("is_schedule_published", is_schedule_published, 
         override_date
     )
 
-    republish_info = get_schedule_republish_info(
+    republish_info = _timed("get_schedule_republish_info", get_schedule_republish_info, 
         override_date
     )
 
     pending_counts, day_summary, day_flags = (
-        load_schedule_admin_dashboard_data(
+        _timed("load_schedule_admin_dashboard_data", load_schedule_admin_dashboard_data,
             override_date
         )
     )
@@ -110,7 +127,7 @@ def load_admin_dashboard_data(mode, override_date):
         next_year = today.year
         next_month = today.month + 1
 
-    display_records = load_display_records(
+    display_records = _timed("load_display_records", load_display_records,
         mode=mode,
         target_date=override_date if mode == "day" else None,
         year=next_year if mode == "prebook" else None,

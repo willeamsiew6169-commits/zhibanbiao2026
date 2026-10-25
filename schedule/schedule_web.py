@@ -2,6 +2,8 @@
 
 import os
 import calendar
+import time
+from functools import lru_cache
 import psycopg2
 import pandas as pd
 
@@ -290,6 +292,19 @@ def schedule_signup_cancel(signup_id):
     return redirect("/schedule/signups")
 
     
+@lru_cache(maxsize=4)
+def _read_fixed_buddha_sheet(path, mtime_ns, size):
+    """Cache the fixed Buddha roster until the Excel file changes."""
+    df = pd.read_excel(path, sheet_name="佛台固定")
+    df.columns = df.columns.astype(str).str.strip()
+    return df
+
+
+def _fixed_buddha_dataframe(path):
+    stat = os.stat(path)
+    return _read_fixed_buddha_sheet(path, stat.st_mtime_ns, stat.st_size)
+
+
 def load_buddha_name_options():
     file = os.path.join(BASE_DIR, "data", "fixed_schedule.xlsx")
 
@@ -297,8 +312,7 @@ def load_buddha_name_options():
         return []
 
     try:
-        df = pd.read_excel(file, sheet_name="佛台固定")
-        df.columns = df.columns.astype(str).str.strip()
+        df = _fixed_buddha_dataframe(file)
 
         names = []
         for col in ["姓名1", "姓名2", "姓名3"]:
@@ -315,7 +329,6 @@ def load_buddha_name_options():
 
 def get_fixed_buddha_for_date(date_str):
     file = os.path.join(BASE_DIR, "data", "fixed_schedule.xlsx")
-    print("fixed_schedule file =", file, os.path.exists(file))
 
     if not os.path.exists(file):
         return []
@@ -333,8 +346,7 @@ def get_fixed_buddha_for_date(date_str):
         }
         weekday = weekday_map[date_obj.weekday()]
 
-        df = pd.read_excel(file, sheet_name="佛台固定")
-        df.columns = df.columns.astype(str).str.strip()
+        df = _fixed_buddha_dataframe(file)
 
         row = df[df["星期"].astype(str).str.strip() == weekday]
 
@@ -1118,14 +1130,25 @@ def schedule_admin():
     mode = request.args.get("mode", "")
 
     override_date = request.args.get("override_date") or default_schedule_date
+    _dashboard_started = time.perf_counter()
     dashboard = load_admin_dashboard_data(
         mode=mode,
         override_date=override_date,
     )
+    _dashboard_loaded = time.perf_counter()
 
     buddha_names = load_buddha_name_options()
-
     fixed_buddha_today = get_fixed_buddha_for_date(override_date)
+    _roster_loaded = time.perf_counter()
+
+    if os.environ.get("SCHEDULE_DASHBOARD_TIMING") == "1":
+        print(
+            "[schedule-admin] dashboard={:.3f}s roster={:.3f}s".format(
+                _dashboard_loaded - _dashboard_started,
+                _roster_loaded - _dashboard_loaded,
+            ),
+            flush=True,
+        )
 
 
     return render_template_string(

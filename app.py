@@ -26,6 +26,7 @@ from manifest import manifest_bp
 from db import db_query, get_conn
 from library_web import library_bp
 from reading_web import reading_bp
+from xfz_web import xfz_bp
 
 from finance_v7 import finance_v7_bp
 from finance_web import finance_bp
@@ -115,6 +116,7 @@ app.register_blueprint(schedule_bp)
 app.register_blueprint(manifest_bp)
 app.register_blueprint(finance_bp)
 app.register_blueprint(reading_bp)
+app.register_blueprint(xfz_bp)
 app.register_blueprint(library_bp)
 app.register_blueprint(member_bp)
 app.register_blueprint(people_bp)
@@ -806,37 +808,15 @@ PAGE = """
     </div>
   </div>
 
-  <div class="two-card-grid">
+    <div class="card" style="margin-bottom:14px;padding:12px 18px;text-align:right">
 
-    <div class="card center">
-      <h2 class="section-title">📖 {{ t.bhff_title }}</h2>
 
-      <div class="page-subtitle">
-        {{ t.study_records_desc }}
-      </div>
 
-      <div class="btn-row single-btn-row">
-        <a class="btn-tool btn-primary small-action-btn" href="/reading">
-            {{ t.bhff_enter }}
-        </a>
-      </div>
-
-      <div class="small-note">
-        👉 {{ t.bhff_desc }}
-      </div>
-    </div>
-
-    <div class="card center">
-      <h2 class="section-title">🔐 {{ t.admin_entry }}</h2>
-
-      <div class="page-subtitle">
-        {{ t.admin_entry_desc }}
-      </div>
 
       <div class="btn-row single-btn-row">
         <button
             type="button"
-            class="btn-tool btn-purple small-action-btn"
+            class="btn-tool btn-purple" style="width:auto;padding:10px 16px"
             onclick="toggleAdminBox()">
             {{ t.admin_entry }}
         </button>
@@ -877,9 +857,33 @@ PAGE = """
 
       </div>
 
-      <div class="small-note">
-        🛡️ {{ t.admin_pin_required }}
+
+    </div>
+
+  <div class="two-card-grid">
+
+    <div class="card center">
+      <h2 class="section-title">📖 {{ t.bhff_title }}</h2>
+
+      <div class="page-subtitle">
+        {{ t.study_records_desc }}
       </div>
+
+      <div class="btn-row single-btn-row">
+        <a class="btn-tool btn-primary small-action-btn" href="/reading">
+            {{ t.bhff_enter }}
+        </a>
+      </div>
+
+      <div class="small-note">
+        👉 {{ t.bhff_desc }}
+      </div>
+    </div>
+
+    <div class="card center">
+      <h2 class="section-title">📜 {{ '经文组合记录' if t.html_lang.startswith('zh') else 'XFZ Records' }}</h2>
+      <div class="page-subtitle">{{ '结缘、烧送与库存管理' if t.html_lang.startswith('zh') else 'Offerings, burning & balance' }}</div>
+      <div class="btn-row single-btn-row"><a class="btn-tool small-action-btn" style="background:#f4c84a;color:#3d3000;border:0" href="/xfz">{{ '进入经文组合记录' if t.html_lang.startswith('zh') else 'Enter XFZ Records' }}</a></div>
     </div>
 
   </div>
