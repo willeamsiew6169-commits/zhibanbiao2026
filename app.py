@@ -116,12 +116,11 @@ app.register_blueprint(schedule_bp)
 app.register_blueprint(manifest_bp)
 app.register_blueprint(finance_bp)
 app.register_blueprint(reading_bp)
-app.register_blueprint(xfz_bp)
 app.register_blueprint(library_bp)
 app.register_blueprint(member_bp)
 app.register_blueprint(people_bp)
 app.register_blueprint(admin_bp)
-
+app.register_blueprint(xfz_bp)
 
 
 def get_today_stats():
@@ -747,7 +746,7 @@ PAGE = """
                 class="form-input"
                 name="role"
                 id="role"
-                onchange="toggleCardNo()">
+                onchange="toggleCardNo(); refreshRoleAction()">
 
                 {% for role in roles %}
                     <option value="{{ role }}">{{ role_label(role) }}</option>
@@ -986,6 +985,7 @@ async function lookupVolunteer() {
     signOutBtn.style.display = 'none';
     assignmentInput.value = '';
 
+    window.lastAttendanceLookup = data;
     if (data.attendance_action === 'signout') {
       signOutBtn.style.display = '';
       assignmentInput.value = data.current_assignment_id || '';
@@ -1002,6 +1002,7 @@ async function lookupVolunteer() {
     }
 
     box.innerHTML = html;
+    refreshRoleAction();
     btn.disabled = false;
 
   } else {
@@ -1048,7 +1049,31 @@ function toggleBranch() {
   }
 }
 
+function refreshRoleAction() {
+  const data = window.lastAttendanceLookup;
+  if (!data || !data.ok) return;
+  const role = document.getElementById('role').value;
+  const signin = document.getElementById('signInBtn');
+  const signout = document.getElementById('signOutBtn');
+  const assignmentInput = document.getElementById('assignment_id');
+  signin.style.display = 'none';
+  signout.style.display = 'none';
+  assignmentInput.value = '';
+  // 当前有未签退记录：只能先签退，不能换岗位再次签到。
+  if (data.attendance_action === 'signout') {
+    signout.style.display = '';
+    assignmentInput.value = data.current_assignment_id || '';
+    return;
+  }
+  // 已完成某一轮值班，不影响同一天其他岗位签到。
+  const pending = (data.today_assignments || []).find(a => a.role === role && a.state === 'pending');
+  if (pending) assignmentInput.value = pending.id;
+  signin.style.display = '';
+}
+
 function toggleCardNo() {
+    // 岗位改变后，不沿用另一岗位的排班编号。
+    document.getElementById("assignment_id").value = "";
     const role = document.getElementById("role").value;
     const group = document.getElementById("card_no_group");
 
@@ -1171,7 +1196,7 @@ window.addEventListener("load", function() {
   if (pinInput) pinInput.value = "";
   if (adminPin) adminPin.value = "";
 
-  toggleCardNoBox();
+  toggleCardNo();
 });
 </script>
 
@@ -1553,35 +1578,14 @@ def do_sign_in():
 
     volunteer_id = request.form.get("volunteer_id", "").strip()
     role = request.form.get("role", "").strip()
-    # 值班、卫生、膳食必须有正式安排
-
+    # 三种岗位限制由 attendance_service.sign_in() 统一判断。
+    # 不在路由重复检查，以免卫生报名被错误要求正式排班。
     v = find_volunteer(volunteer_id)
-
     if not v:
         flash("❌ 找不到义工编号", "bad")
         return redirect(url_for("index"))
-
     volunteer_id = str(v.get("编号") or volunteer_id).strip()
 
-    if role in ["值班", "卫生", "膳食"]:
-
-        today_assignments = get_today_assignments(
-            volunteer_id,
-            role,
-            current_time=True
-        )
-        
-        if not today_assignments:
-
-          if REQUIRE_ASSIGNMENT_FOR_SIGNIN:
-
-              if ENABLE_SIGNIN_TIME_LIMIT:
-                  flash("❌ 现在不是可签到时间，或今天没有正式安排。", "bad")
-              else:
-                  flash("❌ 今天没有正式安排这个岗位，不能签到。", "bad")
-
-              return redirect(url_for("index"))
-    
     ok, msg = sign_in(
         volunteer_id,
         request.form.get("pin", ""),
@@ -1856,7 +1860,7 @@ def api_volunteer(volunteer_id):
         pin = request.form.get("pin", "").strip()
         pin_ok = verify_pin_for_volunteer(v, pin) if pin else False
 
-        today = date.today()
+        today = datetime.now(ZoneInfo("Asia/Kuala_Lumpur")).date()
 
         today_assignments = []
 
@@ -1882,7 +1886,7 @@ def api_volunteer(volunteer_id):
 
                 today_assignments = cur.fetchall()
 
-        # 多轮值班状态：每个 assignment 独立签到 / 签退。
+        # 同岗位连续排班共用一笔实际签到；每段 assignment 保留独立状态。
         open_log = db_query("""
             select assignment_id
             from volunteer_attendance_logs
@@ -1917,7 +1921,17 @@ def api_volunteer(volunteer_id):
             else:
                 a["state"] = "pending"
 
-        if open_assignment_id is not None:
+        actual_open = db_query("""
+            select id from attendance
+            where volunteer_id=%s and date=%s
+              and (end_time is null or end_time='')
+            order by id desc limit 1
+        """, (v.get("编号"), now_date_str()), fetchone=True)
+
+        if actual_open:
+            attendance_action = "signout"
+            current_assignment_id = open_assignment_id
+        elif open_assignment_id is not None:
             attendance_action = "signout"
             current_assignment_id = open_assignment_id
         elif not today_assignments:

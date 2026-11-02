@@ -3,6 +3,7 @@
 import datetime
 
 from db import db_query, get_conn
+from signin_policy import get_signin_policies
 from psycopg2.extras import RealDictCursor
 from schedule.builders.time_utils import malaysia_today, malaysia_now, time_to_minutes
 from utils import (
@@ -18,7 +19,27 @@ SIGNIN_EARLY_MINUTES = 30             # 可提前几分钟签到
 ENABLE_AUTO_SIGNOUT = False           # 自动签退
 AUTO_SIGNOUT_TIME = "19:00"           # 系统几点执行自动签退
 AUTO_SIGNOUT_DISPLAY = "18:30"        # 报表显示的签退时间
-REQUIRE_ASSIGNMENT_FOR_SIGNIN = False   # 测试时 False，正式上线改 True
+REQUIRE_ASSIGNMENT_FOR_SIGNIN = False   # 值班：正式排班限制（试用期关闭）
+REQUIRE_CLEANING_SIGNUP_FOR_SIGNIN = False  # 卫生：当天有效报名即可，不必正式排班
+REQUIRE_MEAL_SIGNUP_FOR_SIGNIN = False      # 膳食：预留独立限制，正式启用前关闭
+
+
+def has_active_signup_for_role(volunteer, raw_id, role):
+    """只认本人、当天、对应岗位的未取消报名；不把其他岗位报名算进去。"""
+    ids = get_assignment_id_candidates(volunteer, raw_id)
+    if not ids:
+        return False
+    row = db_query("""
+        select 1
+        from volunteer_schedule_signups
+        where volunteer_id = any(%s)
+          and signup_date = %s
+          and role = %s
+          and coalesce(status, 'pending') <> 'cancelled'
+        limit 1
+    """, (ids, now_date_str(), role), fetchone=True)
+    return bool(row)
+
 
 
 def format_date_value(v):
@@ -119,6 +140,33 @@ ROLE_TEXT = {
 # =========================
 # 5) 签到 / 签退 / 修改
 # =========================
+def same_role_contiguous_group(assignments, selected):
+    """Combine only directly adjacent duty segments; never combine different roles or gaps."""
+    if selected.get("role") != "值班":
+        return [selected]
+    ordered = sorted(
+        (a for a in assignments if a.get("role") == "值班"),
+        key=lambda a: (time_to_minutes(a.get("start_time")) if time_to_minutes(a.get("start_time")) is not None else 9999, int(a.get("id") or 0))
+    )
+    idx = next((i for i, a in enumerate(ordered) if int(a["id"]) == int(selected["id"])), None)
+    if idx is None:
+        return [selected]
+    left = right = idx
+    while left > 0:
+        prev_end = time_to_minutes(ordered[left - 1].get("end_time"))
+        curr_start = time_to_minutes(ordered[left].get("start_time"))
+        if prev_end is None or curr_start is None or prev_end != curr_start:
+            break
+        left -= 1
+    while right + 1 < len(ordered):
+        curr_end = time_to_minutes(ordered[right].get("end_time"))
+        next_start = time_to_minutes(ordered[right + 1].get("start_time"))
+        if curr_end is None or next_start is None or curr_end != next_start:
+            break
+        right += 1
+    return ordered[left:right + 1]
+
+
 def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignment_id=None) -> tuple[bool, str]:
     raw_id = str(volunteer_id or "").strip()
     role = str(role or "").strip()
@@ -137,6 +185,9 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
     if not verify_pin_for_volunteer(volunteer, pin):
         return False, "PIN 不正确。"
 
+    if role not in ROLES:
+        return False, "请选择正确岗位。"
+
     # 同一时间只允许一笔进行中的签到。
     opened = db_query("""
         select id from attendance
@@ -148,6 +199,27 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
         return False, f"{volunteer['姓名']} 已经签到，还没签退。请先签退。"
 
     assignments = load_today_assignments_for_volunteer(volunteer, raw_id)
+
+    # 每次签到读取 Supabase 最新开关；不依赖重启或 Python 常量。
+    policies = get_signin_policies()
+    require_duty = policies["duty"]
+    require_cleaning = policies["cleaning"]
+    require_meal = policies["meal"]
+
+    # 按岗位独立控制；卫生只需报名，不需负责人正式安排。
+    # 注意：不能用值班排班冒充卫生/膳食报名。
+    if role == "值班" and require_duty:
+        if not any(a.get("role") == "值班" for a in assignments):
+            return False, "今天没有有效的值班正式排班，不能签到。"
+    elif role == "卫生" and require_cleaning:
+        if not has_active_signup_for_role(volunteer, raw_id, "卫生"):
+            return False, "今天没有有效的卫生报名，请先报名后再签到。"
+    elif role == "膳食" and require_meal:
+        if not has_active_signup_for_role(volunteer, raw_id, "膳食"):
+            return False, "今天没有有效的膳食组报名，请先报名后再签到。"
+
+    # 即使限制关闭，也不允许把其他岗位的 assignment_id 当作本岗位。
+    assignments = [a for a in assignments if a.get("role") == role]
 
     # 有正式排班时：一轮 assignment = 一次签到。
     if assignments:
@@ -176,41 +248,44 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
         if not selected:
             return False, f"{volunteer['姓名']} 今天的正式排班已经全部完成。"
 
-        # 防止同一轮重复签到（包括已经完成的轮次）。
+        group = same_role_contiguous_group(assignments, selected)
+        group_ids = [int(a["id"]) for a in group]
+        # Any segment already checked in means the group cannot be started again.
         existing_log = db_query("""
-            select check_out_time from volunteer_attendance_logs
-            where assignment_id=%s and volunteer_id=%s and attendance_date=%s
+            select assignment_id, check_out_time from volunteer_attendance_logs
+            where assignment_id = any(%s) and volunteer_id=%s and attendance_date=%s
             order by id desc limit 1
-        """, (selected["id"], volunteer["编号"], now_date_str()), fetchone=True)
+        """, (group_ids, volunteer["编号"], now_date_str()), fetchone=True)
         if existing_log:
-            if existing_log.get("check_out_time"):
-                return False, "这一轮值班已经完成，不能重复签到。"
-            return False, "这一轮已经签到，请先签退。"
+            return False, "这段值班已经签到或完成，请勿重复签到。"
 
-        job_text = format_assignment_for_attendance(selected)
+        job_text = "；".join(format_assignment_for_attendance(a) for a in group)
         db_query("""
             insert into attendance
             (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
             values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
             now_date_str(), volunteer["编号"], volunteer["姓名"], 1, 1,
-            job_text, now_time_str(), "", None, card_no,
-            f"按排班签到｜assignment_id={selected['id']}"
+            role, now_time_str(), "", None, card_no,
+            f"按排班签到｜{job_text}｜assignment_ids={','.join(map(str, group_ids))}"
         ))
 
-        db_query("""
-            insert into volunteer_attendance_logs (
-                assignment_id, volunteer_id, name, attendance_date,
-                actual_role, actual_place, walk_in, remarks
-            ) values (%s,%s,%s,%s,%s,%s,false,'按排班签到')
-        """, (
-            selected["id"], selected["volunteer_id"], selected["name"],
-            selected["assignment_date"], selected["role"], selected["assigned_place"]
-        ))
+        # Preserve assignment-level attendance logs for schedule status; only
+        # attendance table carries the single actual service-time record.
+        for segment in group:
+            db_query("""
+                insert into volunteer_attendance_logs (
+                    assignment_id, volunteer_id, name, attendance_date,
+                    actual_role, actual_place, walk_in, remarks
+                ) values (%s,%s,%s,%s,%s,%s,false,'按排班签到（同岗位连续时段）')
+            """, (
+                segment["id"], segment["volunteer_id"], segment["name"],
+                segment["assignment_date"], segment["role"], segment["assigned_place"]
+            ))
 
-        return True, f"{volunteer['姓名']} 已签到\n\n本轮岗位：\n・{job_text}\n\n完成后请记得签退。"
+        return True, f"{volunteer['姓名']} 已签到\n\n岗位：{role}\n安排：{job_text}\n\n同岗位连续换地点无需重新签到；完成后请签退。"
 
-    # 没有正式排班：保留试用期现场签到逻辑。
+    # 没有该岗位正式排班：允许符合政策的现场签到。
     if role not in ROLES:
         return False, "今天没有排班记录，请选择实际协助岗位。"
 
@@ -271,33 +346,34 @@ def sign_out(volunteer_id: str, pin: str, assignment_id=None) -> tuple[bool, str
     """, (end_time, hours, row["id"]))
 
     # 只签退本轮 assignment；现场签到则只关闭最新一笔 walk-in log。
-    aid = None
-    if assignment_id not in (None, ""):
+    remark = str(row.get("remark") or "")
+    group_marker = "assignment_ids="
+    legacy_marker = "assignment_id="
+    aids = []
+    if group_marker in remark:
         try:
-            aid = int(assignment_id)
-        except Exception:
-            aid = None
-    if aid is None:
-        remark = str(row.get("remark") or "")
-        marker = "assignment_id="
-        if marker in remark:
-            try:
-                aid = int(remark.split(marker, 1)[1].split("｜", 1)[0].strip())
-            except Exception:
-                aid = None
+            value = remark.split(group_marker, 1)[1].split("｜", 1)[0].strip()
+            aids = [int(x) for x in value.split(",") if x.strip()]
+        except ValueError:
+            aids = []
+    elif legacy_marker in remark:
+        try:
+            aids = [int(remark.split(legacy_marker, 1)[1].split("｜", 1)[0].strip())]
+        except ValueError:
+            aids = []
 
-    if aid is not None:
+    if aids:
         db_query("""
             update volunteer_attendance_logs
             set check_out_time=now()
-            where assignment_id=%s and volunteer_id=%s
+            where assignment_id = any(%s) and volunteer_id=%s
               and attendance_date=%s and check_out_time is null
-        """, (aid, volunteer["编号"], now_date_str()))
+        """, (aids, volunteer["编号"], now_date_str()))
     else:
         log = db_query("""
             select id from volunteer_attendance_logs
             where volunteer_id=%s and attendance_date=%s
-              and check_out_time is null
+              and check_out_time is null and assignment_id is null
             order by id desc limit 1
         """, (volunteer["编号"], now_date_str()), fetchone=True)
         if log:

@@ -5010,72 +5010,90 @@ html {
 </div>
 
 <div class="card">
-    <h2 class="section-title">📝 今日操作</h2>
+    <h2 class="section-title">📝 今日操作｜负责人工作流程</h2>
+    <div class="dashboard-note" style="margin-bottom:14px;line-height:1.8;">
+        请按① → ② → ③ → ④操作。以下按钮针对目前选择的排班日期；发送 WhatsApp 前请先核对日期及名单。
+    </div>
 
     <div class="action-grid">
+        <div>
+            <div style="font-weight:700;margin-bottom:7px;">① 晚上7:00｜发出报名通知</div>
+            <a href="/schedule/notice_center?date={{ override_date }}" class="btn-tool btn-orange">
+                📢 报名通知／通知中心
+                <span class="helper-text">进入通知中心，复制明日的报名通知，发送到 WhatsApp 群组；也可查看缺义工通知。</span>
+            </a>
+        </div>
 
-        <form method="post" action="/schedule/publish">
-            <input type="hidden" name="date" id="publish_date" value="{{ override_date }}">
-
-            <button
-                type="submit"
-                class="btn-tool {% if is_published %}btn-gray{% else %}btn-green{% endif %}"
-            >
-                {% if is_published %}
-                    ✅ 已发布
-                    <span class="helper-text">正式值班表已生效，新报名会自动补排</span>
+        <div>
+            <div style="font-weight:700;margin-bottom:7px;">② 晚上10:00｜安排报名义工</div>
+            {% if not is_published %}
+                {% if not is_today_or_past %}
+                <form method="post" action="/schedule/generate_day">
+                    <input type="hidden" name="date" id="generate_day_date" value="{{ override_date }}">
+                    <button type="submit" class="btn-tool btn-blue">
+                        🔄 重新自动排班
+                        <span class="helper-text">报名截止后点击；系统依报名资料安排岗位、地点及时间。发布前可再次执行。</span>
+                    </button>
+                </form>
                 {% else %}
-                    🟢 发布正式值班表
-                    <span class="helper-text">确认排班无误后再发布</span>
+                <form method="post" action="/schedule/fill_pending">
+                    <input type="hidden" name="date" id="fill_pending_date" value="{{ override_date }}">
+                    <button type="submit" class="btn-tool btn-blue">
+                        ➕ 补入待安排
+                        <span class="helper-text">今天或过去日期：把尚未安排的报名义工补入空缺，不重新生成整张排班表。</span>
+                    </button>
+                </form>
                 {% endif %}
-            </button>
-        </form>
-
-        {% if not is_published %}
-            {% if not is_today_or_past %}
-            <form method="post" action="/schedule/generate_day">
-                <input type="hidden" name="date" id="generate_day_date" value="{{ override_date }}">
-                <button type="submit" class="btn-tool btn-blue">
-                    🔄 重新自动排班
-                    <span class="helper-text">发布前可重复执行</span>
-                </button>
-            </form>
             {% else %}
-            <form method="post" action="/schedule/fill_pending">
-                <input type="hidden" name="date" id="fill_pending_date" value="{{ override_date }}">
-                <button type="submit" class="btn-tool btn-blue">
-                    ➕ 补入待安排
-                    <span class="helper-text">今天或过去日期使用</span>
+                <div class="btn-tool btn-gray" style="cursor:default;box-sizing:border-box;">
+                    ✅ 已发布，自动补排生效
+                    <span class="helper-text">正式发布后，新报名由系统自动补排，不必再按「重新自动排班」。</span>
+                </div>
+            {% endif %}
+        </div>
+
+        <div>
+            <div style="font-weight:700;margin-bottom:7px;">③ 排班完成后｜检查及调整</div>
+            <form method="post" action="/schedule/view_assigned">
+                <input type="hidden" name="date" id="view_assigned_date" value="{{ override_date }}">
+                <button type="submit" class="btn-tool btn-purple">
+                    👀 查看排班
+                    <span class="helper-text">检查义工姓名、值班时间、岗位和地点；如有需要，进入后手动调整。</span>
                 </button>
             </form>
-            {% endif %}
-        {% endif %}
+        </div>
 
-        <form method="post" action="/schedule/view_assigned">
-            <input type="hidden" name="date" id="view_assigned_date" value="{{ override_date }}">
-            <button type="submit" class="btn-tool btn-purple">
-                👀 查看排班
-                <span class="helper-text">查看 / 调整正式安排</span>
-            </button>
-        </form>
-
-        <a href="/schedule/notice_center?date={{ override_date }}"
-           class="btn-tool btn-orange">
-            📢 报名通知／通知中心
-            <span class="helper-text">晚上7点报名通知 / WhatsApp / 缺义工通知</span>
-        </a>
-
-        {% if is_published %}
-        <a href="/schedule/attendance_status" class="btn-tool btn-blue" style="background:#078b9b;border-color:#078b9b;color:#fff">
-            📋 签到情况
-            <span class="helper-text">查看义工签到纪录</span>
-        </a>
-        {% endif %}
-
-
+        <div>
+            <div style="font-weight:700;margin-bottom:7px;">④ 检查无误后｜正式发布</div>
+            <form method="post" action="/schedule/publish">
+                <input type="hidden" name="date" id="publish_date" value="{{ override_date }}">
+                <button type="submit" class="btn-tool {% if is_published %}btn-gray{% else %}btn-green{% endif %}">
+                    {% if is_published %}
+                        ✅ 已发布
+                        <span class="helper-text">值班表已生效。若有新报名，系统会自动补排；可继续查看最新安排。</span>
+                    {% else %}
+                        🟢 发布正式值班表
+                        <span class="helper-text">确认名单正确后点击发布，再到通知中心复制正式值班表发送 WhatsApp。</span>
+                    {% endif %}
+                </button>
+            </form>
+        </div>
     </div>
-</div>
 
+    <div class="dashboard-note" style="margin-top:14px;line-height:1.8;">
+        💡 <b>发布后有新义工报名：</b>系统会自动补入空缺岗位。负责人可按「查看排班」核对最新名单；不需要重新自动排班或重新发布。<br>
+        📌 <b>提醒：</b>进入通知中心或查看排班，不代表 WhatsApp 已发送或名单已确认；请负责人自行核对。
+    </div>
+
+    {% if is_published %}
+    <div style="margin-top:12px;">
+        <a href="/schedule/attendance_status" class="btn-tool" style="background:#078b9b;border-color:#078b9b;color:#fff;">
+            📋 签到情况
+            <span class="helper-text">发布后可查看义工签到纪录及当天签到情况。</span>
+        </a>
+    </div>
+    {% endif %}
+</div>
 
 
 {% endif %}

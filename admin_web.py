@@ -4,6 +4,7 @@ import io
 import pandas as pd
 
 from io import BytesIO
+from signin_policy import get_signin_policies, set_signin_policy
 from db import db_query
 from utils import get_text
 from openpyxl import Workbook
@@ -489,73 +490,53 @@ def admin_today_records():
 
 @admin_bp.route("/download_data")
 def download_data():
+    """导出实际签到；attendance.id 是本地重复导入的稳定主键。"""
+    if (request.args.get("pin") or "").strip() != ADMIN_PIN:
+        return "无权限 / Unauthorized", 403
 
     try:
         start_date = request.args.get("start_date", "").strip()
         end_date = request.args.get("end_date", "").strip()
+        if bool(start_date) != bool(end_date):
+            return "请同时填写开始日期和结束日期", 400
+        if start_date:
+            try:
+                begin = date.fromisoformat(start_date)
+                finish = date.fromisoformat(end_date)
+            except ValueError:
+                return "日期格式必须是 YYYY-MM-DD", 400
+            if begin > finish:
+                return "开始日期不能晚于结束日期", 400
 
-        if start_date and end_date:
-            rows = db_query("""
-                select
-                    date as "日期",
-                    volunteer_id as "编号",
-                    name as "姓名",
-                    signup as "报名",
-                    signin as "签到",
-                    role as "岗位",
-                    start_time as "开始时间",
-                    end_time as "结束时间",
-                    hours as "时数",
-                    remark as "备注"
-                from attendance
-                where date between %s and %s
-                order by date, name, start_time
-            """, (start_date, end_date), fetchall=True)
-
-            file_date_text = f"{start_date}_to_{end_date}"
-
-        else:
-            rows = db_query("""
-                select
-                    date as "日期",
-                    volunteer_id as "编号",
-                    name as "姓名",
-                    signup as "报名",
-                    signin as "签到",
-                    role as "岗位",
-                    start_time as "开始时间",
-                    end_time as "结束时间",
-                    hours as "时数",
-                    remark as "备注"
-                from attendance
-                order by date, name, start_time
-            """, fetchall=True)
-
-            file_date_text = "all"
-
-        df = pd.DataFrame(rows)
+        columns = ["记录 ID", "日期", "编号", "姓名", "报名", "签到", "岗位",
+                   "开始时间", "结束时间", "时数", "备注"]
+        sql = """SELECT id AS "记录 ID", date AS "日期",
+                        volunteer_id AS "编号", name AS "姓名",
+                        signup AS "报名", signin AS "签到", role AS "岗位",
+                        start_time AS "开始时间", end_time AS "结束时间",
+                        hours AS "时数", remark AS "备注"
+                 FROM attendance"""
+        params = ()
+        if start_date:
+            sql += " WHERE date BETWEEN %s AND %s"
+            params = (start_date, end_date)
+        sql += " ORDER BY date, name, start_time, id"
+        rows = db_query(sql, params, fetchall=True) or []
+        df = pd.DataFrame(rows, columns=columns)  # 没记录也保留标题行
 
         output = io.BytesIO()
-
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(
-                writer,
-                index=False,
-                sheet_name="attendance"
-            )
-
+            df.to_excel(writer, index=False, sheet_name="attendance")
         output.seek(0)
-
+        date_text = f"{start_date}_to_{end_date}" if start_date else "all"
         return send_file(
-            output,
-            as_attachment=True,
-            download_name=f"old_attendance_{file_date_text}.xlsx",
+            output, as_attachment=True,
+            download_name=f"actual_attendance_{date_text}.xlsx",
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
     except Exception as e:
-        return f"下载旧签到失败：{e}"
-    
+        return f"下载实际签到失败：{e}", 500
+
 @admin_bp.route("/admin_edit_record/<int:record_id>", methods=["GET", "POST"])
 def admin_edit_record(record_id):
     pin = request.args.get("pin") or request.form.get("pin")
@@ -718,6 +699,8 @@ def admin_report():
         flash(t["admin_pin_wrong"], "bad")
         return redirect(url_for("index"))
 
+    policies = get_signin_policies()
+
     return render_template_string("""
 <!doctype html>
 <html lang="{{ t['html_lang'] }}">
@@ -815,6 +798,32 @@ def admin_report():
     </div>
 
     <div class="card">
+        <div class="section-title">🔐 报名签到限制管理 / Check-in Rules</div>
+        <p class="admin-desc">三个岗位独立设置，默认关闭。卫生只需当天有效报名，不必正式排班。<br>
+        Independent controls. Cleaning only requires a valid signup for today.</p>
+        {% for code, label, detail in [
+          ('duty', '📋 值班 / Duty', '当天正式排班 / Published assignment'),
+          ('cleaning', '🧹 卫生 / Cleaning', '当天有效报名 / Valid signup'),
+          ('meal', '🥗 膳食组 / Meal Team', '当天有效报名 / Valid signup')
+        ] %}
+        <form method="post" action="{{ url_for('admin.update_signin_policy') }}"
+              style="padding:12px 0;border-top:1px solid #eee;">
+            <input type="hidden" name="role" value="{{ code }}">
+            <input type="hidden" name="admin_pin" value="{{ pin }}">
+            <div style="font-weight:700;font-size:19px">{{ label }}</div>
+            <div class="admin-desc">{{ detail }}</div>
+            <div style="margin:8px 0;font-weight:700;color:{{ '#198754' if policies[code] else '#b02a37' }}">
+                {{ '🟢 已开启 / ON' if policies[code] else '🔴 已关闭 / OFF' }}
+            </div>
+            <button type="submit" name="enabled" value="{{ '0' if policies[code] else '1' }}"
+                    class="btn-tool {{ 'btn-danger' if policies[code] else 'btn-success' }}">
+                {{ '关闭限制 / Disable' if policies[code] else '开启限制 / Enable' }}
+            </button>
+        </form>
+        {% endfor %}
+    </div>
+
+    <div class="card">
         <a class="btn-tool btn-secondary"
            href="/">
             {{ t["back_home"] }}
@@ -825,7 +834,22 @@ def admin_report():
 
 </body>
 </html>
-""", t=t, pin=pin)
+""", t=t, pin=pin, policies=policies)
+
+
+@admin_bp.route("/admin/signin-policy", methods=["POST"])
+def update_signin_policy():
+    pin = (request.form.get("admin_pin") or "").strip()
+    if pin != ADMIN_PIN:
+        flash("管理员 PIN 错误 / Invalid admin PIN", "bad")
+        return redirect(url_for("index"))
+    role = (request.form.get("role") or "").strip()
+    if role not in ("duty", "cleaning", "meal"):
+        flash("未知岗位 / Invalid role", "bad")
+        return redirect(url_for("admin.admin_report", pin=pin))
+    set_signin_policy(role, request.form.get("enabled") == "1")
+    flash("签到限制设置已保存 / Check-in rule saved", "ok")
+    return redirect(url_for("admin.admin_report", pin=pin))
 
 
 @admin_bp.route("/admin_records")
@@ -1160,13 +1184,9 @@ button:disabled{
 
                 <a class="btn-tool btn-warning download-link"
                    data-base="{{ url_for('admin.download_data') }}">
-                    📊 {{ t.get("download_old_signin_excel", "下载旧签到 Excel") }}
+                    📊 下载实际签到 Excel
                 </a>
 
-                <a class="btn-tool btn-secondary download-link"
-                   data-base="{{ url_for('admin.download_att_logs') }}">
-                    📋 {{ t.get("download_new_attendance_logs", "下载新签到日志") }}
-                </a>
             </div>
 
             <hr>
@@ -1270,12 +1290,13 @@ function updateLinks(){
 
     document.querySelectorAll(".download-link").forEach(function(link){
         const base = link.dataset.base;
-
+        const url = new URL(base, window.location.origin);
+        url.searchParams.set("pin", {{ pin | tojson }});
         if(startDate && endDate){
-            link.href = `${base}?start_date=${startDate}&end_date=${endDate}`;
-        }else{
-            link.href = base;
+            url.searchParams.set("start_date", startDate);
+            url.searchParams.set("end_date", endDate);
         }
+        link.href = url.pathname + url.search;
     });
 }
 
@@ -1480,6 +1501,8 @@ def admin_home():
 
 @admin_bp.route("/download_att_logs")
 def download_att_logs():
+    if (request.args.get("pin") or "").strip() != ADMIN_PIN:
+        return "无权限 / Unauthorized", 403
 
     try:
         start_date = request.args.get("start_date", "").strip()
