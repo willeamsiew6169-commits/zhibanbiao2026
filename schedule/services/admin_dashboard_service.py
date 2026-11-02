@@ -2,8 +2,10 @@ from datetime import datetime
 from time import perf_counter
 import logging
 import os
+from contextlib import contextmanager
 
 from schedule.builders.time_utils import malaysia_today
+from db import get_conn
 from lunar_rules import get_special_day_info, get_next_day_remove_info
 from schedule.services.assignment_service import (
     load_display_records,
@@ -28,6 +30,15 @@ def _timed(label, fn, *args, **kwargs):
         return fn(*args, **kwargs)
     finally:
         _logger.warning("[schedule-dashboard] %s: %.3fs", label, perf_counter() - started)
+
+
+@contextmanager
+def _timed_connection():
+    started = perf_counter()
+    with get_conn() as conn:
+        if os.environ.get("SCHEDULE_DASHBOARD_TIMING", "0") == "1":
+            _logger.warning("[schedule-dashboard] get_shared_connection: %.3fs", perf_counter() - started)
+        yield conn
 
 
 def load_admin_dashboard_data(mode, override_date):
@@ -58,25 +69,34 @@ def load_admin_dashboard_data(mode, override_date):
     except (ValueError, TypeError):
         supply_alert_days = 7
 
-    shortage_summary = _timed(
-        "build_shortage_summary_for_admin", build_shortage_summary_for_admin, override_date
-    )
-    supply_signups = _timed(
-        "load_supply_signups_for_date", load_supply_signups_for_date, override_date
-    )
-    supply_alerts = _timed(
-        "load_upcoming_supply_signup_alerts",
-        load_upcoming_supply_signup_alerts,
-        days_ahead=supply_alert_days,
-    )
+    # 同一个 Dashboard 请求共用一次数据库连接，避免重复借用及健康检查。
+    # 所有读取仍直接查询数据库，不缓存报名、发布或排班数据。
+    with _timed_connection() as conn:
+        shortage_summary = _timed(
+            "build_shortage_summary_for_admin",
+            build_shortage_summary_for_admin,
+            override_date,
+            conn=conn,
+        )
+        supply_signups = _timed(
+            "load_supply_signups_for_date",
+            load_supply_signups_for_date,
+            override_date,
+            conn=conn,
+        )
+        supply_alerts = _timed(
+            "load_upcoming_supply_signup_alerts",
+            load_upcoming_supply_signup_alerts,
+            days_ahead=supply_alert_days,
+            conn=conn,
+        )
+        pending_counts, day_summary, day_flags = _timed(
+            "load_schedule_admin_dashboard_data",
+            load_schedule_admin_dashboard_data,
+            override_date,
+            conn=conn,
+        )
 
-    # 发布状态与供台设置在同一次 schedule_day_flags 查询中读取。
-    # 避免原来 is_schedule_published 和 get_schedule_republish_info 各自查询一次。
-    pending_counts, day_summary, day_flags = _timed(
-        "load_schedule_admin_dashboard_data",
-        load_schedule_admin_dashboard_data,
-        override_date,
-    )
     published = bool(day_flags.get("is_published", False))
     republish_info = {
         "need_republish": bool(day_flags.get("need_republish", False)),

@@ -96,7 +96,7 @@ def supply_task_label(supply_task):
 # 读取供台报名
 # ==========================================================
 
-def load_supply_signups_for_date(date_str, supply_task=None):
+def load_supply_signups_for_date(date_str, supply_task=None, conn=None):
     """
     读取指定日期的供台报名。
 
@@ -115,61 +115,63 @@ def load_supply_signups_for_date(date_str, supply_task=None):
 
     task = normalize_supply_task(supply_task)
 
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+    if conn is None:
+        with get_conn() as own_conn:
+            return load_supply_signups_for_date(date_str, supply_task=supply_task, conn=own_conn)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
-            if task:
+        if task:
 
-                cur.execute("""
-                    select
-                        id,
-                        volunteer_id,
-                        name,
-                        signup_date,
-                        role,
-                        coalesce(supply_task, 'setup') as supply_task,
-                        status,
-                        created_at
-                    from volunteer_schedule_signups
-                    where signup_date = %s
-                      and role = '供台'
-                      and coalesce(supply_task, 'setup') = %s
-                      and coalesce(status, 'pending') <> 'cancelled'
-                    order by created_at, id
-                """, (
-                    date_str,
-                    task,
-                ))
+            cur.execute("""
+                select
+                    id,
+                    volunteer_id,
+                    name,
+                    signup_date,
+                    role,
+                    coalesce(supply_task, 'setup') as supply_task,
+                    status,
+                    created_at
+                from volunteer_schedule_signups
+                where signup_date = %s
+                  and role = '供台'
+                  and coalesce(supply_task, 'setup') = %s
+                  and coalesce(status, 'pending') <> 'cancelled'
+                order by created_at, id
+            """, (
+                date_str,
+                task,
+            ))
 
-            else:
+        else:
 
-                cur.execute("""
-                    select
-                        id,
-                        volunteer_id,
-                        name,
-                        signup_date,
-                        role,
-                        coalesce(supply_task, 'setup') as supply_task,
-                        status,
-                        created_at
-                    from volunteer_schedule_signups
-                    where signup_date = %s
-                      and role = '供台'
-                      and coalesce(status, 'pending') <> 'cancelled'
-                    order by
-                        case
-                            when coalesce(supply_task, 'setup') = 'setup'
-                                then 1
-                            when supply_task = 'remove'
-                                then 2
-                            else 3
-                        end,
-                        created_at,
-                        id
-                """, (date_str,))
+            cur.execute("""
+                select
+                    id,
+                    volunteer_id,
+                    name,
+                    signup_date,
+                    role,
+                    coalesce(supply_task, 'setup') as supply_task,
+                    status,
+                    created_at
+                from volunteer_schedule_signups
+                where signup_date = %s
+                  and role = '供台'
+                  and coalesce(status, 'pending') <> 'cancelled'
+                order by
+                    case
+                        when coalesce(supply_task, 'setup') = 'setup'
+                            then 1
+                        when supply_task = 'remove'
+                            then 2
+                        else 3
+                    end,
+                    created_at,
+                    id
+            """, (date_str,))
 
-            return cur.fetchall()
+        return cur.fetchall()
 
 
 def load_supply_setup_signups_for_date(date_str):
@@ -321,7 +323,7 @@ def get_supply_signup_summary(date_str):
         },
     }
 
-def load_upcoming_supply_signup_alerts(days_ahead=60, limit=2):
+def load_upcoming_supply_signup_alerts(days_ahead=60, limit=2, conn=None):
     """
     读取未来初一、十五及佛诞日的供台报名提醒。
 
@@ -353,25 +355,27 @@ def load_upcoming_supply_signup_alerts(days_ahead=60, limit=2):
         for item in special_dates
     }
 
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+    if conn is None:
+        with get_conn() as own_conn:
+            return load_upcoming_supply_signup_alerts(days_ahead=days_ahead, limit=limit, conn=own_conn)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
-            cur.execute("""
-                select
-                    signup_date,
-                    name,
-                    coalesce(supply_task, 'setup') as supply_task
-                from volunteer_schedule_signups
-                where signup_date between %s and %s
-                  and role = '供台'
-                  and coalesce(status, 'pending') <> 'cancelled'
-                order by signup_date, created_at, id
-            """, (
-                today,
-                end_date,
-            ))
+        cur.execute("""
+            select
+                signup_date,
+                name,
+                coalesce(supply_task, 'setup') as supply_task
+            from volunteer_schedule_signups
+            where signup_date between %s and %s
+              and role = '供台'
+              and coalesce(status, 'pending') <> 'cancelled'
+            order by signup_date, created_at, id
+        """, (
+            today,
+            end_date,
+        ))
 
-            rows = cur.fetchall()
+        rows = cur.fetchall()
 
     for row in rows:
 
