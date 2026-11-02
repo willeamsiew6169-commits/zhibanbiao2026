@@ -4,7 +4,8 @@ import os
 import psycopg2
 from contextlib import contextmanager
 from psycopg2.extras import RealDictCursor
-from psycopg2.pool import SimpleConnectionPool
+from psycopg2.pool import ThreadedConnectionPool
+# ThreadedConnectionPool 可安全用于多线程请求；保持原有 pool 接口。
 from dotenv import load_dotenv
 
 
@@ -20,7 +21,7 @@ if not DATABASE_URL:
 # ============================================================
 # PostgreSQL connection pool
 # ============================================================
-pool = SimpleConnectionPool(
+pool = ThreadedConnectionPool(
     1,
     20,
     dsn=DATABASE_URL,
@@ -209,71 +210,49 @@ def _execute_query(conn, sql, params=None, fetchone=False, fetchall=False):
 
 
 def db_query(sql, params=None, fetchone=False, fetchall=False):
+    """执行单次 SQL，并安全管理连接及事务。
+
+    连接借用阶段由 _get_healthy_connection() 负责检测断线并重试。
+    SQL 开始执行后不自动重试：网络可能在数据库提交成功、
+    但客户端尚未收到确认时断开；盲目重试 INSERT/UPDATE
+    可能导致重复签到、重复付款等数据问题。
+
+    调用方如需对幂等的只读查询重试，应在业务层明确控制。
     """
-    执行 SQL。
-
-    如果执行过程中 PostgreSQL/Supabase 刚好断线：
-    - 丢弃当前坏连接
-    - 自动取得新连接
-    - SQL 自动重试一次
-
-    注意：
-    只针对连接类错误自动重试。
-    SQL 语法错误、constraint error 等不会重复执行。
-    """
-    last_error = None
-
-    for attempt in range(2):
-        conn = None
-        broken = False
-
-        try:
-            conn = _get_healthy_connection()
-
-            return _execute_query(
-                conn,
-                sql,
-                params=params,
-                fetchone=fetchone,
-                fetchall=fetchall,
-            )
-
-        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
-            last_error = exc
-            broken = True
-
+    conn = None
+    broken = False
+    try:
+        conn = _get_healthy_connection()
+        return _execute_query(
+            conn,
+            sql,
+            params=params,
+            fetchone=fetchone,
+            fetchall=fetchall,
+        )
+    except (psycopg2.OperationalError, psycopg2.InterfaceError):
+        broken = True
+        if conn is not None and not conn.closed:
             try:
-                if conn and not conn.closed:
-                    conn.rollback()
-            except (psycopg2.InterfaceError, psycopg2.OperationalError):
+                conn.rollback()
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
                 pass
-
-            # 第一次断线：finally 会丢弃坏连接，
-            # 然后进入第二轮重新取得新连接。
-            if attempt == 1:
-                raise
-
-        except Exception:
+        raise
+    except Exception:
+        if conn is not None and not conn.closed:
             try:
-                if conn and not conn.closed:
-                    conn.rollback()
-            except (psycopg2.InterfaceError, psycopg2.OperationalError):
+                conn.rollback()
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
                 broken = True
-
-            raise
-
-        finally:
-            if conn is not None:
+        else:
+            broken = True
+        raise
+    finally:
+        if conn is not None:
+            try:
+                pool.putconn(conn, close=(broken or bool(conn.closed)))
+            except Exception:
                 try:
-                    pool.putconn(
-                        conn,
-                        close=(broken or bool(conn.closed)),
-                    )
+                    conn.close()
                 except Exception:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-
-    if last_error is not None:
-        raise last_error
+                    pass
