@@ -562,7 +562,8 @@ def volunteer_signup():
     
     assignment_rows = []
 
-    if published:
+    # 无论是否发布，都查询真实 assignments；当天补排无需等待发布。
+    if role == "值班":
 
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -579,7 +580,7 @@ def volunteer_signup():
                 """, (signup_id,))
 
                 assignment_rows = cur.fetchall()
-    if published and assignment_rows:
+    if assignment_rows:
 
         assignment_lines = ""
 
@@ -605,7 +606,7 @@ def volunteer_signup():
         </div>
         """
 
-    elif published and not assignment_rows:
+    elif published or (role == "值班" and signup_date == str(malaysia_today())):
 
         status_html = """
         <div class="alert alert-warning">

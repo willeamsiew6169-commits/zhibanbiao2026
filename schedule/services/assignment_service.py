@@ -1,5 +1,3 @@
-# assignment_service.py
-
 import os
 import threading
 import pandas as pd
@@ -7,10 +5,8 @@ import pandas as pd
 from db import get_conn
 from psycopg2.extras import RealDictCursor
 from schedule.constants import PREBOOK_FILE
-from datetime import datetime, date, timedelta
+from datetime import timedelta
 from schedule.builders.time_utils import malaysia_today
-
-
 
 _PREBOOK_CACHE_LOCK = threading.Lock()
 _PREBOOK_CACHE_MTIME_NS = None
@@ -20,7 +16,6 @@ _PREBOOK_CACHE_DF = None
 def clear_prebook_cache():
     """在预报名 Excel 被修改后主动清除缓存。"""
     global _PREBOOK_CACHE_MTIME_NS, _PREBOOK_CACHE_DF
-
     with _PREBOOK_CACHE_LOCK:
         _PREBOOK_CACHE_MTIME_NS = None
         _PREBOOK_CACHE_DF = None
@@ -29,160 +24,103 @@ def clear_prebook_cache():
 def _load_prebook_dataframe():
     """按文件修改时间缓存预报名 Excel。"""
     global _PREBOOK_CACHE_MTIME_NS, _PREBOOK_CACHE_DF
-
     if not os.path.exists(PREBOOK_FILE):
         return None
-
     mtime_ns = os.stat(PREBOOK_FILE).st_mtime_ns
-
     if _PREBOOK_CACHE_DF is not None and _PREBOOK_CACHE_MTIME_NS == mtime_ns:
         return _PREBOOK_CACHE_DF
-
     with _PREBOOK_CACHE_LOCK:
         mtime_ns = os.stat(PREBOOK_FILE).st_mtime_ns
-
         if _PREBOOK_CACHE_DF is not None and _PREBOOK_CACHE_MTIME_NS == mtime_ns:
             return _PREBOOK_CACHE_DF
-
         df = pd.read_excel(PREBOOK_FILE, sheet_name="预报名")
         df.columns = df.columns.astype(str).str.strip()
-
         if "日期" in df.columns:
             df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
-
         _PREBOOK_CACHE_DF = df
         _PREBOOK_CACHE_MTIME_NS = mtime_ns
         return _PREBOOK_CACHE_DF
+
 
 def load_assigned_places_for_date(date_str):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                select
-                    id,
-                    signup_id,
-                    volunteer_id,
-                    name,
-                    assignment_date,
-                    role,
-                    shift_label,
-                    assigned_place,
-                    start_time,
-                    end_time,
-                    status,
-                    remarks
+                select id, signup_id, volunteer_id, name, assignment_date,
+                       role, shift_label, assigned_place, start_time, end_time,
+                       status, remarks
                 from volunteer_schedule_assignments
                 where assignment_date = %s
-                and coalesce(status, 'assigned') <> 'cancelled'
+                  and coalesce(status, 'assigned') <> 'cancelled'
                 order by
-                    case
-                        when role = '卫生' then 1
-                        when role = '供台' then 2
-                        when role = '值班' then 3
-                        else 9
-                    end,
-                    case
-                        when shift_label = '绿班' then 1
-                        when shift_label = '橙班' then 2
-                        when shift_label = '黄班' then 3
-                        else 9
-                    end,
-                    assigned_place,
-                    start_time,
-                    name
+                    case when role = '卫生' then 1
+                         when role = '供台' then 2
+                         when role = '值班' then 3 else 9 end,
+                    case when shift_label = '绿班' then 1
+                         when shift_label = '橙班' then 2
+                         when shift_label = '黄班' then 3 else 9 end,
+                    assigned_place, start_time, name
             """, (date_str,))
-
             return cur.fetchall()
-        
+
 
 def load_display_records(mode, target_date=None, year=None, month=None):
     try:
         source_df = _load_prebook_dataframe()
-
         if source_df is None or source_df.empty or "日期" not in source_df.columns:
             return []
-
         df = source_df.dropna(subset=["日期"]).copy()
-
         if mode == "day" and target_date:
             target = pd.to_datetime(target_date).date()
             df = df[df["日期"].dt.date == target]
-
         elif mode == "prebook" and year and month:
-            df = df[
-                (df["日期"].dt.year == int(year))
-                & (df["日期"].dt.month == int(month))
-            ]
-
+            df = df[(df["日期"].dt.year == int(year)) & (df["日期"].dt.month == int(month))]
         else:
             return []
-
         if df.empty:
             return []
-
         df["日期"] = df["日期"].dt.strftime("%Y-%m-%d")
         return df.fillna("").to_dict("records")
-
     except Exception as e:
         print("load_display_records error:", e)
         return []
 
+
 def load_schedule_admin_dashboard_data(override_date):
-    
     today = malaysia_today()
     tomorrow = today + timedelta(days=1)
     month_start = today.replace(day=1)
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-
-            # 未安排统计
             cur.execute("""
                 select
-                    count(*) filter (
-                        where signup_date = %s
-                    ) as today_count,
-
-                    count(*) filter (
-                        where signup_date = %s
-                    ) as tomorrow_count,
-
-                    count(*) filter (
-                        where signup_date >= %s
-                    ) as month_count
+                    count(*) filter (where signup_date = %s) as today_count,
+                    count(*) filter (where signup_date = %s) as tomorrow_count,
+                    count(*) filter (where signup_date >= %s) as month_count
                 from volunteer_schedule_signups
                 where coalesce(status, 'pending') = 'pending'
-                and signup_date >= %s
+                  and signup_date >= %s
             """, (today, tomorrow, month_start, month_start))
-
             pending_row = cur.fetchone()
-
             pending_counts = {
                 "today": pending_row["today_count"] or 0,
                 "tomorrow": pending_row["tomorrow_count"] or 0,
                 "month": pending_row["month_count"] or 0,
             }
 
-            # 当天概况
             cur.execute("""
                 select
                     count(*) as total,
-                    count(*) filter (
-                        where coalesce(status, 'pending') = 'pending'
-                    ) as pending,
-                    count(*) filter (
-                        where coalesce(status, '') = 'assigned'
-                    ) as assigned,
-                    count(*) filter (
-                        where coalesce(status, '') = 'cancelled'
-                    ) as cancelled
+                    count(*) filter (where coalesce(status, 'pending') = 'pending') as pending,
+                    count(*) filter (where coalesce(status, '') = 'assigned') as assigned,
+                    count(*) filter (where coalesce(status, '') = 'cancelled') as cancelled
                 from volunteer_schedule_signups
                 where signup_date = %s
             """, (override_date,))
-
             day_summary = cur.fetchone()
 
-            # 供台设置
+            # 同一行读取供台设置、发布状态、重新发布状态。
             cur.execute("""
                 select
                     flag_date,
@@ -190,11 +128,13 @@ def load_schedule_admin_dashboard_data(override_date):
                     coalesce(need_remove_master_table, false) as need_remove_master_table,
                     coalesce(setup_people, '') as setup_people,
                     coalesce(remove_people, '') as remove_people,
-                    remarks
+                    remarks,
+                    coalesce(is_published, false) as is_published,
+                    coalesce(need_republish, false) as need_republish,
+                    last_schedule_change
                 from schedule_day_flags
                 where flag_date = %s
             """, (override_date,))
-
             day_flags = cur.fetchone()
 
     if not day_flags:
@@ -204,6 +144,8 @@ def load_schedule_admin_dashboard_data(override_date):
             "setup_people": "",
             "remove_people": "",
             "remarks": "",
+            "is_published": False,
+            "need_republish": False,
+            "last_schedule_change": None,
         }
-
     return pending_counts, day_summary, day_flags

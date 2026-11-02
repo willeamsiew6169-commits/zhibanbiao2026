@@ -202,11 +202,17 @@ def patch_schedule_for_date(date_str, only_signup_id=None):
     """
 
     try:
-        date_obj, arranged, assigned_rows, special_info, remove_info = \
-            calculate_schedule_for_date(
-                date_str,
-                patch_mode=True,
-            )
+        # 单笔值班补排即使整日计算失败，也必须继续尝试单人安全补排。
+        # 例如 fixed_schedule.xlsx 缺失时，不能让当天报名永久停在 pending。
+        assigned_rows = []
+        try:
+            date_obj, arranged, assigned_rows, special_info, remove_info = \
+                calculate_schedule_for_date(date_str, patch_mode=True)
+        except Exception as calc_error:
+            if only_signup_id is None:
+                raise
+            print("⚠️ 整日计算失败，改用单人补排：", repr(calc_error))
+            traceback.print_exc()
 
         print("========== PATCH DEBUG ==========")
         print("日期:", date_str)
@@ -419,9 +425,22 @@ def sync_schedule_after_signup_change(signup_id, action="upsert", changed_by="sy
 
     date_str = str(signup["signup_date"])
 
-    # ✅ 发布前：不建立、不删除 assignments
-    if not is_schedule_published(date_str):
-        print("ℹ️ 尚未发布，不同步 assignments：", signup_id, date_str)
+    # 发布前的未来报名：只保存报名，等待负责人正式排班。
+    # 当天的「值班」报名例外：立即单人补排，不改变其他人的既有排班。
+    # 使用马来西亚日期，避免 Render 服务器 UTC 日期与观音堂当地日期不一致。
+    from zoneinfo import ZoneInfo
+    today_my = datetime.now(ZoneInfo("Asia/Kuala_Lumpur")).date().isoformat()
+    published = is_schedule_published(date_str)
+    same_day_duty = date_str == today_my and signup.get("role") == "值班"
+
+    if not published and not same_day_duty:
+        print("ℹ️ 尚未发布，未来报名暂不建立 assignments：", signup_id, date_str)
+        return 0
+
+    # 自动补排只处理值班；卫生、供台、佛台由各自流程安排。
+    # 取消报名仍可清理该报名原有记录。
+    if action != "cancel" and signup.get("status") != "cancelled" and signup.get("role") != "值班":
+        print("ℹ️ 非值班报名，交由专用岗位排班流程：", signup_id, signup.get("role"))
         return 0
 
     # ✅ 发布后取消：只删除这个人的 assignment
@@ -444,7 +463,7 @@ def sync_schedule_after_signup_change(signup_id, action="upsert", changed_by="sy
             deleted_count
         )
 
-        if deleted_count > 0:
+        if published and deleted_count > 0:
             mark_schedule_need_republish(date_str)
 
         return deleted_count
@@ -475,11 +494,57 @@ def sync_schedule_after_signup_change(signup_id, action="upsert", changed_by="sy
         inserted_count
     )
 
-    if deleted_count > 0 or inserted_count > 0:
+    if published and (deleted_count > 0 or inserted_count > 0):
         mark_schedule_need_republish(date_str)
 
     return inserted_count
     
+def repair_unassigned_duty_for_date(date_str):
+    """只补指定日期缺漏的值班报名，不重排已有义工；可重复安全执行。
+
+    返回 {checked, repaired, failed, skipped}，供负责人维护入口或一次性脚本调用。
+    """
+    from datetime import date as _date
+    _date.fromisoformat(str(date_str))
+    signups = db_query("""
+        select s.id, s.name
+        from volunteer_schedule_signups s
+        where s.signup_date = %s
+          and s.role = '值班'
+          and coalesce(s.status, 'pending') <> 'cancelled'
+          and not exists (
+              select 1 from volunteer_schedule_assignments a
+              where a.signup_id = s.id
+                and a.assignment_date = s.signup_date
+                and a.role = '值班'
+          )
+        order by s.id
+    """, (date_str,), fetchall=True) or []
+    result = {"checked": len(signups), "repaired": [], "failed": [], "skipped": []}
+    for signup in signups:
+        sid = int(signup["id"])
+        try:
+            # 再查一次，避免重复补排。
+            exists = db_query("""
+                select id from volunteer_schedule_assignments
+                where signup_id=%s and assignment_date=%s and role='值班'
+                limit 1
+            """, (sid, date_str), fetchone=True)
+            if exists:
+                result["skipped"].append(sid)
+                continue
+            count = patch_schedule_for_date(date_str, only_signup_id=sid)
+            if count > 0:
+                result["repaired"].append(sid)
+            else:
+                result["failed"].append(sid)
+        except Exception:
+            traceback.print_exc()
+            result["failed"].append(sid)
+    print("🛠️ 缺漏值班补排结果：", result)
+    return result
+
+
 def choose_cleaning_place_for_patch(date_str, volunteer_id):
 
     places = ["佛堂卫生", "二楼卫生", "楼梯卫生"]
@@ -625,6 +690,9 @@ def sync_patch_assignments(date_str, assigned_rows, only_signup_id=None):
     for r in rows:
         if r["signup_id"] is None:
             continue
+
+        if r.get("locked_by_admin"):
+            locked_signup_ids.add(int(r["signup_id"]))
 
         existing_keys.add((
             int(r["signup_id"]),

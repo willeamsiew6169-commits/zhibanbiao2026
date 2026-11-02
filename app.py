@@ -734,7 +734,7 @@ PAGE = """
            style="display:none;">
       </div>
 
-      <div class="form-row">
+      <div class="form-row" id="signinOnlyFields">
 
         <div class="form-group form-col">
 
@@ -802,7 +802,7 @@ PAGE = """
       <input type="hidden" id="signout_assignment_id" name="assignment_id">
     </form>
 
-    <div class="small-note">
+    <div class="small-note" id="signinOnlyTip">
       💡 {{ t.card_no_duty_tip }}。
     </div>
   </div>
@@ -986,6 +986,7 @@ async function lookupVolunteer() {
     assignmentInput.value = '';
 
     window.lastAttendanceLookup = data;
+    updateSigninOnlyVisibility(data.attendance_action === 'signout');
     if (data.attendance_action === 'signout') {
       signOutBtn.style.display = '';
       assignmentInput.value = data.current_assignment_id || '';
@@ -1007,6 +1008,8 @@ async function lookupVolunteer() {
 
   } else {
     box.className = 'alert alert-danger';
+    updateSigninOnlyVisibility(false);
+    window.lastAttendanceLookup = null;
     box.innerHTML = `${TXT.not_found_id}：${finalId}`;
   }
 }
@@ -1047,6 +1050,13 @@ function toggleBranch() {
     btn.innerText = "CHE";
     btn.className = "btn-tool btn-success branch-btn";
   }
+}
+
+function updateSigninOnlyVisibility(isSigningOut) {
+  const fields = document.getElementById('signinOnlyFields');
+  const tip = document.getElementById('signinOnlyTip');
+  if (fields) fields.style.display = isSigningOut ? 'none' : '';
+  if (tip) tip.style.display = isSigningOut ? 'none' : '';
 }
 
 function refreshRoleAction() {
