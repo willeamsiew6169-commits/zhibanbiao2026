@@ -16,6 +16,20 @@ def register_whatsapp_agent_api(bp):
         supplied = request.headers.get('Authorization', '')
         return bool(expected) and hmac.compare_digest(supplied, 'Bearer ' + expected)
 
+    @bp.route('/schedule/api/whatsapp-agent/notice-1900/tick', methods=['POST'])
+    def wa_notice_1900_tick():
+        if not authenticated():
+            return jsonify(error='unauthorized'), 401
+        try:
+            from schedule.services.whatsapp_notice_1900 import enqueue_tomorrow_signup_notice
+            # Reuse the exact message currently displayed on the admin signup-notice page.
+            from schedule.schedule_web import build_signup_notice_whatsapp
+            result = enqueue_tomorrow_signup_notice(build_signup_notice_whatsapp)
+            return jsonify(result)
+        except Exception:
+            LOG.exception('WhatsApp 19:00 signup notice enqueue failed')
+            return jsonify(error='notice_enqueue_error'), 500
+
     @bp.route('/schedule/api/whatsapp-agent/claim', methods=['POST'])
     def wa_agent_claim():
         if not authenticated():
@@ -28,6 +42,7 @@ def register_whatsapp_agent_api(bp):
                     cur.execute('''
                         SELECT id, body, destination FROM whatsapp_notification_jobs
                         WHERE status = 'pending' AND message_type = 'test'
+                          AND destination = 'TEST_GROUP_ONLY'
                         ORDER BY id ASC LIMIT 1 FOR UPDATE SKIP LOCKED
                     ''')
                     row = cur.fetchone()
