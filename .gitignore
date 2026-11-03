@@ -219,3 +219,6 @@ __marimo__/
 
 # Generated files
 output/
+
+whatsapp_agent/wa_browser_profile/
+whatsapp_agent/.env.agent
