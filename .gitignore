@@ -222,3 +222,4 @@ output/
 
 whatsapp_agent/wa_browser_profile/
 whatsapp_agent/.env.agent
+whatsapp_agent/.whatsapp_sender.lock
