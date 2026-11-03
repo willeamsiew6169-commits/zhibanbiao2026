@@ -47,6 +47,29 @@ def find_next_meal_signup_date(base_date, days_ahead=7):
 
     return None, None
 
+
+
+def cleaning_signup_window(target_date):
+    """按马来西亚时间判定卫生报名是否截止；未来日期始终开放。"""
+    now = malaysia_now()
+    info = get_special_day_info(target_date)
+    special = info.get("template_type") in ("lunar_1_15", "buddhist_festival")
+    cutoff_hour = 8 if special else 10
+    is_open = target_date > now.date() or (
+        target_date == now.date() and now.hour < cutoff_hour
+    )
+    return is_open, cutoff_hour, special
+
+
+def cleaning_signup_closed_message(cutoff_hour):
+    time_text = "8:00am" if cutoff_hour == 8 else "10:00am"
+    return (
+        "<h2>❌ 卫生报名时间已截止 / Cleaning signup closed</h2>"
+        f"<p>当天卫生报名于 {time_text} 截止。</p>"
+        "<p>请改报明天或未来日期。 / Please select a future date.</p>"
+        '<a href="/volunteer">返回义工报名 / Back</a>'
+    )
+
 @schedule_bp.route("/volunteer")
 def volunteer_home():
 
@@ -219,6 +242,14 @@ def volunteer_signup():
 
     elif role == "卫生":
 
+        try:
+            cleaning_date = datetime.strptime(signup_date, "%Y-%m-%d").date()
+        except ValueError:
+            return "❌ 日期格式错误 / Invalid date<br><a href='/volunteer'>返回</a>"
+        cleaning_open, cutoff_hour, cleaning_special = cleaning_signup_window(cleaning_date)
+        if not cleaning_open:
+            return cleaning_signup_closed_message(cutoff_hour)
+
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
@@ -242,7 +273,7 @@ def volunteer_signup():
         date_obj = datetime.strptime(signup_date, "%Y-%m-%d").date()
         special_info = get_special_day_info(date_obj)
 
-        if special_info.get("template_type") == "buddhist_festival":
+        if special_info.get("template_type") in ("lunar_1_15", "buddhist_festival"):
             start_time = "6:00am"
             end_time = "8:00am"
         else:
@@ -1907,6 +1938,15 @@ def volunteer_edit_signup_post(signup_id):
                 </html>
                 """, old=old)
 
+            if new_role == "卫生":
+                try:
+                    target_cleaning_date = datetime.strptime(new_date, "%Y-%m-%d").date()
+                except ValueError:
+                    return "❌ 日期格式错误 / Invalid date"
+                cleaning_open, cutoff_hour, _ = cleaning_signup_window(target_cleaning_date)
+                if not cleaning_open:
+                    return cleaning_signup_closed_message(cutoff_hour)
+
             cur.execute("""
                 update volunteer_schedule_signups
                 set status = 'cancelled'
@@ -2624,6 +2664,12 @@ def volunteer_prebook():
                     skipped += 1
                     continue
 
+                if role == "卫生":
+                    cleaning_open, _, _ = cleaning_signup_window(signup_date)
+                    if not cleaning_open:
+                        skipped += 1
+                        continue
+
                 cur.execute("""
                     select id
                     from volunteer_schedule_signups
@@ -2877,8 +2923,12 @@ def volunteer_day_info():
     else:
         duty_start = "10:00am"
 
+    cleaning_open, cleaning_cutoff_hour, _ = cleaning_signup_window(date_obj)
+
     return {
         "ok": True,
+        "cleaning_signup_open": cleaning_open,
+        "cleaning_cutoff": "8:00am" if cleaning_cutoff_hour == 8 else "10:00am",
         "template_type": template_type,
         "duty_start": duty_start,
         "lunar_text": info.get("lunar_text", ""),

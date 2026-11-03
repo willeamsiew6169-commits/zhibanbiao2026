@@ -16,6 +16,7 @@ from psycopg2.extras import RealDictCursor
 from sqlalchemy import create_engine, text
 from utils import apply_branch_prefix
 from schedule.blueprint import schedule_bp
+from schedule.services.whatsapp_agent_api import register_whatsapp_agent_api
 import schedule.routes
 
 from schedule.services.quote_service import get_daily_dharma
@@ -118,10 +119,14 @@ SCHEDULE_PIN = "1234"
 
 schedule_records = []
 
+# 膳食岗位路由
 register_food_offering_routes(
     schedule_bp,
     is_schedule_setting_on=is_schedule_setting_on,
 )
+
+# WhatsApp 自动通知 API（第二阶段）
+register_whatsapp_agent_api(schedule_bp)
 
 def get_supabase_client():
     return create_client(
@@ -4869,6 +4874,7 @@ html {
       <a class="btn-tool btn-gray" style="background:#078b9b;border-color:#078b9b;color:#fff" href="/schedule?mode=controls&override_date={{ override_date }}">🔧 报名开放控制</a>
       <a class="btn-tool btn-green" style="background:#b47a17;border-color:#b47a17;color:#fff" href="/reports">📚 资料中心</a>
       <a class="btn-tool btn-gray" style="background:#596879;border-color:#596879;color:#fff" href="/schedule/settings">⚙️ 排班设置</a>
+      <a class="btn-tool btn-gray" style="background:#146e86;border-color:#146e86;color:#fff" href="/schedule/whatsapp-automation">📲 WhatsApp 自动通知</a>
       <a class="btn-tool btn-blue" style="background:#275de4;border-color:#275de4;color:#fff" href="/volunteer">👥 打开义工报名页面</a>
     </div>
 </div>
@@ -5869,3 +5875,74 @@ function copyOutput(btn){
 </body>
 </html>
 """
+
+# ============================================================
+# WhatsApp 自动通知控制台（阶段一：仅开关与队列测试，不实际发送）
+# ============================================================
+@schedule_bp.route("/schedule/whatsapp-automation", methods=["GET", "POST"])
+def whatsapp_automation_admin():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    from schedule.services.whatsapp_queue import enqueue_whatsapp_test, recent_whatsapp_jobs
+    flags = (
+        ("wa_auto_enabled", "自动发送总开关 / Master switch"),
+        ("wa_test_mode", "测试模式 / Test mode"),
+        ("wa_notice_1900", "19:00 报名通知 / Signup notice"),
+        ("wa_roster_2200", "22:00 正式值班表 / Full roster"),
+        ("wa_late_signup", "22:00 后新增义工通知 / Late signups"),
+        ("wa_auto_publish_2200", "22:00 自动排班发布 / Auto publish (independent)"),
+    )
+    message = ""
+    if request.method == "POST":
+        action = request.form.get("action", "save")
+        if action == "save":
+            # 不允许通过空白字段意外开启自动发布；只接受明确的 checkbox 值。
+            for key, _ in flags:
+                save_schedule_setting(key, "true" if request.form.get(key) == "on" else "false")
+            message = "设置已保存 / Settings saved"
+        elif action == "test":
+            if not is_schedule_setting_on("wa_test_mode"):
+                message = "请先开启测试模式 / Enable test mode first"
+            else:
+                try:
+                    job_id = enqueue_whatsapp_test("🧪 观音堂 WhatsApp 自动通知测试 / Test message", "admin")
+                    message = f"测试消息已加入队列（尚未发送）/ Queued, not sent: #{job_id}"
+                except Exception:
+                    import logging
+                    logging.exception("WhatsApp 测试消息入队失败")
+                    message = "❌ 测试入队失败，请查看 Python Terminal 的详细错误。"
+        else:
+            message = "不支持的操作 / Unsupported action"
+
+    current = {key: is_schedule_setting_on(key) for key, _ in flags}
+    try:
+        jobs = recent_whatsapp_jobs(20)
+        queue_error = ""
+    except Exception:
+        jobs = []
+        queue_error = "发送记录表尚未建立，请先执行 whatsapp_queue.sql / Run whatsapp_queue.sql first"
+
+    return render_template_string('''<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhatsApp 自动通知 / Automation</title>
+<style>body{font-family:system-ui,'Microsoft YaHei',sans-serif;background:#f3f7fa;margin:0;padding:20px;color:#183047}
+main{max-width:850px;margin:auto}.card{background:white;border-radius:14px;padding:22px;margin:16px 0;box-shadow:0 2px 12px #dce5eb}
+h1{font-size:25px}label{display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-bottom:1px solid #eee;gap:16px}
+input[type=checkbox]{width:25px;height:25px;accent-color:#14876a}button,.btn{display:inline-block;border:0;border-radius:9px;padding:12px 18px;color:white;background:#146e86;cursor:pointer;text-decoration:none;margin:8px 5px 4px 0}
+.secondary{background:#657786}.warning{background:#fff5df;padding:12px;border-radius:8px}.success{background:#e3f8ee;padding:10px;border-radius:8px}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:left;word-break:break-word}</style></head>
+<body><main><h1>📲 WhatsApp 自动通知 / Automation</h1>
+<p class="warning">⚠️ 第一阶段只保存开关和测试队列，不会发送 WhatsApp，也不会自动发布排班。<br>
+Stage 1 only: settings and queue; no actual WhatsApp sending or automatic schedule publication.</p>
+{% if message %}<p class="success">{{ message }}</p>{% endif %}
+<div class="card"><form method="post"><input type="hidden" name="action" value="save">
+{% for key,label in flags %}<label><span>{{ label }}</span><input type="checkbox" name="{{ key }}" {% if current[key] %}checked{% endif %}></label>{% endfor %}
+<p class="warning">🛑 自动排班发布开关与 WhatsApp 发送总开关互相独立。测试时请保持自动发布关闭。<br>Auto-publish is independent; keep it OFF during testing.</p>
+<button type="submit">💾 保存设置 / Save settings</button></form></div>
+<div class="card"><h2>🧪 测试队列 / Test queue</h2><p>测试按钮只创建一条待发送记录，不会联系任何群组。</p>
+<form method="post"><input type="hidden" name="action" value="test"><button type="submit">📤 加入测试消息 / Queue test message</button></form>
+{% if queue_error %}<p class="warning">{{ queue_error }}</p>{% endif %}</div>
+<div class="card"><h2>📜 最近记录 / Recent jobs</h2><div style="overflow-x:auto"><table><tr><th>ID</th><th>类别 / Type</th><th>状态 / Status</th><th>创建 / Created</th></tr>
+{% for j in jobs %}<tr><td>{{j.id}}</td><td>{{j.message_type}}</td><td>{{j.status}}</td><td>{{j.created_at}}</td></tr>{% else %}<tr><td colspan="4">暂无记录 / No records</td></tr>{% endfor %}</table></div></div>
+<a class="btn secondary" href="{{url_for('schedule.schedule_admin')}}">← 返回负责人首页 / Back</a></main></body></html>''',flags=flags,current=current,jobs=jobs,message=message,queue_error=queue_error)

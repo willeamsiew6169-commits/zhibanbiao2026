@@ -13,6 +13,14 @@ DEFAULT_SCHEDULE_SETTINGS = {
     "target_yellow_activity": "2",
     "target_cleaning": "3",
     "supply_alert_days": "7",
+    # WhatsApp 自动化：安全默认关闭 / Safe defaults OFF
+    "wa_auto_enabled": "false",
+    "wa_test_mode": "true",
+    "wa_notice_1900": "false",
+    "wa_roster_2200": "false",
+    "wa_late_signup": "false",
+    "wa_auto_publish_2200": "false",
+
 }
 
 

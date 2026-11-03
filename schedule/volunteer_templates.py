@@ -427,6 +427,7 @@ VOLUNTEER_SIGNUP_HTML = """
                             type="button"
                             class="choice-btn"
                             data-role="卫生"
+                            id="cleaning_role_button"
                             onclick="selectRole(this)">
 
                             <span class="choice-icon">🧹</span>
@@ -830,6 +831,7 @@ function isSignupDateToday() {
 
 function selectRole(button) {
 
+    if (button.disabled) return;
     const role = button.dataset.role;
 
     // 保存岗位到隐藏字段
@@ -1583,6 +1585,40 @@ function showDailySignup() {
 }
 
 
+/* 卫生报名截止：始终以服务器的马来西亚时间及佛日类型为准。 */
+let cleaningCheckSequence = 0;
+
+async function updateCleaningSignupAvailability() {
+    const button = document.getElementById("cleaning_role_button");
+    const dateInput = document.querySelector("input[name='signup_date']");
+    if (!button || !dateInput || !dateInput.value) return;
+
+    const sequence = ++cleaningCheckSequence;
+    const selectedDate = dateInput.value;
+    try {
+        const response = await fetch(
+            "/volunteer/day_info?date=" + encodeURIComponent(selectedDate),
+            { cache: "no-store" }
+        );
+        if (!response.ok) throw new Error("day_info unavailable");
+        const data = await response.json();
+        if (sequence !== cleaningCheckSequence || dateInput.value !== selectedDate) return;
+        if (!data.ok || typeof data.cleaning_signup_open !== "boolean") return;
+
+        button.style.display = data.cleaning_signup_open ? "" : "none";
+        button.disabled = !data.cleaning_signup_open;
+
+        const roleInput = document.getElementById("role_select");
+        if (!data.cleaning_signup_open && roleInput?.value === "卫生") {
+            const dutyButton = document.querySelector('.choice-btn[data-role="值班"]');
+            if (dutyButton) selectRole(dutyButton);
+        }
+    } catch (error) {
+        console.warn("卫生报名开放状态暂时无法更新：", error);
+        // 网络异常时不改变现有显示；提交时后端仍会验证。
+    }
+}
+
 /* =========================================================
    页面初始化
    ========================================================= */
@@ -1607,12 +1643,15 @@ document.addEventListener("DOMContentLoaded", function () {
 
     setDefaultDutyTimes();
     updateRoleUI(selectedRole);
+    updateCleaningSignupAvailability();
+    setInterval(updateCleaningSignupAvailability, 30000);
 
     if (dateInput) {
         dateInput.addEventListener(
             "change",
             function () {
                 setDefaultDutyTimes();
+                updateCleaningSignupAvailability();
 
                 if (
                     document.getElementById(
