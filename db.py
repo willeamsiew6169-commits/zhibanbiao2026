@@ -2,7 +2,7 @@
 
 import os
 import time
-import logging
+import threading
 import psycopg2
 from contextlib import contextmanager
 from psycopg2.extras import RealDictCursor
@@ -55,10 +55,34 @@ def get_db():
     )
 
 
+# 对近期已成功使用的连接跳过重复 SELECT 1，减少跨区域数据库往返。
+# 超过检查间隔仍会执行原有健康检查；断线仍会丢弃连接。
+_HEALTH_CHECK_INTERVAL = max(0.0, float(os.getenv("DB_HEALTH_CHECK_INTERVAL", "30")))
+_last_verified = {}
+_verified_lock = threading.Lock()
+
+
+def _mark_verified(conn):
+    with _verified_lock:
+        _last_verified[id(conn)] = time.monotonic()
+
+
+def _forget_verified(conn):
+    with _verified_lock:
+        _last_verified.pop(id(conn), None)
+
+
+def _recently_verified(conn):
+    with _verified_lock:
+        stamp = _last_verified.get(id(conn))
+    return stamp is not None and time.monotonic() - stamp < _HEALTH_CHECK_INTERVAL
+
+
 def _discard_connection(conn):
     """把失效连接从 connection pool 中彻底丢弃。"""
     if conn is None:
         return
+    _forget_verified(conn)
 
     try:
         pool.putconn(conn, close=True)
@@ -109,6 +133,9 @@ def _get_healthy_connection():
                 conn = None
                 continue
 
+            if _recently_verified(conn):
+                return conn
+
             # 真正向 PostgreSQL 发出请求，确认服务器端连接仍然活着。
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
@@ -116,6 +143,7 @@ def _get_healthy_connection():
 
             # 清掉健康检查产生的 transaction。
             conn.rollback()
+            _mark_verified(conn)
             return conn
 
         except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
@@ -156,6 +184,7 @@ def get_conn():
 
         if conn and not conn.closed:
             conn.commit()
+            _mark_verified(conn)
         else:
             broken = True
 
@@ -184,6 +213,8 @@ def get_conn():
     finally:
         if conn is not None:
             try:
+                if broken or conn.closed:
+                    _forget_verified(conn)
                 pool.putconn(
                     conn,
                     close=(broken or bool(conn.closed)),
@@ -208,6 +239,7 @@ def _execute_query(conn, sql, params=None, fetchone=False, fetchall=False):
             result = None
 
     conn.commit()
+    _mark_verified(conn)
     return result
 
 
@@ -223,13 +255,8 @@ def db_query(sql, params=None, fetchone=False, fetchall=False):
     """
     conn = None
     broken = False
-    started = time.perf_counter()
-    acquired = started
-    started = time.perf_counter()
-    acquired = started
     try:
         conn = _get_healthy_connection()
-        acquired = time.perf_counter()
         return _execute_query(
             conn,
             sql,
@@ -255,13 +282,10 @@ def db_query(sql, params=None, fetchone=False, fetchall=False):
             broken = True
         raise
     finally:
-        if os.getenv("ATTENDANCE_PERF_LOG", "0") == "1":
-            logging.warning("[DB-PERF] op=%s checkout_ms=%.0f query_commit_ms=%.0f total_ms=%.0f",
-                str(sql).strip().split(None, 1)[0].upper() if str(sql).strip() else "?",
-                (acquired-started)*1000, (time.perf_counter()-acquired)*1000,
-                (time.perf_counter()-started)*1000)
         if conn is not None:
             try:
+                if broken or conn.closed:
+                    _forget_verified(conn)
                 pool.putconn(conn, close=(broken or bool(conn.closed)))
             except Exception:
                 try:

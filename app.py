@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import os
 import time
-import logging
 import io
 import sys
 import psycopg2
@@ -1580,19 +1579,19 @@ def index():
     )
 
 @app.before_request
-def _attendance_perf_start():
-    if os.getenv("ATTENDANCE_PERF_LOG", "0") == "1" and (request.path in ("/", "/signin", "/signout") or request.path.startswith("/api/volunteer/")):
-        from flask import g
-        g.attendance_perf_start = time.perf_counter()
+def _attendance_speed_start():
+    if request.path in ("/", "/signin", "/signout") or request.path.startswith("/api/volunteer/"):
+        request.environ["attendance_speed_start"] = time.perf_counter()
 
 
 @app.after_request
-def _attendance_perf_finish(response):
-    if os.getenv("ATTENDANCE_PERF_LOG", "0") == "1":
-        from flask import g
-        started = getattr(g, "attendance_perf_start", None)
-        if started is not None:
-            logging.warning("[ATT-PERF] path=%s status=%s total_ms=%.0f", "/api/volunteer/*" if request.path.startswith("/api/volunteer/") else request.path, response.status_code, (time.perf_counter()-started)*1000)
+def _attendance_speed_report(response):
+    started = request.environ.get("attendance_speed_start")
+    if started is not None:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        route = "/api/volunteer/<id>" if request.path.startswith("/api/volunteer/") else request.path
+        app.logger.info("[ATTENDANCE_SPEED] route=%s status=%s elapsed_ms=%.1f", route, response.status_code, elapsed_ms)
+        response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.1f}"
     return response
 
 
