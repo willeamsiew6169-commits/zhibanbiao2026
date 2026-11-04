@@ -234,16 +234,14 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
                 return False, "找不到这轮正式排班，请重新查询后再签到。"
         else:
             # 兼容旧页面：自动找第一轮尚未完成的排班。
-            for a in assignments:
-                done = db_query("""
-                    select 1 from volunteer_attendance_logs
-                    where assignment_id=%s and volunteer_id=%s
-                      and attendance_date=%s and check_out_time is not null
-                    limit 1
-                """, (a["id"], volunteer["编号"], now_date_str()), fetchone=True)
-                if not done:
-                    selected = a
-                    break
+            assignment_ids = [int(a["id"]) for a in assignments]
+            done_rows = db_query("""
+                select distinct assignment_id from volunteer_attendance_logs
+                where assignment_id = any(%s) and volunteer_id=%s
+                  and attendance_date=%s and check_out_time is not null
+            """, (assignment_ids, volunteer["编号"], now_date_str()), fetchall=True) or []
+            done_ids = {int(r["assignment_id"]) for r in done_rows if r.get("assignment_id") is not None}
+            selected = next((a for a in assignments if int(a["id"]) not in done_ids), None)
 
         if not selected:
             return False, f"{volunteer['姓名']} 今天的正式排班已经全部完成。"
@@ -260,28 +258,29 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
             return False, "这段值班已经签到或完成，请勿重复签到。"
 
         job_text = "；".join(format_assignment_for_attendance(a) for a in group)
-        db_query("""
-            insert into attendance
-            (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
-            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """, (
-            now_date_str(), volunteer["编号"], volunteer["姓名"], 1, 1,
-            role, now_time_str(), "", None, card_no,
-            f"按排班签到｜{job_text}｜assignment_ids={','.join(map(str, group_ids))}"
-        ))
-
-        # Preserve assignment-level attendance logs for schedule status; only
-        # attendance table carries the single actual service-time record.
-        for segment in group:
-            db_query("""
-                insert into volunteer_attendance_logs (
-                    assignment_id, volunteer_id, name, attendance_date,
-                    actual_role, actual_place, walk_in, remarks
-                ) values (%s,%s,%s,%s,%s,%s,false,'按排班签到（同岗位连续时段）')
-            """, (
-                segment["id"], segment["volunteer_id"], segment["name"],
-                segment["assignment_date"], segment["role"], segment["assigned_place"]
-            ))
+        # 同一事务写入实际签到及各段排班日志；避免只写入其中一张表。
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    insert into attendance
+                    (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
+                    values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                    now_date_str(), volunteer["编号"], volunteer["姓名"], 1, 1,
+                    role, now_time_str(), "", None, card_no,
+                    f"按排班签到｜{job_text}｜assignment_ids={','.join(map(str, group_ids))}"
+                ))
+                from psycopg2.extras import execute_values
+                execute_values(cur, """
+                    insert into volunteer_attendance_logs (
+                        assignment_id, volunteer_id, name, attendance_date,
+                        actual_role, actual_place, walk_in, remarks
+                    ) values %s
+                """, [(
+                    segment["id"], segment["volunteer_id"], segment["name"],
+                    segment["assignment_date"], segment["role"], segment["assigned_place"],
+                    False, "按排班签到（同岗位连续时段）"
+                ) for segment in group])
 
         return True, f"{volunteer['姓名']} 已签到\n\n岗位：{role}\n安排：{job_text}\n\n同岗位连续换地点无需重新签到；完成后请签退。"
 
@@ -289,23 +288,25 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
     if role not in ROLES:
         return False, "今天没有排班记录，请选择实际协助岗位。"
 
-    db_query("""
-        insert into attendance
-        (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
-        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    """, (
-        now_date_str(), volunteer["编号"], volunteer["姓名"], 0, 1, role,
-        now_time_str(), "", None, card_no, f"现场签到：{role}"
-    ))
-    db_query("""
-        insert into volunteer_attendance_logs (
-            assignment_id, volunteer_id, name, attendance_date,
-            actual_role, actual_place, walk_in, remarks
-        ) values (null,%s,%s,%s,%s,%s,true,%s)
-    """, (
-        volunteer["编号"], volunteer["姓名"], now_date_str(), role, role,
-        f"现场签到：{role}"
-    ))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                insert into attendance
+                (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (
+                now_date_str(), volunteer["编号"], volunteer["姓名"], 0, 1, role,
+                now_time_str(), "", None, card_no, f"现场签到：{role}"
+            ))
+            cur.execute("""
+                insert into volunteer_attendance_logs (
+                    assignment_id, volunteer_id, name, attendance_date,
+                    actual_role, actual_place, walk_in, remarks
+                ) values (null,%s,%s,%s,%s,%s,true,%s)
+            """, (
+                volunteer["编号"], volunteer["姓名"], now_date_str(), role, role,
+                f"现场签到：{role}"
+            ))
     return True, f"{volunteer['姓名']} 已签到\n\n今天没有正式排班记录。\n已登记：{role}\n\n完成后请记得签退。"
 
 
@@ -341,11 +342,7 @@ def sign_out(volunteer_id: str, pin: str, assignment_id=None) -> tuple[bool, str
     except Exception:
         hours = None
 
-    db_query("""
-        update attendance set end_time=%s, hours=%s where id=%s
-    """, (end_time, hours, row["id"]))
-
-    # 只签退本轮 assignment；现场签到则只关闭最新一笔 walk-in log。
+    # 签退更新两张表必须同一事务提交。
     remark = str(row.get("remark") or "")
     group_marker = "assignment_ids="
     legacy_marker = "assignment_id="
@@ -362,22 +359,26 @@ def sign_out(volunteer_id: str, pin: str, assignment_id=None) -> tuple[bool, str
         except ValueError:
             aids = []
 
-    if aids:
-        db_query("""
-            update volunteer_attendance_logs
-            set check_out_time=now()
-            where assignment_id = any(%s) and volunteer_id=%s
-              and attendance_date=%s and check_out_time is null
-        """, (aids, volunteer["编号"], now_date_str()))
-    else:
-        log = db_query("""
-            select id from volunteer_attendance_logs
-            where volunteer_id=%s and attendance_date=%s
-              and check_out_time is null and assignment_id is null
-            order by id desc limit 1
-        """, (volunteer["编号"], now_date_str()), fetchone=True)
-        if log:
-            db_query("update volunteer_attendance_logs set check_out_time=now() where id=%s", (log["id"],))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("update attendance set end_time=%s, hours=%s where id=%s",
+                        (end_time, hours, row["id"]))
+            if aids:
+                cur.execute("""
+                    update volunteer_attendance_logs set check_out_time=now()
+                    where assignment_id = any(%s) and volunteer_id=%s
+                      and attendance_date=%s and check_out_time is null
+                """, (aids, volunteer["编号"], now_date_str()))
+            else:
+                cur.execute("""
+                    update volunteer_attendance_logs set check_out_time=now()
+                    where id = (
+                        select id from volunteer_attendance_logs
+                        where volunteer_id=%s and attendance_date=%s
+                          and check_out_time is null and assignment_id is null
+                        order by id desc limit 1
+                    )
+                """, (volunteer["编号"], now_date_str()))
 
     return True, f"{volunteer['姓名']} 已签退。"
 

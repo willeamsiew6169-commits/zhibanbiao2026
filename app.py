@@ -124,21 +124,17 @@ app.register_blueprint(xfz_bp)
 
 
 def get_today_stats():
-    rows = db_query("""
-        select *
-        from attendance
-        where date = %s
-    """, (now_date_str(),), fetchall=True)
+    """在数据库内汇总，避免将当天所有签到记录传回 Python。"""
+    row = db_query("""
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE end_time IS NULL OR end_time = '') AS open
+        FROM attendance
+        WHERE date = %s
+    """, (now_date_str(),), fetchone=True) or {}
+    total = int(row.get("total") or 0)
+    open_count = int(row.get("open") or 0)
+    return {"total": total, "open": open_count, "finished": total - open_count}
 
-    total = len(rows)
-    open_count = sum(1 for r in rows if not str(r.get("end_time") or "").strip())
-    finished = total - open_count
-
-    return {
-        "total": total,
-        "open": open_count,
-        "finished": finished,
-    }
 
 # =========================
 # 2) 语言工具
@@ -1571,8 +1567,6 @@ def index():
         t=get_text(),
         roles=ROLES,
         role_label=role_label,
-        open_records=get_today_open_records(),
-        today_records=get_today_records(limit=20),
         today_count=stats["total"],
         not_out=stats["open"],
         done_out=stats["finished"],
@@ -1590,12 +1584,6 @@ def do_sign_in():
     role = request.form.get("role", "").strip()
     # 三种岗位限制由 attendance_service.sign_in() 统一判断。
     # 不在路由重复检查，以免卫生报名被错误要求正式排班。
-    v = find_volunteer(volunteer_id)
-    if not v:
-        flash("❌ 找不到义工编号", "bad")
-        return redirect(url_for("index"))
-    volunteer_id = str(v.get("编号") or volunteer_id).strip()
-
     ok, msg = sign_in(
         volunteer_id,
         request.form.get("pin", ""),
@@ -1638,36 +1626,8 @@ def do_sign_out():
         volunteer_id = str(row["volunteer_id"]).strip()
 
     else:
-        # 新方式：首页直接用义工编号签退
-        raw_id = request.form.get("volunteer_id", "").strip()
-        volunteer = find_volunteer(raw_id)
-
-        if not volunteer:
-            flash("找不到这个义工编号", "bad")
-            return redirect(url_for("index"))
-
-        volunteer_id = str(volunteer.get("编号") or raw_id).strip()
-
-        if not volunteer_id:
-            flash("请输入义工编号", "bad")
-            return redirect(url_for("index"))
-
-        row = db_query("""
-            select *
-            from attendance
-            where volunteer_id = %s
-              and date = %s
-              and (end_time is null or end_time = '')
-            order by id desc
-            limit 1
-        """, (
-            volunteer_id,
-            now_date_str()
-        ), fetchone=True)
-
-        if not row:
-            flash("今天没有找到未签退记录", "bad")
-            return redirect(url_for("index"))
+        # 核心服务统一验证编号、PIN 和进行中的签到记录。
+        volunteer_id = request.form.get("volunteer_id", "").strip()
 
     ok, msg = sign_out(
         volunteer_id,
@@ -1856,11 +1816,7 @@ def get_member_payment(member_id):
 @app.route("/api/volunteer/<volunteer_id>", methods=["POST"])
 def api_volunteer(volunteer_id):
     try:
-        print("API volunteer_id =", volunteer_id)
-
         v = find_volunteer(volunteer_id)
-        print("API result =", v)
-
         if not v:
             return jsonify({
                 "ok": False,
@@ -1872,49 +1828,37 @@ def api_volunteer(volunteer_id):
 
         today = datetime.now(ZoneInfo("Asia/Kuala_Lumpur")).date()
 
-        today_assignments = []
-
+        # 同一个数据库连接读取排班及签到状态，避免反复借还连接。
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    select
-                        id,
-                        role,
-                        assigned_place,
-                        start_time,
-                        end_time,
-                        shift_label
+                    select id, role, assigned_place, start_time, end_time, shift_label
                     from volunteer_schedule_assignments
-                    where volunteer_id = %s
-                      and assignment_date = %s
+                    where volunteer_id = %s and assignment_date = %s
                       and coalesce(status, 'assigned') <> 'cancelled'
                     order by start_time, assigned_place
-                """, (
-                    v.get("编号"),
-                    today
-                ))
-
+                """, (v.get("编号"), today))
                 today_assignments = cur.fetchall()
-
-        # 同岗位连续排班共用一笔实际签到；每段 assignment 保留独立状态。
-        open_log = db_query("""
-            select assignment_id
-            from volunteer_attendance_logs
-            where volunteer_id = %s
-              and attendance_date = %s
-              and check_out_time is null
-            order by id desc
-            limit 1
-        """, (v.get("编号"), today), fetchone=True)
-
-        completed_rows = db_query("""
-            select assignment_id
-            from volunteer_attendance_logs
-            where volunteer_id = %s
-              and attendance_date = %s
-              and check_out_time is not null
-              and assignment_id is not null
-        """, (v.get("编号"), today), fetchall=True) or []
+                cur.execute("""
+                    select assignment_id from volunteer_attendance_logs
+                    where volunteer_id = %s and attendance_date = %s
+                      and check_out_time is null
+                    order by id desc limit 1
+                """, (v.get("编号"), today))
+                open_log = cur.fetchone()
+                cur.execute("""
+                    select assignment_id from volunteer_attendance_logs
+                    where volunteer_id = %s and attendance_date = %s
+                      and check_out_time is not null and assignment_id is not null
+                """, (v.get("编号"), today))
+                completed_rows = cur.fetchall() or []
+                cur.execute("""
+                    select id from attendance
+                    where volunteer_id = %s and date = %s
+                      and (end_time is null or end_time = '')
+                    order by id desc limit 1
+                """, (v.get("编号"), now_date_str()))
+                actual_open = cur.fetchone()
         completed_ids = {int(x["assignment_id"]) for x in completed_rows if x.get("assignment_id") is not None}
         open_assignment_id = int(open_log["assignment_id"]) if open_log and open_log.get("assignment_id") is not None else None
 
@@ -1931,13 +1875,6 @@ def api_volunteer(volunteer_id):
             else:
                 a["state"] = "pending"
 
-        actual_open = db_query("""
-            select id from attendance
-            where volunteer_id=%s and date=%s
-              and (end_time is null or end_time='')
-            order by id desc limit 1
-        """, (v.get("编号"), now_date_str()), fetchone=True)
-
         if actual_open:
             attendance_action = "signout"
             current_assignment_id = open_assignment_id
@@ -1945,18 +1882,7 @@ def api_volunteer(volunteer_id):
             attendance_action = "signout"
             current_assignment_id = open_assignment_id
         elif not today_assignments:
-            # 试用期：没有正式排班时，依据 attendance 的未签退记录切换按钮。
-            # 不改变正式排班的多轮签到逻辑。
-            trial_open = db_query("""
-                select id
-                from attendance
-                where volunteer_id = %s
-                  and date = %s
-                  and (end_time is null or end_time = '')
-                order by id desc
-                limit 1
-            """, (v.get("编号"), now_date_str()), fetchone=True)
-            attendance_action = "signout" if trial_open else "walkin"
+            attendance_action = "walkin"
         elif today_assignments:
             pending = next((a for a in today_assignments if a.get("state") == "pending"), None)
             if pending:
