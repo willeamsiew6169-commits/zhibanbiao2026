@@ -8,7 +8,15 @@ from db import get_conn
 
 def enqueue_tomorrow_signup_notice(build_notice):
     now = malaysia_now()
-    configured = str(get_schedule_setting('wa_notice_time', '19:00') or '19:00').strip()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT value FROM schedule_settings WHERE key = %s",
+                ("wa_notice_time",)
+            )
+            row = cur.fetchone()
+
+    configured = str(row[0] if row else "19:00").strip()
     if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', configured):
         configured = '19:00'
     hour, minute = map(int, configured.split(':'))
