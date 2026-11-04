@@ -323,44 +323,46 @@ def sign_out(volunteer_id: str, pin: str, assignment_id=None) -> tuple[bool, str
     if not verify_pin_for_volunteer(volunteer, pin):
         return False, "PIN 不正确。"
 
-    row = db_query("""
-        select * from attendance
-        where date=%s and volunteer_id=%s
-          and (end_time is null or end_time='')
-        order by id desc limit 1
-    """, (now_date_str(), volunteer["编号"]), fetchone=True)
-    if not row:
-        return False, f"{volunteer['姓名']} 今天没有未签退记录。"
-
-    end_time = now_time_str()
-    try:
-        start_dt = parse_time_to_datetime(row["start_time"])
-        end_dt = parse_time_to_datetime(end_time)
-        hours = round((end_dt - start_dt).total_seconds() / 3600, 2)
-        if hours < 0:
-            hours = 0
-    except Exception:
-        hours = None
-
-    # 签退更新两张表必须同一事务提交。
-    remark = str(row.get("remark") or "")
-    group_marker = "assignment_ids="
-    legacy_marker = "assignment_id="
-    aids = []
-    if group_marker in remark:
-        try:
-            value = remark.split(group_marker, 1)[1].split("｜", 1)[0].strip()
-            aids = [int(x) for x in value.split(",") if x.strip()]
-        except ValueError:
-            aids = []
-    elif legacy_marker in remark:
-        try:
-            aids = [int(remark.split(legacy_marker, 1)[1].split("｜", 1)[0].strip())]
-        except ValueError:
-            aids = []
-
     with get_conn() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select * from attendance
+                where date=%s and volunteer_id=%s
+                  and (end_time is null or end_time='')
+                order by id desc limit 1
+                for update
+            """, (now_date_str(), volunteer["编号"]))
+            row = cur.fetchone()
+            if not row:
+                return False, f"{volunteer['姓名']} 今天没有未签退记录。"
+
+            end_time = now_time_str()
+            try:
+                start_dt = parse_time_to_datetime(row["start_time"])
+                end_dt = parse_time_to_datetime(end_time)
+                hours = round((end_dt - start_dt).total_seconds() / 3600, 2)
+                if hours < 0:
+                    hours = 0
+            except Exception:
+                hours = None
+
+            # 签退更新两张表必须同一事务提交。
+            remark = str(row.get("remark") or "")
+            group_marker = "assignment_ids="
+            legacy_marker = "assignment_id="
+            aids = []
+            if group_marker in remark:
+                try:
+                    value = remark.split(group_marker, 1)[1].split("｜", 1)[0].strip()
+                    aids = [int(x) for x in value.split(",") if x.strip()]
+                except ValueError:
+                    aids = []
+            elif legacy_marker in remark:
+                try:
+                    aids = [int(remark.split(legacy_marker, 1)[1].split("｜", 1)[0].strip())]
+                except ValueError:
+                    aids = []
+
             cur.execute("update attendance set end_time=%s, hours=%s where id=%s",
                         (end_time, hours, row["id"]))
             if aids:
@@ -550,10 +552,6 @@ def get_today_assignments(volunteer_id, role=None, current_time=False):
 
             rows = cur.fetchall()
 
-            print("volunteer_id =", volunteer_id)
-            print("role =", role)
-            print("today =", malaysia_today())
-            print("rows =", rows)
 
             # 开关关闭：不检查时间，直接回传今天安排
             if not current_time or not ENABLE_SIGNIN_TIME_LIMIT:
@@ -576,7 +574,6 @@ def get_today_assignments(volunteer_id, role=None, current_time=False):
                 if allowed_start <= now_min <= end_min:
                     valid_rows.append(r)
 
-            print("valid_rows =", valid_rows)
 
             return valid_rows
 

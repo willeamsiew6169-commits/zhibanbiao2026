@@ -127,7 +127,10 @@ def _get_healthy_connection():
             # 如果上一次使用后 transaction 状态异常，
             # 先 rollback，避免 SELECT 1 因 aborted transaction 失败。
             try:
-                conn.rollback()
+                # IDLE 连接不需要 ROLLBACK；原先每次借连接都会产生一次网络往返。
+                from psycopg2.extensions import TRANSACTION_STATUS_IDLE
+                if conn.get_transaction_status() != TRANSACTION_STATUS_IDLE:
+                    conn.rollback()
             except (psycopg2.InterfaceError, psycopg2.OperationalError):
                 _discard_connection(conn)
                 conn = None

@@ -1877,6 +1877,14 @@ def api_volunteer(volunteer_id):
                     order by id desc limit 1
                 """, (v.get("编号"), now_date_str()))
                 actual_open = cur.fetchone()
+                paid_until = None
+                if pin_ok:
+                    cur.execute("""
+                        select max(end_month) as paid_until
+                        from member_payments where member_id = %s
+                    """, (v.get("编号"),))
+                    paid_row = cur.fetchone()
+                    paid_until = paid_row.get("paid_until") if paid_row else None
         completed_ids = {int(x["assignment_id"]) for x in completed_rows if x.get("assignment_id") is not None}
         open_assignment_id = int(open_log["assignment_id"]) if open_log and open_log.get("assignment_id") is not None else None
 
@@ -1919,8 +1927,6 @@ def api_volunteer(volunteer_id):
 
         if pin_ok:
             safe_v["电话号码"] = v.get("电话号码", "")
-
-            paid_until = get_member_paid_until(v.get("编号"))
 
             if paid_until:
                 try:
