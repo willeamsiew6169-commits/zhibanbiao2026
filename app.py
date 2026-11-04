@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import os
+import time
+import logging
 import io
 import sys
 import psycopg2
@@ -1576,6 +1578,23 @@ def index():
         buddhist_day=buddhist_day,
         malaysia_time=malaysia_time,
     )
+
+@app.before_request
+def _attendance_perf_start():
+    if os.getenv("ATTENDANCE_PERF_LOG", "0") == "1" and (request.path in ("/", "/signin", "/signout") or request.path.startswith("/api/volunteer/")):
+        from flask import g
+        g.attendance_perf_start = time.perf_counter()
+
+
+@app.after_request
+def _attendance_perf_finish(response):
+    if os.getenv("ATTENDANCE_PERF_LOG", "0") == "1":
+        from flask import g
+        started = getattr(g, "attendance_perf_start", None)
+        if started is not None:
+            logging.warning("[ATT-PERF] path=%s status=%s total_ms=%.0f", "/api/volunteer/*" if request.path.startswith("/api/volunteer/") else request.path, response.status_code, (time.perf_counter()-started)*1000)
+    return response
+
 
 @app.route("/signin", methods=["POST"])
 def do_sign_in():

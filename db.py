@@ -1,6 +1,8 @@
 # db.py
 
 import os
+import time
+import logging
 import psycopg2
 from contextlib import contextmanager
 from psycopg2.extras import RealDictCursor
@@ -221,8 +223,13 @@ def db_query(sql, params=None, fetchone=False, fetchall=False):
     """
     conn = None
     broken = False
+    started = time.perf_counter()
+    acquired = started
+    started = time.perf_counter()
+    acquired = started
     try:
         conn = _get_healthy_connection()
+        acquired = time.perf_counter()
         return _execute_query(
             conn,
             sql,
@@ -248,6 +255,11 @@ def db_query(sql, params=None, fetchone=False, fetchall=False):
             broken = True
         raise
     finally:
+        if os.getenv("ATTENDANCE_PERF_LOG", "0") == "1":
+            logging.warning("[DB-PERF] op=%s checkout_ms=%.0f query_commit_ms=%.0f total_ms=%.0f",
+                str(sql).strip().split(None, 1)[0].upper() if str(sql).strip() else "?",
+                (acquired-started)*1000, (time.perf_counter()-acquired)*1000,
+                (time.perf_counter()-started)*1000)
         if conn is not None:
             try:
                 pool.putconn(conn, close=(broken or bool(conn.closed)))
