@@ -54,6 +54,8 @@ from schedule.services.settings_service import (
     save_schedule_setting,
     set_schedule_setting,
     is_schedule_setting_on,
+    is_meal_signup_open,
+    set_meal_signup_override,
 )
 
 from schedule.services.publish_service import (
@@ -1081,7 +1083,7 @@ def build_signup_notice_whatsapp(date_str):
 另外，请大家多留意义工群信息，以便大家能够团结一致的护持好观音堂。佛子齐心，普度众生。
 
 义工报名请点击以下链接：
-https://gyt-checkin.onrender.com/volunteer
+https://gyt-checkin-sg.onrender.com/volunteer
 
 非常感恩大家！
 大家功德无量！
@@ -1166,7 +1168,7 @@ def schedule_admin():
         override_date=override_date,
         fixed_buddha_today=fixed_buddha_today,
         multi_day_signup_open=dashboard["multi_day_signup_open"],
-        meal_signup_open=dashboard["meal_signup_open"],
+        meal_signup_open=is_meal_signup_open(),
         food_offering_open=dashboard["food_offering_open"],
         records=dashboard["records"],
         pending_counts=dashboard["pending_counts"],
@@ -1424,6 +1426,13 @@ def toggle_schedule_setting():
 
     if key not in allowed_keys:
         return "❌ 不允许的设置"
+
+    if key == "meal_signup_open":
+        if force in ("true", "false"):
+            set_meal_signup_override(force == "true", updated_by="admin")
+        else:
+            set_meal_signup_override(not is_meal_signup_open(), updated_by="admin")
+        return redirect(return_to)
 
     if force in ("true", "false"):
         set_schedule_setting(key, force, updated_by="admin")
@@ -5877,51 +5886,72 @@ function copyOutput(btn){
 """
 
 # ============================================================
-# WhatsApp 自动通知控制台（阶段一：仅开关与队列测试，不实际发送）
+# WhatsApp 自动通知控制台（第一阶段：测试群组限定）
 # ============================================================
 @schedule_bp.route("/schedule/whatsapp-automation", methods=["GET", "POST"])
 def whatsapp_automation_admin():
     if not session.get("schedule_login"):
         return redirect(url_for("schedule.schedule_admin"))
 
+    from datetime import timedelta
     from schedule.services.whatsapp_queue import enqueue_whatsapp_test, recent_whatsapp_jobs
     flags = (
         ("wa_auto_enabled", "自动发送总开关 / Master switch"),
         ("wa_test_mode", "测试模式 / Test mode"),
-        ("wa_notice_1900", "19:00 报名通知 / Signup notice"),
-        ("wa_roster_2200", "22:00 正式值班表 / Full roster"),
-        ("wa_late_signup", "22:00 后新增义工通知 / Late signups"),
-        ("wa_auto_publish_2200", "22:00 自动排班发布 / Auto publish (independent)"),
+        ("wa_notice_1900", "报名通知 / Signup notice"),
+        ("wa_roster_2200", "正式值班表（尚未开发）/ Full roster (not implemented)"),
+        ("wa_late_signup", "发布后新报名通知（尚未开发）/ Late signup (not implemented)"),
+        ("wa_auto_publish_2200", "自动排班发布（尚未开发）/ Auto publish (not implemented)"),
     )
     message = ""
     if request.method == "POST":
         action = request.form.get("action", "save")
         if action == "save":
-            # 不允许通过空白字段意外开启自动发布；只接受明确的 checkbox 值。
-            for key, _ in flags:
-                save_schedule_setting(key, "true" if request.form.get(key) == "on" else "false")
-            message = "设置已保存 / Settings saved"
-        elif action == "test":
+            import re
+            new_time = request.form.get("wa_notice_time", "19:00").strip()
+            if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", new_time):
+                message = "❌ 时间格式错误，请使用 HH:MM / Invalid time"
+            else:
+                for key, _ in flags:
+                    # 22:00 及后续功能尚未开发：保留原有开关值，不意外启用。
+                    if key in ("wa_roster_2200", "wa_late_signup", "wa_auto_publish_2200"):
+                        continue
+                    save_schedule_setting(key, "true" if request.form.get(key) == "on" else "false")
+                save_schedule_setting("wa_notice_time", new_time)
+                message = "✅ 设置已保存 / Settings saved"
+        elif action in ("test", "test_signup"):
             if not is_schedule_setting_on("wa_test_mode"):
-                message = "请先开启测试模式 / Enable test mode first"
+                message = "请先开启并保存测试模式 / Enable and save test mode first"
             else:
                 try:
-                    job_id = enqueue_whatsapp_test("🧪 观音堂 WhatsApp 自动通知测试 / Test message", "admin")
-                    message = f"测试消息已加入队列（尚未发送）/ Queued, not sent: #{job_id}"
+                    if action == "test_signup":
+                        target = (malaysia_now().date() + timedelta(days=1)).isoformat()
+                        body = build_signup_notice_whatsapp(target)
+                        if not isinstance(body, str) or not body.strip():
+                            raise ValueError("Empty signup notice")
+                        body = "🧪【测试：明日报名通知 / TEST SIGNUP NOTICE】\n" + body
+                    else:
+                        body = "🧪 观音堂 WhatsApp 自动通知测试 / Test message"
+                    job_id = enqueue_whatsapp_test(body, "admin_manual_test")
+                    message = f"✅ 已加入测试群组队列 / Queued for test group: #{job_id}。若 Agent 正在运行，可能立即发送。"
                 except Exception:
                     import logging
-                    logging.exception("WhatsApp 测试消息入队失败")
-                    message = "❌ 测试入队失败，请查看 Python Terminal 的详细错误。"
+                    logging.exception("WhatsApp 测试入队失败")
+                    message = "❌ 测试入队失败，请查看服务器日志 / Queue error"
         else:
             message = "不支持的操作 / Unsupported action"
 
     current = {key: is_schedule_setting_on(key) for key, _ in flags}
+    notice_time = str(get_schedule_setting("wa_notice_time", "19:00") or "19:00")
+    import re
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", notice_time):
+        notice_time = "19:00"
     try:
         jobs = recent_whatsapp_jobs(20)
         queue_error = ""
     except Exception:
         jobs = []
-        queue_error = "发送记录表尚未建立，请先执行 whatsapp_queue.sql / Run whatsapp_queue.sql first"
+        queue_error = "无法读取发送记录，请检查 whatsapp_notification_jobs 表 / Queue unavailable"
 
     return render_template_string('''<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -5929,20 +5959,27 @@ def whatsapp_automation_admin():
 <style>body{font-family:system-ui,'Microsoft YaHei',sans-serif;background:#f3f7fa;margin:0;padding:20px;color:#183047}
 main{max-width:850px;margin:auto}.card{background:white;border-radius:14px;padding:22px;margin:16px 0;box-shadow:0 2px 12px #dce5eb}
 h1{font-size:25px}label{display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-bottom:1px solid #eee;gap:16px}
-input[type=checkbox]{width:25px;height:25px;accent-color:#14876a}button,.btn{display:inline-block;border:0;border-radius:9px;padding:12px 18px;color:white;background:#146e86;cursor:pointer;text-decoration:none;margin:8px 5px 4px 0}
+input[type=checkbox]{width:25px;height:25px;accent-color:#14876a}input[type=time]{font-size:18px;padding:8px;border-radius:8px;border:1px solid #aaa}
+button,.btn{display:inline-block;border:0;border-radius:9px;padding:12px 18px;color:white;background:#146e86;cursor:pointer;text-decoration:none;margin:8px 5px 4px 0}
 .secondary{background:#657786}.warning{background:#fff5df;padding:12px;border-radius:8px}.success{background:#e3f8ee;padding:10px;border-radius:8px}
 table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:left;word-break:break-word}</style></head>
 <body><main><h1>📲 WhatsApp 自动通知 / Automation</h1>
-<p class="warning">⚠️ 第一阶段只保存开关和测试队列，不会发送 WhatsApp，也不会自动发布排班。<br>
-Stage 1 only: settings and queue; no actual WhatsApp sending or automatic schedule publication.</p>
+<p class="warning">🔒 目前只允许发送至测试群组。Windows Agent 运行时，测试消息可能实际发送至测试群组。<br>
+TEST GROUP ONLY. Test messages may be sent when the Windows Agent is running.</p>
 {% if message %}<p class="success">{{ message }}</p>{% endif %}
 <div class="card"><form method="post"><input type="hidden" name="action" value="save">
-{% for key,label in flags %}<label><span>{{ label }}</span><input type="checkbox" name="{{ key }}" {% if current[key] %}checked{% endif %}></label>{% endfor %}
-<p class="warning">🛑 自动排班发布开关与 WhatsApp 发送总开关互相独立。测试时请保持自动发布关闭。<br>Auto-publish is independent; keep it OFF during testing.</p>
+{% for key,label in flags %}{% if key not in ('wa_roster_2200','wa_late_signup','wa_auto_publish_2200') %}
+<label><span>{{ label }}</span><input type="checkbox" name="{{ key }}" {% if current[key] %}checked{% endif %}></label>
+{% else %}<label><span style="color:#888">{{ label }}</span><input type="checkbox" disabled {% if current[key] %}checked{% endif %}></label>{% endif %}{% endfor %}
+<label><span>🕖 报名通知时间（马来西亚）<br>Signup notice time (MYT)</span><input type="time" name="wa_notice_time" value="{{ notice_time }}" required></label>
+<p class="warning">定时任务需要每分钟运行一次检查脚本；设置时间不会自动修改 Windows Task Scheduler。<br>Run the Windows tick every minute; changing this time does not reconfigure Task Scheduler.</p>
 <button type="submit">💾 保存设置 / Save settings</button></form></div>
-<div class="card"><h2>🧪 测试队列 / Test queue</h2><p>测试按钮只创建一条待发送记录，不会联系任何群组。</p>
-<form method="post"><input type="hidden" name="action" value="test"><button type="submit">📤 加入测试消息 / Queue test message</button></form>
+<div class="card"><h2>🧪 测试队列 / Test queue</h2>
+<p>下列按钮会建立真实的测试群组待发送任务。请确认测试群组及 Agent 配置正确。</p>
+<form method="post" style="display:inline"><input type="hidden" name="action" value="test"><button type="submit">📤 普通测试 / Basic test</button></form>
+<form method="post" style="display:inline"><input type="hidden" name="action" value="test_signup"><button type="submit">📣 测试明日报名通知 / Test signup notice</button></form>
+<p class="warning">22:00 正式值班表测试将在第二阶段开发；本阶段不会自动排班或发布。</p>
 {% if queue_error %}<p class="warning">{{ queue_error }}</p>{% endif %}</div>
 <div class="card"><h2>📜 最近记录 / Recent jobs</h2><div style="overflow-x:auto"><table><tr><th>ID</th><th>类别 / Type</th><th>状态 / Status</th><th>创建 / Created</th></tr>
 {% for j in jobs %}<tr><td>{{j.id}}</td><td>{{j.message_type}}</td><td>{{j.status}}</td><td>{{j.created_at}}</td></tr>{% else %}<tr><td colspan="4">暂无记录 / No records</td></tr>{% endfor %}</table></div></div>
-<a class="btn secondary" href="{{url_for('schedule.schedule_admin')}}">← 返回负责人首页 / Back</a></main></body></html>''',flags=flags,current=current,jobs=jobs,message=message,queue_error=queue_error)
+<a class="btn secondary" href="{{url_for('schedule.schedule_admin')}}">← 返回负责人首页 / Back</a></main></body></html>''',flags=flags,current=current,notice_time=notice_time,jobs=jobs,message=message,queue_error=queue_error)

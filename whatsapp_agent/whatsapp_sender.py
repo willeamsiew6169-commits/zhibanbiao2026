@@ -30,7 +30,9 @@ LOG = logging.getLogger('whatsapp_sender')
 
 
 def post(path, data):
-    response = requests.post(URL + path, json=data, headers=HEADERS, timeout=25)
+    # 连接超时 10 秒；读取超时 90 秒，以容忍 Render 免费实例唤醒。
+    # 不在这里自动重试 POST：尤其 /ack 不可盲目重复提交。
+    response = requests.post(URL + path, json=data, headers=HEADERS, timeout=(10, 90))
     response.raise_for_status()
     return response.json()
 
@@ -251,7 +253,7 @@ def main():
                 try:
                     job = post('/schedule/api/whatsapp-agent/claim', {'agent_id': AGENT}).get('job')
                 except requests.RequestException:
-                    LOG.exception('Render 连接失败；等待后重试领取')
+                    LOG.warning('Render 连接超时或网络异常；%s 秒后重新领取（未执行 WhatsApp 发送）', POLL, exc_info=True)
                     time.sleep(POLL)
                     continue
                 if not job:

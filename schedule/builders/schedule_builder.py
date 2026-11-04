@@ -50,7 +50,7 @@ engine = create_engine(
     pool_pre_ping=True,
     pool_recycle=300,
 ) if DATABASE_URL else None
-VOLUNTEER_SIGNUP_URL = "https://gyt-checkin.onrender.com/volunteer"
+VOLUNTEER_SIGNUP_URL = "https://gyt-checkin-sg.onrender.com/volunteer"
 
 
 _FILE_CACHE_LOCK = threading.Lock()

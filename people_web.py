@@ -98,6 +98,23 @@ def natural_id_key(value):
 
 
 
+
+def migrate_volunteer_number(cur, old_id, new_id, member_id):
+    """安全保护：禁止在未核对全部数据库关联表前执行编号迁移。
+
+    旧编号涉及报名、正式排班、签到历史、个人档案及其他模块。
+    不能只 UPDATE volunteers.id，否则可能造成历史记录失联。
+    此函数故意中止事务，确保加入月费时连新会员 INSERT 一起回滚。
+    """
+    old_id, new_id, member_id = map(clean, (old_id, new_id, member_id))
+    if old_id == new_id:
+        raise ValueError("旧编号与新编号相同，无需转换。")
+    raise RuntimeError(
+        "义工编号转换已安全暂停：需要先核对 Supabase 的报名、排班、签到、"
+        "个人档案及历史编号映射表，才能启用完整迁移。数据库未作任何修改。"
+    )
+
+
 def next_volunteer_id():
     rows = db_query("select id from volunteers", fetchall=True) or []
     nums = []
@@ -1693,7 +1710,7 @@ def application_success():
 APPLICATION_LIST_PAGE = r"""
 <!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>新义工申请</title><style>body{background:#f5f7fb;font-family:Arial,"Microsoft YaHei"}.wrap{max-width:1100px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.card{background:#fff;border-radius:16px;padding:18px;margin-bottom:12px}.btn{display:inline-block;padding:10px 14px;border-radius:9px;text-decoration:none;font-weight:800;background:#6558e8;color:#fff;border:0;cursor:pointer}.green{background:#16834b}.badge{padding:5px 9px;border-radius:999px;background:#eef0f5;font-weight:800}.muted{color:#667085}.invite{background:#eef7ff;border-radius:12px;padding:12px;margin-top:10px;line-height:1.6}.urlbox{width:100%;box-sizing:border-box;padding:9px;border:1px solid #ccd6e3;border-radius:8px;background:#fff}</style></head><body><div class="wrap"><div class="top"><div><h1>🆕 新义工申请</h1><p><a href="{{ url_for('people.index') }}">← 返回人员管理中心</a></p></div><a class="btn green" href="{{ url_for('people.create_application_invite') }}">➕ 建立新义工申请</a></div>
 {% for r in rows %}<div class="card"><b>{{ r.chinese_name }}</b>　<span class="badge">{{ labels.get(r.status,r.status) }}</span><div class="muted">{{ format_phone(r.phone) }} · CHE · {% if r.status=='draft' %}等待申请人填写{% else %}提交 {{ r.applicant_submitted_at or r.submitted_at }}{% endif %}</div>
-{% if r.status=='draft' %}<div class="invite"><b>📲 专属申请链接</b><br><input class="urlbox" id="url{{ r.id }}" readonly value="https://gyt-checkin.onrender.com{{ url_for('people.invited_application',token=r.invite_token) }}"><div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:12px"><button class="btn" id="copybtn{{ r.id }}" type="button" data-name="{{ r.chinese_name|e }}" onclick="copyInvite({{ r.id }}, this.dataset.name)">📋 复制 WhatsApp 邀请</button><form method="post" action="{{ url_for('people.delete_application_invite', application_id=r.id) }}" style="margin:0" onsubmit="return confirm('确定删除「{{ r.chinese_name|e }}」这份待填写申请吗？\n\n删除后，已经发出的专属申请链接会立即失效。');"><button class="btn red" type="submit">🗑️ 删除邀请</button></form></div></div>{% else %}<p><a class="btn" href="{{ url_for('people.application_detail', application_id=r.id) }}">查看申请档案</a></p>{% endif %}</div>{% else %}<div class="card">目前没有新义工申请。点击右上方「建立新义工申请」开始。</div>{% endfor %}</div>
+{% if r.status=='draft' %}<div class="invite"><b>📲 专属申请链接</b><br><input class="urlbox" id="url{{ r.id }}" readonly value="https://gyt-checkin-sg.onrender.com{{ url_for('people.invited_application',token=r.invite_token) }}"><div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:12px"><button class="btn" id="copybtn{{ r.id }}" type="button" data-name="{{ r.chinese_name|e }}" onclick="copyInvite({{ r.id }}, this.dataset.name)">📋 复制 WhatsApp 邀请</button><form method="post" action="{{ url_for('people.delete_application_invite', application_id=r.id) }}" style="margin:0" onsubmit="return confirm('确定删除「{{ r.chinese_name|e }}」这份待填写申请吗？\n\n删除后，已经发出的专属申请链接会立即失效。');"><button class="btn red" type="submit">🗑️ 删除邀请</button></form></div></div>{% else %}<p><a class="btn" href="{{ url_for('people.application_detail', application_id=r.id) }}">查看申请档案</a></p>{% endif %}</div>{% else %}<div class="card">目前没有新义工申请。点击右上方「建立新义工申请」开始。</div>{% endfor %}</div>
 <script>
 async function copyInvite(id,name){
   const u=document.getElementById('url'+id).value;

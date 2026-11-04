@@ -1076,7 +1076,7 @@ def build_signup_notice_whatsapp(date_str):
 另外，请大家多留意义工群信息，以便大家能够团结一致的护持好观音堂。佛子齐心，普度众生。
 
 义工报名请点击以下链接：
-https://gyt-checkin.onrender.com/volunteer
+https://gyt-checkin-sg.onrender.com/volunteer
 
 非常感恩大家！
 大家功德无量！

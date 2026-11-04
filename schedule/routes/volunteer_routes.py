@@ -16,7 +16,7 @@ from schedule.helpers import (
 from lunar_rules import get_special_day_info
 from schedule.constants import TIME_OPTIONS
 from schedule.services.quote_service import get_daily_dharma
-from schedule.services.settings_service import is_schedule_setting_on
+from schedule.services.settings_service import is_schedule_setting_on, current_meal_event_date, is_meal_festival_day
 
 from schedule.builders.schedule_builder import sync_schedule_after_signup_change
 from schedule.builders.time_utils import time_to_minutes, malaysia_today, malaysia_now
@@ -38,15 +38,11 @@ from schedule.volunteer_templates import (
 )
 
 def find_next_meal_signup_date(base_date, days_ahead=7):
-    for i in range(days_ahead + 1):
-        check_date = base_date + timedelta(days=i)
-        info = get_special_day_info(check_date)
-
-        if info.get("template_type") in ["lunar_1_15", "buddhist_festival"]:
-            return check_date, info
-
+    """膳食组仅返回当前开放窗口对应的佛日，禁止跳到未来尚未开放的日期。"""
+    event_date = current_meal_event_date()
+    if event_date and is_schedule_setting_on("meal_signup_open"):
+        return event_date, get_special_day_info(event_date)
     return None, None
-
 
 
 def cleaning_signup_window(target_date):
@@ -102,14 +98,11 @@ def volunteer_home():
 
     base_date = datetime.strptime(default_date, "%Y-%m-%d").date()
 
-    for i in range(0, 8):   # 今天到未来7天
-        check_date = base_date + timedelta(days=i)
-        info = get_special_day_info(check_date)
-
-        if info.get("template_type") in ["lunar_1_15", "buddhist_festival"]:
-            meal_button_show = True
-            meal_date = check_date.strftime("%Y-%m-%d")
-            break
+    active_meal_date = current_meal_event_date(now)
+    if meal_signup_open and active_meal_date:
+        meal_button_show = True
+        meal_date = active_meal_date.strftime("%Y-%m-%d")
+        check_date = active_meal_date
 
     if meal_button_show:
         with get_conn() as conn:
@@ -337,6 +330,13 @@ def volunteer_signup():
 
     elif role == "膳食":
 
+        if not is_schedule_setting_on("meal_signup_open"):
+            return """
+            <h2>❌ 膳食组报名尚未开放 / Meal signup closed</h2>
+            <p>只在指定佛日前一天至佛日当天 2:00pm 开放，负责人亦可临时关闭。</p>
+            <a href="/volunteer">返回义工报名 / Back</a>
+            """
+
         selected_date = datetime.strptime(
             signup_date,
             "%Y-%m-%d"
@@ -350,7 +350,7 @@ def volunteer_signup():
         if not meal_date:
             return """
             <h1>❌ 近期没有开放膳食组报名</h1>
-            <p>系统在接下来 7 天内找不到初一、十五或佛诞大日子。</p>
+            <p>当前不在指定膳食报名时段。</p>
             <p>请检查日期是否选错。</p>
             <a href="/volunteer">返回重新报名</a>
             """
