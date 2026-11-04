@@ -16,7 +16,10 @@ def enqueue_tomorrow_signup_notice(build_notice):
             )
             row = cur.fetchone()
 
-    configured = str(row[0] if row else "19:00").strip()
+    configured = str(
+        (row["value"] if isinstance(row, dict) else row[0])
+        if row else "19:00"
+    ).strip()
     if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', configured):
         configured = '19:00'
     hour, minute = map(int, configured.split(':'))
