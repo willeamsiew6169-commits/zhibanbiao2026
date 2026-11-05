@@ -1318,6 +1318,66 @@ def update_assigned_places(target_date, assigned_rows):
 
         conn.commit()
 
+
+
+def insert_2200_assignments_if_empty(target_date, assigned_rows):
+    """22:00 专用：只允许空白日期插入；绝不删除既有排班。
+
+    返回插入数量。事务内再次检查发布状态和已有记录。
+    """
+    date_str = str(target_date)
+    if not assigned_rows or not isinstance(assigned_rows, (list, tuple)):
+        raise ValueError("22:00 排班为空")
+    for index, row in enumerate(assigned_rows, 1):
+        if not isinstance(row, dict):
+            raise ValueError(f"第 {index} 条排班格式错误")
+        if not (row.get("name") or row.get("姓名")) or not (row.get("role") or row.get("岗位")) or not row.get("assigned_place"):
+            raise ValueError(f"第 {index} 条排班缺少姓名、岗位或地点")
+        if not row.get("start_time") or not row.get("end_time"):
+            raise ValueError(f"第 {index} 条排班缺少开始或结束时间")
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            # 同日期的自动执行程序需要遵守同一 advisory lock。
+            # 锁住日标记，确保本函数自身的检查和写入在一个事务中。
+            cur.execute("""
+                INSERT INTO schedule_day_flags (flag_date)
+                VALUES (%s) ON CONFLICT (flag_date) DO NOTHING
+            """, (date_str,))
+            cur.execute("""
+                SELECT coalesce(is_published, false)
+                FROM schedule_day_flags WHERE flag_date=%s FOR UPDATE
+            """, (date_str,))
+            state = cur.fetchone()
+            if (state['is_published'] if isinstance(state, dict) else state[0]):
+                raise RuntimeError("当天已经发布，禁止22:00自动写入")
+            cur.execute("SELECT count(*) FROM volunteer_schedule_assignments WHERE assignment_date=%s", (date_str,))
+            existing = cur.fetchone()
+            if int(existing['count'] if isinstance(existing, dict) else existing[0]):
+                raise RuntimeError("当天已有人工或其他排班，禁止22:00自动写入")
+
+            for row in assigned_rows:
+                sid = row.get("signup_id") or row.get("id")
+                cur.execute("""
+                    INSERT INTO volunteer_schedule_assignments
+                    (signup_id, volunteer_id, name, assignment_date, role,
+                     shift_label, assigned_place, start_time, end_time,
+                     status, remarks, created_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'assigned',%s,now())
+                """, (sid, row.get("volunteer_id"), row.get("name") or row.get("姓名"),
+                      date_str, row.get("role") or row.get("岗位"),
+                      row.get("shift_label"), row.get("assigned_place"),
+                      row.get("start_time"), row.get("end_time"),
+                      row.get("remarks") or row.get("备注")))
+                if sid:
+                    cur.execute("""
+                        UPDATE volunteer_schedule_signups SET status='assigned'
+                        WHERE id=%s AND signup_date=%s
+                          AND coalesce(status,'pending') <> 'cancelled'
+                    """, (sid, date_str))
+        conn.commit()
+    return len(assigned_rows)
+
 def load_last_assignment():
     if not engine:
         return {}

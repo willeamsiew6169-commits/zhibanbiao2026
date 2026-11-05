@@ -5898,10 +5898,10 @@ def whatsapp_automation_admin():
     flags = (
         ("wa_auto_enabled", "自动发送总开关 / Master switch"),
         ("wa_test_mode", "测试模式 / Test mode"),
-        ("wa_notice_1900", "报名通知 / Signup notice"),
-        ("wa_roster_2200", "正式值班表（尚未开发）/ Full roster (not implemented)"),
+        ("wa_notice_1900", "🕖 19:00 报名通知 / Signup notice"),
+        ("wa_roster_2200", "🕙 22:00 正式值班表 / Full roster"),
         ("wa_late_signup", "发布后新报名通知（尚未开发）/ Late signup (not implemented)"),
-        ("wa_auto_publish_2200", "自动排班发布（尚未开发）/ Auto publish (not implemented)"),
+        ("wa_auto_publish_2200", "🕙 22:00 自动排班发布 / Auto publish"),
     )
     message = ""
     if request.method == "POST":
@@ -5912,13 +5912,26 @@ def whatsapp_automation_admin():
             if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", new_time):
                 message = "❌ 时间格式错误，请使用 HH:MM / Invalid time"
             else:
-                for key, _ in flags:
-                    # 22:00 及后续功能尚未开发：保留原有开关值，不意外启用。
-                    if key in ("wa_roster_2200", "wa_late_signup", "wa_auto_publish_2200"):
-                        continue
-                    save_schedule_setting(key, "true" if request.form.get(key) == "on" else "false")
-                save_schedule_setting("wa_notice_time", new_time)
-                message = "✅ 设置已保存 / Settings saved"
+                # 测试阶段：只有测试模式开启时才允许启用 22:00 功能。
+                test_mode_requested = request.form.get("wa_test_mode") == "on"
+                restricted_keys = ("wa_roster_2200", "wa_auto_publish_2200")
+                rejected = (not test_mode_requested and any(
+                    request.form.get(key) == "on" for key in restricted_keys
+                ))
+                if rejected:
+                    message = "❌ 请先开启测试模式，才能启用 22:00 功能 / Enable test mode first"
+                else:
+                    for key, _ in flags:
+                        if key == "wa_late_signup":
+                            # 后续阶段才开放；始终保持关闭。
+                            save_schedule_setting(key, "false")
+                            continue
+                        enabled = request.form.get(key) == "on"
+                        if key in restricted_keys and not test_mode_requested:
+                            enabled = False
+                        save_schedule_setting(key, "true" if enabled else "false")
+                    save_schedule_setting("wa_notice_time", new_time)
+                    message = "✅ 设置已保存 / Settings saved"
         elif action in ("test", "test_signup"):
             if not is_schedule_setting_on("wa_test_mode"):
                 message = "请先开启并保存测试模式 / Enable and save test mode first"
@@ -5968,9 +5981,14 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:8px;borde
 TEST GROUP ONLY. Test messages may be sent when the Windows Agent is running.</p>
 {% if message %}<p class="success">{{ message }}</p>{% endif %}
 <div class="card"><form method="post"><input type="hidden" name="action" value="save">
-{% for key,label in flags %}{% if key not in ('wa_roster_2200','wa_late_signup','wa_auto_publish_2200') %}
+{% for key,label in flags %}
+{% if key == 'wa_late_signup' %}
+<label><span style="color:#888">{{ label }}</span><input type="checkbox" disabled></label>
+{% else %}
 <label><span>{{ label }}</span><input type="checkbox" name="{{ key }}" {% if current[key] %}checked{% endif %}></label>
-{% else %}<label><span style="color:#888">{{ label }}</span><input type="checkbox" disabled {% if current[key] %}checked{% endif %}></label>{% endif %}{% endfor %}
+{% endif %}
+{% endfor %}
+<p class="warning">⚠️ 22:00 开关仅限测试模式；开启自动发布可能修改共用数据库中的真实排班。请先保持两个 22:00 开关关闭。<br>22:00 switches require test mode. Auto publish may modify live shared schedule data.</p>
 <label><span>🕖 报名通知时间（马来西亚）<br>Signup notice time (MYT)</span><input type="time" name="wa_notice_time" value="{{ notice_time }}" required></label>
 <p class="warning">定时任务需要每分钟运行一次检查脚本；设置时间不会自动修改 Windows Task Scheduler。<br>Run the Windows tick every minute; changing this time does not reconfigure Task Scheduler.</p>
 <button type="submit">💾 保存设置 / Save settings</button></form></div>
@@ -5978,8 +5996,8 @@ TEST GROUP ONLY. Test messages may be sent when the Windows Agent is running.</p
 <p>下列按钮会建立真实的测试群组待发送任务。请确认测试群组及 Agent 配置正确。</p>
 <form method="post" style="display:inline"><input type="hidden" name="action" value="test"><button type="submit">📤 普通测试 / Basic test</button></form>
 <form method="post" style="display:inline"><input type="hidden" name="action" value="test_signup"><button type="submit">📣 测试明日报名通知 / Test signup notice</button></form>
-<p class="warning">22:00 正式值班表测试将在第二阶段开发；本阶段不会自动排班或发布。</p>
+<p class="warning">22:00 接口已接入；请先验证数据库隔离及完整排班流程，再开启自动发布。</p>
 {% if queue_error %}<p class="warning">{{ queue_error }}</p>{% endif %}</div>
-<div class="card"><h2>📜 最近记录 / Recent jobs</h2><div style="overflow-x:auto"><table><tr><th>ID</th><th>类别 / Type</th><th>状态 / Status</th><th>创建 / Created</th></tr>
-{% for j in jobs %}<tr><td>{{j.id}}</td><td>{{j.message_type}}</td><td>{{j.status}}</td><td>{{j.created_at}}</td></tr>{% else %}<tr><td colspan="4">暂无记录 / No records</td></tr>{% endfor %}</table></div></div>
+<div class="card"><details><summary style="cursor:pointer;font-size:21px;font-weight:700;padding:8px 0;user-select:none">📜 最近记录 / Recent jobs（点击展开 / Click to expand）</summary><div style="overflow:auto;max-height:380px;margin-top:12px"><table><tr><th>ID</th><th>类别 / Type</th><th>状态 / Status</th><th>创建 / Created</th></tr>
+{% for j in jobs %}<tr><td>{{j.id}}</td><td>{{j.message_type}}</td><td>{{j.status}}</td><td>{{j.created_at}}</td></tr>{% else %}<tr><td colspan="4">暂无记录 / No records</td></tr>{% endfor %}</table></div></details></div>
 <a class="btn secondary" href="{{url_for('schedule.schedule_admin')}}">← 返回负责人首页 / Back</a></main></body></html>''',flags=flags,current=current,notice_time=notice_time,jobs=jobs,message=message,queue_error=queue_error)
