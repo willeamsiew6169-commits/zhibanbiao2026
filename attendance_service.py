@@ -16,7 +16,7 @@ from utils import (
 
 ENABLE_SIGNIN_TIME_LIMIT = False      # 是否限制签到时间
 SIGNIN_EARLY_MINUTES = 30             # 可提前几分钟签到
-ENABLE_AUTO_SIGNOUT = False           # 自动签退
+ENABLE_AUTO_SIGNOUT = True           # 自动签退
 AUTO_SIGNOUT_TIME = "19:00"           # 系统几点执行自动签退
 AUTO_SIGNOUT_DISPLAY = "18:30"        # 报表显示的签退时间
 REQUIRE_ASSIGNMENT_FOR_SIGNIN = False   # 值班：正式排班限制（试用期关闭）
@@ -346,6 +346,15 @@ def sign_out(volunteer_id: str, pin: str, assignment_id=None) -> tuple[bool, str
             except Exception:
                 hours = None
 
+            # 有正式排班时，服务时数不能超过最后一段排班结束时间。
+            scheduled_end, _ = _scheduled_end_minutes(cur, row)
+            if scheduled_end is not None:
+                actual_end = time_to_minutes(end_time)
+                actual_start = time_to_minutes(row.get("start_time"))
+                if actual_end is not None and actual_start is not None:
+                    credited_end = min(actual_end, scheduled_end)
+                    hours = round(max(0, credited_end - actual_start) / 60, 2)
+
             # 签退更新两张表必须同一事务提交。
             remark = str(row.get("remark") or "")
             group_marker = "assignment_ids="
@@ -606,39 +615,76 @@ def get_today_assignments(volunteer_id, role=None, current_time=False):
     return valid_rows
 
 
+def _assignment_ids_from_remark(remark):
+    """Extract the original scheduled segments from an attendance row."""
+    remark = str(remark or "")
+    for marker in ("assignment_ids=", "assignment_id="):
+        if marker in remark:
+            raw = remark.split(marker, 1)[1].split("｜", 1)[0].strip()
+            try:
+                return [int(x.strip()) for x in raw.split(",") if x.strip()]
+            except ValueError:
+                return []
+    return []
+
+
+def _scheduled_end_minutes(cur, row):
+    """Only scheduled attendance can be capped/auto-closed."""
+    ids = _assignment_ids_from_remark(row.get("remark"))
+    if not ids:
+        return None, []
+    cur.execute("""
+        select id, end_time from volunteer_schedule_assignments
+        where id = any(%s) and assignment_date::text = %s
+    """, (ids, str(row["date"])))
+    assignments = cur.fetchall() or []
+    if len(assignments) != len(set(ids)):
+        return None, []
+    ends = [time_to_minutes(a["end_time"]) for a in assignments]
+    if any(x is None for x in ends):
+        return None, []
+    return max(ends), ids
+
+
 def auto_signout_unfinished_today():
+    """Close scheduled shifts 30 min after their end; no fake actual checkout time.
+
+    Called on normal web requests (no background scheduler required).  The
+    attendance end_time is the *credited cutoff*, clearly marked as automatic;
+    log check_out_time is the actual time the system processed the closure.
+    """
     if not ENABLE_AUTO_SIGNOUT:
-        return {
-            "ok": False,
-            "msg": "自动签退功能未开启",
-            "count": 0
-        }
+        return {"ok": False, "msg": "自动签退功能未开启", "count": 0}
 
-    today = now_date_str()
-
-    rows = db_query("""
-        select *
-        from attendance
-        where date = %s
-          and (end_time is null or end_time = '')
-    """, (today,), fetchall=True)
-
+    now = malaysia_now()
+    today = now.date().isoformat()  # attendance.date 是 text，不能传 Python date
+    now_minutes = now.hour * 60 + now.minute
     count = 0
-
-    for r in rows:
-        db_query("""
-            update attendance
-            set end_time = %s,
-                remarks = coalesce(remarks, '') || '｜系统自动签退'
-            where id = %s
-        """, (
-            AUTO_SIGNOUT_TIME,
-            r["id"]
-        ))
-        count += 1
-
-    return {
-        "ok": True,
-        "msg": f"自动签退完成：{count} 位",
-        "count": count
-    }
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                select * from attendance
+                where date=%s and (end_time is null or end_time='')
+                for update skip locked
+            """, (today,))
+            for row in cur.fetchall() or []:
+                cutoff, ids = _scheduled_end_minutes(cur, row)
+                if cutoff is None or now_minutes < cutoff + 30:
+                    continue
+                credited_end = f"{cutoff // 60:02d}:{cutoff % 60:02d}"
+                start_min = time_to_minutes(row.get("start_time"))
+                hours = round(max(0, cutoff - start_min) / 60, 2) if start_min is not None else None
+                remark = str(row.get("remark") or "") + "｜系统自动签退（忘记签退；服务计至排班结束）"
+                cur.execute("""
+                    update attendance set end_time=%s, hours=%s, remark=%s
+                    where id=%s
+                """, (credited_end, hours, remark, row["id"]))
+                cur.execute("""
+                    update volunteer_attendance_logs
+                    set check_out_time=now(),
+                        remarks=concat_ws('｜', nullif(remarks, ''), '系统自动签退；服务计至排班结束')
+                    where assignment_id=any(%s) and volunteer_id=%s
+                      and attendance_date=%s and check_out_time is null
+                """, (ids, row["volunteer_id"], today))
+                count += 1
+    return {"ok": True, "msg": f"自动签退完成：{count} 位", "count": count}

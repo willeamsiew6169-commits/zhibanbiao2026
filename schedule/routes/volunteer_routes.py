@@ -37,6 +37,102 @@ from schedule.volunteer_templates import (
     VOLUNTEER_PREBOOK_HTML,
 )
 
+def find_duty_time_conflict(cur, volunteer_id, signup_date, start_time, end_time, exclude_id=None):
+    """Same-day duty signup intervals are half-open: [start, end)."""
+    new_start = time_to_minutes(start_time)
+    new_end = time_to_minutes(end_time)
+    if new_start is None or new_end is None or new_end <= new_start:
+        return {"invalid": True}
+    cur.execute("""
+        SELECT id, start_time, end_time
+        FROM volunteer_schedule_signups
+        WHERE volunteer_id = %s AND signup_date = %s AND role = '值班'
+          AND coalesce(status, 'pending') <> 'cancelled'
+          AND (%s IS NULL OR id <> %s)
+    """, (volunteer_id, signup_date, exclude_id, exclude_id))
+    for row in cur.fetchall():
+        old_start = time_to_minutes(row['start_time'])
+        old_end = time_to_minutes(row['end_time'])
+        if old_start is None or old_end is None:
+            continue
+        if new_start < old_end and old_start < new_end:
+            return row
+    return None
+
+
+def duty_conflict_message(row, back='/volunteer'):
+    # Bilingual mobile-friendly conflict page; signup rules unchanged.
+    from html import escape
+
+    invalid = bool(row.get('invalid'))
+    start = escape(str(row.get('start_time') or ''))
+    end = escape(str(row.get('end_time') or ''))
+    safe_back = escape(str(back), quote=True)
+    title = ('时间格式错误 / Invalid time' if invalid
+             else '值班时间重叠 / Overlapping Duty Hours')
+    detail = ('''<p class="desc">请选择正确的开始和结束时间。<br>
+                 <span>Please select a valid start and end time.</span></p>'''
+              if invalid else f'''<p class="desc">您已有以下报名时段：<br>
+                 <span>You have already signed up for:</span></p>
+                 <div class="time-pill">{start} ～ {end}</div>''')
+    return f'''<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+* {{ box-sizing: border-box; }}
+body {{ margin:0; min-height:100vh; padding:28px 16px; display:grid;
+       place-items:center; font-family:"Microsoft YaHei","Noto Sans SC",Arial,sans-serif;
+       color:#34292a; background:radial-gradient(circle at 10% 10%,#fff2d9,transparent 40%),
+       linear-gradient(160deg,#fffaf1,#f7f0e6); }}
+.card {{ width:min(100%,760px); background:#fff; border-radius:24px;
+         overflow:hidden; box-shadow:0 14px 42px #654b3a20; border:1px solid #f1e4db; }}
+.header {{ padding:26px 26px; text-align:center; background:#fff0f0;
+           border-top:5px solid #d9333f; }}
+.icon {{ display:inline-grid; place-items:center; width:54px; height:54px;
+         background:#d9333f; color:#fff; border-radius:50%; font-size:34px;
+         font-weight:bold; margin-bottom:12px; }}
+h1 {{ margin:0; font-size:clamp(23px,4vw,31px); color:#a71e29; line-height:1.4; }}
+.content {{ padding:28px; text-align:center; }}
+.existing {{ padding:22px 18px; border:1px solid #f4c2c6;
+             background:#fff2f3; border-radius:16px; }}
+.desc {{ margin:0 0 16px; font-size:21px; font-weight:700; line-height:1.6; }}
+.desc span {{ font-size:16px; font-weight:400; color:#68575b; }}
+.time-pill {{ display:inline-block; max-width:100%; padding:10px 24px;
+              border:1px solid #ec8d96; border-radius:50px; background:#fff;
+              font-size:clamp(22px,5vw,30px); font-weight:800; color:#b51c2c; }}
+.notice {{ margin:20px 0 26px; padding:18px; border-radius:14px;
+           background:#fff5d8; border:1px solid #f6db8b; line-height:1.7;
+           font-size:19px; font-weight:600; }}
+.notice small {{ display:block; font-size:15px; font-weight:400; color:#68572f; }}
+.back {{ display:inline-block; min-width:220px; padding:14px 25px;
+         border-radius:40px; background:linear-gradient(135deg,#9147bd,#632a9b);
+         color:white; text-decoration:none; font-size:20px; font-weight:700;
+         box-shadow:0 5px 12px #63358a30; }}
+.back:hover {{ filter:brightness(1.08); }}
+.back:focus-visible {{ outline:3px solid #4c217b; outline-offset:4px; }}
+@media(max-width:480px) {{ .content {{padding:18px;}} .header {{padding:22px 14px;}}
+ .desc {{font-size:18px;}} .notice {{font-size:17px;}} .back {{width:100%;}} }}
+</style>
+</head>
+<body>
+<main class="card">
+  <header class="header"><div class="icon" aria-hidden="true">×</div>
+    <h1>{title}</h1></header>
+  <section class="content">
+    <div class="existing">{detail}</div>
+    <div class="notice">⚠️ 同一天可报名多个不重叠时段，请更换时间。
+      <small>Multiple non-overlapping shifts are allowed on the same day.<br>
+      Please choose another time slot.</small></div>
+    <a class="back" href="{safe_back}">← 返回 / Back</a>
+  </section>
+</main>
+</body>
+</html>'''
+
+
 def find_next_meal_signup_date(base_date, days_ahead=7):
     """膳食组仅返回当前开放窗口对应的佛日，禁止跳到未来尚未开放的日期。"""
     event_date = current_meal_event_date()
@@ -422,6 +518,13 @@ def volunteer_signup():
             if role != "素食结缘":
                 food_offering_task = None
                 food_offering_item = None
+
+            if role == "值班":
+                conflict = find_duty_time_conflict(cur, vol_id, signup_date, start_time, end_time)
+                if conflict:
+                    # Exact same time is an idempotent repeat; other overlaps are blocked.
+                    if str(conflict.get('start_time')) != start_time or str(conflict.get('end_time')) != end_time:
+                        return duty_conflict_message(conflict)
 
             # ============================================================
             # 检查重复报名
@@ -1947,6 +2050,12 @@ def volunteer_edit_signup_post(signup_id):
                 if not cleaning_open:
                     return cleaning_signup_closed_message(cutoff_hour)
 
+            if new_role == "值班":
+                conflict = find_duty_time_conflict(cur, old['volunteer_id'], new_date,
+                                                   new_start, new_end, exclude_id=signup_id)
+                if conflict:
+                    return duty_conflict_message(conflict)
+
             cur.execute("""
                 update volunteer_schedule_signups
                 set status = 'cancelled'
@@ -2670,15 +2779,23 @@ def volunteer_prebook():
                         skipped += 1
                         continue
 
+                if role == "值班":
+                    conflict = find_duty_time_conflict(cur, vol_id, signup_date, start_time, end_time)
+                    if conflict and (str(conflict.get('start_time')) != start_time or
+                                     str(conflict.get('end_time')) != end_time):
+                        skipped += 1
+                        continue
+
                 cur.execute("""
                     select id
                     from volunteer_schedule_signups
                     where volunteer_id = %s
                     and signup_date = %s
                     and role = %s
+                    and (%s <> '值班' OR (start_time = %s AND end_time = %s))
                     and coalesce(status, 'pending') <> 'cancelled'
                     limit 1
-                """, (vol_id, signup_date, role))
+                """, (vol_id, signup_date, role, role, start_time, end_time))
 
                 existing = cur.fetchone()
 

@@ -1661,45 +1661,34 @@ def get_fixed_people(date_obj, buddhist_df, cleaning_df):
     return result
 
 def load_buddha_override(date_obj):
-    file = os.path.join(
-        BASE_DIR,
-        "buddha_override.xlsx",
-    )
+    """读取指定日期的 Supabase 佛台覆盖名单。
 
-    if not os.path.exists(file):
+    None = 没有特别调整，沿用固定轮值。
+    []   = 已保存全部请假，不得恢复固定轮值。
+    [..] = 当天完整最终名单（不是按位置替换的差异列表）。
+
+    数据库故障时直接抛错，避免错误名单被发布或发往 WhatsApp。
+    """
+    date_str = date_obj.strftime("%Y-%m-%d") if hasattr(date_obj, "strftime") else str(date_obj)
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT names
+                FROM public.schedule_buddha_overrides
+                WHERE duty_date = %s
+            """, (date_str,))
+            row = cur.fetchone()
+
+    if row is None:
         return None
 
-    df = _cached_excel(file)
-
-    if df is None or "日期" not in df.columns:
-        return None
-
-    df["日期"] = pd.to_datetime(
-        df["日期"],
-        errors="coerce",
-    )
-
-    row = df[
-        df["日期"] == pd.to_datetime(date_obj)
-    ]
-
-    if row.empty:
-        return None
-
-    names = []
-
-    for column in ["姓名1", "姓名2", "姓名3"]:
-        if column not in row.columns:
-            continue
-
-        value = str(
-            row.iloc[0][column]
-        ).strip()
-
-        if value and value != "nan":
-            names.append(value)
-
-    return names or None
+    names = row["names"]
+    if not isinstance(names, list):
+        raise ValueError(f"{date_str} 佛台覆盖名单格式错误，停止排班")
+    return list(dict.fromkeys(
+        name.strip() for name in names
+        if isinstance(name, str) and name.strip()
+    ))
 
 
 def normalize_job_name(job):
@@ -2865,27 +2854,10 @@ def calculate_schedule_for_date(date_str, patch_mode=False,):
     fixed_people = get_fixed_people(date_obj, buddhist_df, cleaning_df)
     override_names = load_buddha_override(date_obj)
 
-    print("DEBUG fixed_people =", fixed_people)
-
-    if override_names:
-        original = fixed_people.get("整理佛台", [])
-
-        final = []
-        used = set()
-
-        for i in range(3):
-            if i < len(override_names) and override_names[i]:
-                name = override_names[i]
-                if name not in used:
-                    final.append(name)
-                    used.add(name)
-            elif i < len(original):
-                name = original[i]
-                if name not in used:
-                    final.append(name)
-                    used.add(name)
-
-        fixed_people["整理佛台"] = final
+    # 云端保存的是当天的完整最终名单，绝不可用原固定名单补回空位。
+    # 特别是 [] 代表全部请假，不是没有设置。
+    if override_names is not None:
+        fixed_people["整理佛台"] = override_names
 
     special_info = get_special_day_info(date_obj)
     remove_info = get_next_day_remove_info(date_obj)

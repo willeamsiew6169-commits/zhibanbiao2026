@@ -334,7 +334,7 @@ def load_buddha_name_options():
         print("load_buddha_name_options error:", e)
         return []
 
-def get_fixed_buddha_for_date(date_str):
+def get_base_fixed_buddha_for_date(date_str):
     file = os.path.join(BASE_DIR, "data", "fixed_schedule.xlsx")
 
     if not os.path.exists(file):
@@ -374,6 +374,29 @@ def get_fixed_buddha_for_date(date_str):
     except Exception as e:
         print("get_fixed_buddha_for_date error:", e)
         return []
+
+def get_fixed_buddha_for_date(date_str):
+    """当天有效佛台名单：云端覆盖优先；无覆盖时读取固定轮值。"""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT names FROM schedule_buddha_overrides
+                WHERE duty_date = %s
+            """, (date_str,))
+            row = cur.fetchone()
+    if row is not None:
+        # [] 表示当天全部请假，不能回退到固定名单。
+        return list(row['names'] or [])
+    return get_base_fixed_buddha_for_date(date_str)
+
+
+def delete_buddha_override(date_str):
+    """恢复指定日期的固定轮值。"""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM schedule_buddha_overrides WHERE duty_date=%s', (date_str,))
+        conn.commit()
+
 
 def get_default_time_by_role(role, start_time, end_time):
 
@@ -438,27 +461,18 @@ def get_signup_summary_for_date(date_str):
     
 
 def save_buddha_override(date_str, final_names):
-    file = os.path.join(BASE_DIR, "buddha_override.xlsx")
+    """按日期保存云端佛台覆盖名单，空名单也必须保存。"""
+    names = list(dict.fromkeys(str(n).strip() for n in final_names if str(n).strip()))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO schedule_buddha_overrides (duty_date, names, updated_at)
+                VALUES (%s, %s::jsonb, NOW())
+                ON CONFLICT (duty_date) DO UPDATE
+                SET names=EXCLUDED.names, updated_at=NOW()
+            """, (date_str, __import__('json').dumps(names, ensure_ascii=False)))
+        conn.commit()
 
-    names = [str(n).strip() for n in final_names if str(n).strip()]
-
-    new_row = {
-        "日期": date_str,
-        "姓名1": names[0] if len(names) > 0 else "",
-        "姓名2": names[1] if len(names) > 1 else "",
-        "姓名3": names[2] if len(names) > 2 else "",
-    }
-
-    if os.path.exists(file):
-        df = pd.read_excel(file)
-        df.columns = df.columns.astype(str).str.strip()
-        df = df[df["日期"].astype(str) != date_str]
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    else:
-        df = pd.DataFrame([new_row])
-
-    with pd.ExcelWriter(file, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
 
 def delete_prebook_record(record):
     if not os.path.exists(PREBOOK_FILE):
@@ -2374,9 +2388,28 @@ def schedule_override():
         elif original:
             final_names.append(original)
 
-    save_buddha_override(date, final_names)
+    try:
+        date_obj = datetime.strptime(date, "%Y-%m-%d").date()
+        if not original_names or len(original_names) != len(replacement_names):
+            raise ValueError("没有有效的佛台人员资料")
+        save_buddha_override(date_obj.isoformat(), final_names)
+    except Exception as exc:
+        flash(f"保存佛台请假失败：{exc}")
 
     return redirect(url_for("schedule.schedule_admin", mode="day", override_date=date))
+
+
+@schedule_bp.route("/schedule/override/reset", methods=["POST"])
+def schedule_override_reset():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+    date_str = request.form.get("date", "").strip()
+    try:
+        date.fromisoformat(date_str)
+        delete_buddha_override(date_str)
+    except Exception as exc:
+        flash(f"恢复固定佛台失败：{exc}")
+    return redirect(url_for("schedule.schedule_admin", mode="day", override_date=date_str))
 
 
 @schedule_bp.route("/schedule/signup_edit/<int:signup_id>", methods=["GET"])
@@ -5420,6 +5453,10 @@ html {
                 {% else %}
                     <p style="font-size:22px;">这一天没有固定佛台。</p>
                 {% endif %}
+            </form>
+            <form method="post" action="/schedule/override/reset" style="margin-top:14px;">
+                <input type="hidden" name="date" value="{{ override_date }}">
+                <button type="submit" class="btn-tool btn-red">↩ 恢复当天固定佛台名单</button>
             </form>
         </div>
     </div>

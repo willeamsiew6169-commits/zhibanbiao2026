@@ -68,6 +68,7 @@ from attendance_service import (
     ENABLE_AUTO_SIGNOUT,
     AUTO_SIGNOUT_TIME,
     AUTO_SIGNOUT_DISPLAY,
+    auto_signout_unfinished_today,
 )
 
 from utils import (
@@ -982,7 +983,7 @@ async function lookupVolunteer() {
     if (data.today_assignments && data.today_assignments.length > 0) {
       html += `<br><hr><b>📅 今天正式安排</b>`;
       data.today_assignments.forEach(a => {
-        const mark = a.state === "completed" ? "✅ 已完成" :
+        const mark = a.state === "completed" ? (a.auto_signed_out ? "⚠️ 已自动签退" : "✅ 已完成") :
                      a.state === "active" ? "🟢 进行中" : "🕒 待值班";
         html += `
           <div style="margin-top:10px;">
@@ -1588,6 +1589,7 @@ PIN_PAGE = """
 # =========================
 @app.route("/")
 def index():
+    auto_signout_unfinished_today()
     stats = get_today_stats()
 
     from zoneinfo import ZoneInfo
@@ -1649,6 +1651,7 @@ def _attendance_speed_report(response):
 
 @app.route("/signin", methods=["POST"])
 def do_sign_in():
+    auto_signout_unfinished_today()
 
     volunteer_id = request.form.get("volunteer_id", "").strip()
     role = request.form.get("role", "").strip()
@@ -1672,6 +1675,7 @@ def do_sign_in():
 
 @app.route("/signout", methods=["POST"])
 def do_sign_out():
+    auto_signout_unfinished_today()
     pin = request.form.get("pin", "").strip()
 
     # 旧方式：从今日进行中表格签退
@@ -1886,6 +1890,7 @@ def get_member_payment(member_id):
 @app.route("/api/volunteer/<volunteer_id>", methods=["POST"])
 def api_volunteer(volunteer_id):
     try:
+        auto_signout_unfinished_today()
         v = find_volunteer(volunteer_id)
         if not v:
             return jsonify({
@@ -1917,7 +1922,7 @@ def api_volunteer(volunteer_id):
                 """, (v.get("编号"), today))
                 open_log = cur.fetchone()
                 cur.execute("""
-                    select assignment_id from volunteer_attendance_logs
+                    select assignment_id, remarks from volunteer_attendance_logs
                     where volunteer_id = %s and attendance_date = %s
                       and check_out_time is not null and assignment_id is not null
                 """, (v.get("编号"), today))
@@ -1938,6 +1943,8 @@ def api_volunteer(volunteer_id):
                     paid_row = cur.fetchone()
                     paid_until = paid_row.get("paid_until") if paid_row else None
         completed_ids = {int(x["assignment_id"]) for x in completed_rows if x.get("assignment_id") is not None}
+        auto_ids = {int(x["assignment_id"]) for x in completed_rows
+                    if x.get("assignment_id") is not None and "系统自动签退" in str(x.get("remarks") or "")}
         open_assignment_id = int(open_log["assignment_id"]) if open_log and open_log.get("assignment_id") is not None else None
 
         attendance_action = "walkin"
@@ -1950,6 +1957,7 @@ def api_volunteer(volunteer_id):
                 a["state"] = "active"
             elif aid in completed_ids:
                 a["state"] = "completed"
+                a["auto_signed_out"] = aid in auto_ids
             else:
                 a["state"] = "pending"
 

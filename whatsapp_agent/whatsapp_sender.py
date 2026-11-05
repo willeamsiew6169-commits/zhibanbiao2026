@@ -165,7 +165,7 @@ def send_test(page, message):
                  [x['id'] for x in before['matched']][-3:])
     editor.fill(message)
     if AUTO:
-        LOG.info('发送前正文样本=%s', before['samples'][-3:])
+        LOG.info('发送前历史聊天样本（非本次发送内容）=%s', before['samples'][-3:])
     if not AUTO:
         print('\n消息已填入测试群，请核对群名和内容。')
         answer = input('确认发送？输入 SEND 后回车；其他输入取消：').strip()
@@ -243,7 +243,19 @@ def main():
                 page.goto('https://web.whatsapp.com/', wait_until='domcontentloaded')
             elif not any(p.url.startswith('https://web.whatsapp.com/') for p in context.pages):
                 context.pages[0].goto('https://web.whatsapp.com/', wait_until='domcontentloaded')
-            input('确认 WhatsApp Web 已登录，回到 Terminal 按 Enter 开始：')
+            # 登录后自动等待 WhatsApp Web 就绪，不再需要人工按 Enter。
+            # 只在聊天列表出现后才领取任务；人工 SEND + CONFIRM 仍保留。
+            LOG.info('等待 WhatsApp Web 登录及聊天列表就绪（最多 5 分钟）...')
+            login_deadline = time.monotonic() + 300
+            while True:
+                try:
+                    ready_page(context)
+                    LOG.info('WhatsApp Web 已就绪，开始检查测试消息队列')
+                    break
+                except (PlaywrightError, RuntimeError) as exc:
+                    if time.monotonic() >= login_deadline:
+                        raise RuntimeError('等待 WhatsApp Web 就绪超时；请检查登录状态') from exc
+                    time.sleep(3)
             while True:
                 try:
                     page = ready_page(context)
