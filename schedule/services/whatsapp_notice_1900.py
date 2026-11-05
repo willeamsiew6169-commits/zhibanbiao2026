@@ -2,7 +2,7 @@
 import re
 from datetime import timedelta
 from schedule.builders.time_utils import malaysia_now
-from schedule.services.settings_service import is_schedule_setting_on, get_schedule_setting
+from schedule.services.settings_service import is_schedule_setting_on
 from db import get_conn
 
 
@@ -23,8 +23,11 @@ def enqueue_tomorrow_signup_notice(build_notice):
     if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', configured):
         configured = '19:00'
     hour, minute = map(int, configured.split(':'))
-    # One-minute tick: only queue during the configured minute.
-    if (now.hour, now.minute) != (hour, minute):
+    # Five-minute grace period: [configured time, configured time + 5 min).
+    # Never queue before the configured time or after the grace period.
+    window_start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    window_end = window_start + timedelta(minutes=5)
+    if not (window_start <= now < window_end):
         return {'status': 'outside_window', 'scheduled_time': configured,
                 'malaysia_time': now.isoformat()}
     required = ('wa_auto_enabled', 'wa_test_mode', 'wa_notice_1900')

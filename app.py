@@ -777,7 +777,7 @@ PAGE = """
                 class="btn-tool btn-success"
                 type="submit"
                 style="display:none;">
-            {{ t.check_in }}
+            {{ "确认签到" if t.html_lang.startswith("zh") else "Confirm Check-in" }}
         </button>
 
         <button id="signOutBtn"
@@ -785,7 +785,7 @@ PAGE = """
                 type="button"
                 style="display:none;"
                 onclick="submitQuickSignOut();">
-            {{ t.sign_out }}
+            {{ "确认签退" if t.html_lang.startswith("zh") else "Confirm Check-out" }}
         </button>
       </div>
 
@@ -905,7 +905,27 @@ const TXT = {
   pin_wrong: {{ t.pin_wrong|tojson }}
 };
 
+let verifiedLookupKey = null;
+let lookupRequestSerial = 0;
+function currentLookupKey() {
+  return JSON.stringify([
+    document.getElementById('branch').value,
+    document.getElementById('volunteer_id').value.trim(),
+    document.getElementById('pin').value.trim()
+  ]);
+}
+function invalidateLookup() {
+  verifiedLookupKey = null;
+  window.lastAttendanceLookup = null;
+  document.getElementById('signInBtn').style.display = 'none';
+  document.getElementById('signOutBtn').style.display = 'none';
+  document.getElementById('assignment_id').value = '';
+  document.getElementById('personBox').style.display = 'none';
+}
 async function lookupVolunteer() {
+  invalidateLookup();
+  const requestSerial = ++lookupRequestSerial;
+  const lookupKey = currentLookupKey();
   const id = document.getElementById('volunteer_id').value.trim();
   const branch = document.getElementById('branch').value;
   let finalId;
@@ -937,6 +957,7 @@ async function lookupVolunteer() {
   });
 
   const data = await res.json();
+  if (currentLookupKey() !== lookupKey || requestSerial !== lookupRequestSerial) return;
   box.style.display = 'block';
 
   if (data.ok) {
@@ -983,6 +1004,8 @@ async function lookupVolunteer() {
     assignmentInput.value = '';
 
     window.lastAttendanceLookup = data;
+    // 空 PIN 仅查看排班；填写 PIN 时必须验证正确才能操作。
+    verifiedLookupKey = (pin && data.volunteer.pin_ok) ? lookupKey : null;
     updateSigninOnlyVisibility(data.attendance_action === 'signout');
     if (data.attendance_action === 'signout') {
       signOutBtn.style.display = '';
@@ -1001,6 +1024,18 @@ async function lookupVolunteer() {
 
     box.innerHTML = html;
     refreshRoleAction();
+    if (!pin) {
+      signInBtn.style.display = 'none';
+      signOutBtn.style.display = 'none';
+      html += `<br><span style="color:#666;">如需签到或签退，请输入 PIN 后再次查询。 / Enter PIN and search again to check in or out.</span>`;
+      box.innerHTML = html;
+    }
+    if (pin && !data.volunteer.pin_ok) {
+      signInBtn.style.display = 'none';
+      signOutBtn.style.display = 'none';
+      html += `<br><b style="color:#842029;">${TXT.pin_wrong}</b>`;
+      box.innerHTML = html;
+    }
     btn.disabled = false;
 
   } else {
@@ -1040,10 +1075,12 @@ function toggleBranch() {
 
   if (branch.value === "CHE") {
     branch.value = "STW";
+    invalidateLookup();
     btn.innerText = "STW";
     btn.className = "btn-tool btn-danger branch-btn";
   } else {
     branch.value = "CHE";
+    invalidateLookup();
     btn.innerText = "CHE";
     btn.className = "btn-tool btn-success branch-btn";
   }
@@ -1060,6 +1097,8 @@ function refreshRoleAction() {
   const data = window.lastAttendanceLookup;
   if (!data || !data.ok) return;
   const role = document.getElementById('role').value;
+  const pinEntered = !!document.getElementById('pin').value.trim();
+  const pinValid = !pinEntered || (verifiedLookupKey === currentLookupKey() && data.volunteer.pin_ok);
   const signin = document.getElementById('signInBtn');
   const signout = document.getElementById('signOutBtn');
   const assignmentInput = document.getElementById('assignment_id');
@@ -1067,6 +1106,7 @@ function refreshRoleAction() {
   signout.style.display = 'none';
   assignmentInput.value = '';
   // 当前有未签退记录：只能先签退，不能换岗位再次签到。
+  if (!pinValid || !pinEntered) return;
   if (data.attendance_action === 'signout') {
     signout.style.display = '';
     assignmentInput.value = data.current_assignment_id || '';
@@ -1103,6 +1143,10 @@ function toggleAdminBox() {
 }
 
 function quickSignIn() {
+  if (verifiedLookupKey !== currentLookupKey()) {
+    alert('请先输入正确 PIN 并点击查询 / Enter a valid PIN and search first');
+    return false;
+  }
   const pin = document.getElementById('pin').value.trim();
 
   if (!pin) {
@@ -1124,6 +1168,11 @@ function quickSignIn() {
 let pendingSignOutId = "";
 
 function submitQuickSignOut() {
+  if (verifiedLookupKey !== currentLookupKey()) {
+    alert('请先输入正确 PIN 并点击查询 / Enter a valid PIN and search first');
+    return;
+  }
+  const pin = document.getElementById('pin').value.trim();
   const volunteerId = document.getElementById("volunteer_id").value.trim();
 
   if (!volunteerId) {
@@ -1143,12 +1192,12 @@ function submitQuickSignOut() {
     pendingSignOutId = "STW-" + volunteerId;
   }
 
-  document.getElementById("dialog_pin").value = "";
-  document.getElementById("signOutDialog").style.display = "flex";
-
-  setTimeout(function() {
-    document.getElementById("dialog_pin").focus();
-  }, 100);
+  // 查询时已验证 PIN；直接提交，后台 sign_out() 仍会再次验证。
+  document.getElementById('signout_volunteer_id').value = pendingSignOutId;
+  document.getElementById('signout_pin').value = pin;
+  document.getElementById('signout_assignment_id').value =
+      document.getElementById('assignment_id').value || '';
+  document.getElementById('quickSignOutForm').submit();
 }
 
 function closeSignOutDialog() {
@@ -1201,6 +1250,9 @@ window.addEventListener("load", function() {
   const adminPin = document.getElementById("admin_pin");
 
   if (pinInput) pinInput.value = "";
+  ['volunteer_id', 'pin'].forEach(id => {
+    document.getElementById(id).addEventListener('input', invalidateLookup);
+  });
   if (adminPin) adminPin.value = "";
 
   toggleCardNo();
