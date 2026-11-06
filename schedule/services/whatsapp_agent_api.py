@@ -41,6 +41,17 @@ def register_whatsapp_agent_api(bp):
             LOG.exception('WhatsApp 22:00 roster automation failed')
             return jsonify(error='roster_2200_error'), 500
 
+    @bp.route('/schedule/api/whatsapp-agent/morning/tick', methods=['POST'])
+    def wa_morning_tick():
+        if not authenticated():
+            return jsonify(error='unauthorized'), 401
+        try:
+            from schedule.services.whatsapp_morning_summary import run_morning_tick
+            return jsonify(run_morning_tick())
+        except Exception:
+            LOG.exception('WhatsApp morning summary enqueue failed')
+            return jsonify(error='morning_enqueue_error'), 500
+
     @bp.route('/schedule/api/whatsapp-agent/claim', methods=['POST'])
     def wa_agent_claim():
         if not authenticated():

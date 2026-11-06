@@ -37,6 +37,28 @@ from schedule.volunteer_templates import (
     VOLUNTEER_PREBOOK_HTML,
 )
 
+def signup_has_formal_assignment(cur, signup_id):
+    """Only an active assignment locks volunteer self-service changes."""
+    cur.execute("""
+        SELECT EXISTS (
+            SELECT 1 FROM volunteer_schedule_assignments
+            WHERE signup_id = %s
+              AND coalesce(status, 'assigned') <> 'cancelled'
+        ) AS locked
+    """, (signup_id,))
+    return bool(cur.fetchone()['locked'])
+
+
+def assigned_signup_locked_message(volunteer_id=None):
+    from html import escape
+    back = ('/volunteer/my_schedule?keyword=' + escape(str(volunteer_id), quote=True)
+            if volunteer_id else '/volunteer')
+    return ("<h2>🔒 已正式安排，不能自行修改或取消报名</h2>"
+            "<p>如需修改时间或请假，请联系负责人。</p>"
+            "<p>Already assigned. Please contact the coordinator for changes.</p>"
+            f'<a href="{back}">← 返回我的报名 / Back</a>'), 403
+
+
 def find_duty_time_conflict(cur, volunteer_id, signup_date, start_time, end_time, exclude_id=None):
     """Same-day duty signup intervals are half-open: [start, end)."""
     new_start = time_to_minutes(start_time)
@@ -685,6 +707,8 @@ def volunteer_signup():
                     meal_role = "候补义工"
 
             if existing:
+                if signup_has_formal_assignment(cur, existing['id']):
+                    return assigned_signup_locked_message(vol_id)
 
                 signup_id = existing["id"]
 
@@ -1727,7 +1751,7 @@ def volunteer_my_schedule():
 
             signup_date_obj = r["signup_date"]
 
-            if str(signup_date_obj) != str(malaysia_today()):
+            if str(signup_date_obj) != str(malaysia_today()) and not formal_rows:
                 html += f"""
                 <form method="get" action="/volunteer/edit_signup/{r['id']}">
                     <button class="big-btn edit-btn" type="submit">
@@ -1742,6 +1766,13 @@ def volunteer_my_schedule():
                         ❌ 不参加了，取消报名
                     </button>
                 </form>
+                """
+            elif formal_rows:
+                html += """
+                <p style="color:#9b5b00; font-size:24px;">
+                    🔒 已正式安排，如需修改时间或请假，请联系负责人。<br>
+                    Already assigned. Please contact the coordinator.
+                </p>
                 """
             else:
                 html += """
@@ -1828,7 +1859,7 @@ def volunteer_guide():
 
             <h2>✏️ 修改或取消报名</h2>
             <p>
-                正式发布前，可自行进入系统修改或取消报名。正式发布后，请联络负责人处理。
+                尚未正式安排岗位时，可自行修改或取消未来日期的报名；一旦正式安排岗位，请联络负责人处理。
             </p>
 
             <h2>🚫 值班当天无法出席</h2>
@@ -1887,6 +1918,11 @@ def volunteer_edit_signup(signup_id):
 
     if not row:
         return "❌ 找不到这笔报名，或已取消<br><a href='/volunteer'>返回</a>"
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if signup_has_formal_assignment(cur, signup_id):
+                return assigned_signup_locked_message(row['volunteer_id'])
 
     return render_template_string("""
     <!doctype html>
@@ -2021,6 +2057,7 @@ def volunteer_edit_signup_post(signup_id):
                 from volunteer_schedule_signups
                 where id = %s
                 and coalesce(status, 'pending') <> 'cancelled'
+                FOR UPDATE
             """, (signup_id,))
             old = cur.fetchone()
 
@@ -2065,6 +2102,9 @@ def volunteer_edit_signup_post(signup_id):
                 </html>
                 """)
             
+            if signup_has_formal_assignment(cur, signup_id):
+                return assigned_signup_locked_message(old['volunteer_id'])
+
             today = malaysia_today()
 
             if str(old["signup_date"]) == str(today):
@@ -2211,6 +2251,7 @@ def volunteer_cancel_signup(signup_id):
                     coalesce(status, 'pending') as status
                 from volunteer_schedule_signups
                 where id = %s
+                FOR UPDATE
             """, (signup_id,))
 
             row = cur.fetchone()
@@ -2258,6 +2299,9 @@ def volunteer_cancel_signup(signup_id):
                 </body>
                 </html>
                 """)
+
+            if signup_has_formal_assignment(cur, signup_id):
+                return assigned_signup_locked_message(row['volunteer_id'])
 
             signup_date = row["signup_date"]
 
@@ -2906,6 +2950,9 @@ def volunteer_prebook():
                 existing = cur.fetchone()
 
                 if existing:
+                    if signup_has_formal_assignment(cur, existing['id']):
+                        skipped += 1
+                        continue
                     cur.execute("""
                         update volunteer_schedule_signups
                         set start_time = %s,

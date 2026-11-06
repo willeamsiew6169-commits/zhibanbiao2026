@@ -2444,6 +2444,8 @@ def assign_jobs(fixed_people, signup_df, special_info, patch_mode=False,):
             p1, p2 = p2, p1
         result["佛堂卫生"].append(p1)
         result["二楼卫生"].append(p2)
+        # 两人共同负责楼梯；仅作为共同工作显示，义工人数仍为两人。
+        result["楼梯卫生"].extend([dict(p1), dict(p2)])
 
     elif cleaning_count >= 3:
         p1 = dict(unique_cleaners[0])
@@ -2594,7 +2596,8 @@ def auto_assign_duty(result):
         for key in ["佛堂卫生", "二楼卫生", "楼梯卫生"]:
             for item in result.get(key, []):
                 name = get_name(item)
-                if name:
+                if name and name not in mapping:
+                    # 楼梯共同协助不覆盖个人主要卫生岗位，避免影响值班分配。
                     mapping[name] = key
 
         return mapping

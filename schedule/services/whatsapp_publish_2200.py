@@ -139,6 +139,10 @@ def _execute_locked(target, marker, auto_publish, send_roster):
 
     # Even for previously published dates, do not send incomplete rosters.
     _validate_coverage(target)
+    # Freeze the 22:00 baseline even if a roster job already exists.
+    # Do not overwrite a prior snapshot on subsequent ticks.
+    from schedule.services.whatsapp_morning_summary import capture_2200_snapshot
+    capture_2200_snapshot(target)
     exists = _scalar('SELECT count(*) FROM whatsapp_notification_jobs WHERE created_by=%s AND target_date=%s',
                      (marker, target))
     if int(exists):

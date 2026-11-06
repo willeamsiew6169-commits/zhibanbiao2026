@@ -274,6 +274,23 @@ def run_2200_trigger_if_due(last_attempt_date):
     return today
 
 
+def run_morning_trigger_if_due(last_completed_date):
+    """05:30/07:00 MYT; server checks special day, switches and deduplication."""
+    now = datetime.now(ZoneInfo('Asia/Kuala_Lumpur'))
+    today = now.date().isoformat()
+    if last_completed_date == today or not ((now.hour == 5 and 30 <= now.minute < 50)
+                                               or (now.hour == 7 and now.minute < 20)):
+        return last_completed_date
+    try:
+        result = post('/schedule/api/whatsapp-agent/morning/tick', {})
+        LOG.info('早上新增义工通知 tick：%s', result)
+        if result.get('status') in ('queued', 'already_queued', 'no_new_assignments'):
+            return today
+    except Exception:
+        LOG.exception('早上通知触发失败；稍后在窗口内重试')
+    return last_completed_date
+
+
 def main():
     _lock_handle = acquire_single_instance_lock()
     if not URL.startswith('https://') or not TOKEN or not GROUP:
@@ -305,9 +322,11 @@ def main():
                     if time.monotonic() >= login_deadline:
                         raise RuntimeError('等待 WhatsApp Web 就绪超时；请检查登录状态') from exc
                     time.sleep(3)
+            last_morning_completed_date = None
             last_1900_completed_date = None
             last_2200_attempt_date = None
             while True:
+                last_morning_completed_date = run_morning_trigger_if_due(last_morning_completed_date)
                 last_1900_completed_date = run_1900_trigger_if_due(last_1900_completed_date)
                 last_2200_attempt_date = run_2200_trigger_if_due(last_2200_attempt_date)
                 try:

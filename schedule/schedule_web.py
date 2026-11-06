@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, date, timezone
 from schedule.builders.schedule_builder import sync_schedule_after_signup_change
 from schedule.services.admin_dashboard_service import load_admin_dashboard_data
 from lunar_rules import get_special_day_info, get_next_day_remove_info
-from flask import request, session, redirect, url_for, render_template_string, flash
+from flask import request, session, redirect, url_for, render_template_string, flash, jsonify
 from schedule.services.food_offering_routes import register_food_offering_routes
 from schedule.builders.schedule_builder import (
     run_schedule_for_date,
@@ -1125,6 +1125,45 @@ def load_admin_signup_details(date_str):
                          start_time NULLS LAST, name, role
             """, (date_str,))
             return cur.fetchall()
+
+
+@schedule_bp.route("/schedule/api/admin-signup-version", methods=["GET"])
+def admin_signup_version():
+    """轻量检查报名和排班变化；负责人页面只在数据改变时刷新。"""
+    if not session.get("schedule_login"):
+        return jsonify({"error": "unauthorized"}), 401
+    day = (request.args.get("date") or "").strip()
+    try:
+        day = date.fromisoformat(day).isoformat()
+    except (ValueError, TypeError):
+        return jsonify({"error": "invalid date"}), 400
+    import hashlib
+    import json
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, volunteer_id, name, role, start_time, end_time,
+                       status, assigned_place, remarks
+                FROM volunteer_schedule_signups
+                WHERE signup_date = %s ORDER BY id
+            """, (day,))
+            signups = cur.fetchall()
+            cur.execute("""
+                SELECT volunteer_id, role, shift_label, assigned_place,
+                       start_time, end_time, status, locked_by_admin
+                FROM volunteer_schedule_assignments
+                WHERE assignment_date = %s
+                ORDER BY volunteer_id, role, shift_label, assigned_place, start_time, end_time
+            """, (day,))
+            assignments = cur.fetchall()
+            cur.execute("""
+                SELECT is_published, need_republish, last_schedule_change
+                FROM schedule_day_flags WHERE flag_date = %s
+            """, (day,))
+            flags = cur.fetchall()
+    payload = json.dumps([signups, assignments, flags], default=str, ensure_ascii=False)
+    version = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return jsonify({"version": version})
 
 
 @schedule_bp.route("/schedule", methods=["GET", "POST"])
@@ -5061,12 +5100,14 @@ html {
 </head>
 
 <body>
-<a class="floating-home" href="/schedule" aria-label="返回负责人首页">🏠 返回首页</a>
+{% if mode in ("day", "signup", "special", "controls") %}<a class="floating-home" href="/schedule" aria-label="返回负责人首页">🏠 返回首页</a>{% endif %}
 <div class="box">
 
 <div class="top-bar">
     <h1>📅 负责人排班系统</h1>
+    {% if mode in ("day", "signup", "special", "controls") %}
     <a class="btn-tool btn-blue" style="width:auto" href="/schedule">🏠 负责人首页</a>
+    {% endif %}
 
     <a class="btn-tool btn-gray" style="width:auto;min-width:160px;" href="/schedule/logout">
         🚪 退出登录
@@ -5961,6 +6002,40 @@ function goToScheduleDate(dateValue) {
     window.location.href =
         "/schedule?mode=day&override_date=" + encodeURIComponent(dateValue);
 }
+</script>
+<script>
+// 每20秒轻量检查；报名/取消/自动补排变化后自动更新负责人数据。
+// 正在输入或修改表单时暂停刷新，避免丢失未保存内容。
+(function () {
+    const dateValue = {{ override_date|tojson }};
+    const apiUrl = '/schedule/api/admin-signup-version?date=' + encodeURIComponent(dateValue);
+    let previousVersion = null;
+    let busy = false;
+    let editing = false;
+    document.addEventListener('input', function (event) {
+        if (event.target.closest('input,textarea,select,[contenteditable]')) editing = true;
+    }, true);
+    async function checkSignupUpdates() {
+        if (busy || document.hidden || editing) return;
+        busy = true;
+        try {
+            const response = await fetch(apiUrl, {cache:'no-store', credentials:'same-origin'});
+            if (!response.ok) return;
+            const data = await response.json();
+            if (previousVersion !== null && data.version !== previousVersion) {
+                const active = document.activeElement;
+                if (active && active.matches('input,textarea,select,[contenteditable]')) return;
+                window.location.reload();
+                return;
+            }
+            previousVersion = data.version;
+        } catch (error) {
+            // 网络暂时断线时保留当前页面，下次继续检查。
+        } finally { busy = false; }
+    }
+    checkSignupUpdates();
+    setInterval(checkSignupUpdates, 20000);
+})();
 </script>
 </body>
 </html>
