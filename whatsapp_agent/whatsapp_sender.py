@@ -102,7 +102,12 @@ def outgoing_snapshot(page, message):
             .replace(/\u00a0/g, ' ').replace(/\u200b|\u200c|\u200d|\ufeff/g, '')
             .replace(/\r\n?/g, '\n').replace(/[ \t]+/g, ' ')
             .replace(/[ \t]*\n[ \t]*/g, '\n').trim();
-        const want = normalize(expected);
+        // WhatsApp Web 会合并空行、调整空格，并可能加入 emoji 变体选择符。
+        // 只忽略这些显示差异；仍要求整条消息的所有非空白字符完全一致。
+        const canonical = s => normalize(s)
+            .replace(/[\s\u00a0\u200b\u200c\u200d\ufeff]/g, '')
+            .replace(/[\ufe0e\ufe0f]/g, '');
+        const want = canonical(expected);
         const matched = [], samples = [], ids = [];
         let total = 0;
         for (const node of main.querySelectorAll('[data-id]')) {
@@ -131,12 +136,12 @@ def outgoing_snapshot(page, message):
             }
             const combined = normalize(top.map(el => el.innerText || '').join('\n'));
             variants.push(combined);
-            // 只允许整条正文完全相符，绝不做模糊包含判断。
-            if (variants.some(body => body === want)) matched.push({id});
+            // 忽略显示层空白与 emoji 变体差异，但必须整条正文相符；不做包含匹配。
+            if (variants.some(body => canonical(body) === want)) matched.push({id});
             if (samples.length < 5) samples.push({
                 id, bodies: [...new Set(variants)].filter(Boolean).slice(0, 4)
                     .map(x => x.slice(0, 160)),
-                expectedLength: want.length
+                expectedLength: normalize(expected).length
             });
         }
         return {total, ids, matched, samples};
@@ -274,21 +279,30 @@ def run_2200_trigger_if_due(last_attempt_date):
     return today
 
 
-def run_morning_trigger_if_due(last_completed_date):
-    """05:30/07:00 MYT; server checks special day, switches and deduplication."""
+def run_morning_trigger_if_due(last_completed_slot):
+    """Ask cloud at half-hour slots from 05:30–18:30 only.
+
+    Cloud checks whether today is a special day (05:30) or normal day (07:00).
+    Never trigger after the 22:00 roster; overnight additions wait until morning.
+    """
     now = datetime.now(ZoneInfo('Asia/Kuala_Lumpur'))
     today = now.date().isoformat()
-    if last_completed_date == today or not ((now.hour == 5 and 30 <= now.minute < 50)
-                                               or (now.hour == 7 and now.minute < 20)):
-        return last_completed_date
+    if not (5 <= now.hour < 19 and (now.minute < 20 or 30 <= now.minute < 50)):
+        return last_completed_slot
+    slot = f'{now.hour:02d}:{"00" if now.minute < 20 else "30"}'
+    key = (today, slot)
+    if last_completed_slot == key:
+        return last_completed_slot
     try:
         result = post('/schedule/api/whatsapp-agent/morning/tick', {})
-        LOG.info('早上新增义工通知 tick：%s', result)
-        if result.get('status') in ('queued', 'already_queued', 'no_new_assignments'):
-            return today
+        LOG.info('早上首次及其后每30分钟新增义工通知 tick：%s', result)
+        if result.get('status') in ('queued', 'already_queued', 'no_new_assignments',
+                                    'legacy_job_exists', 'disabled', 'outside_window'):
+            return key
+        # Missing 22:00 snapshot may become available; retry within the slot.
     except Exception:
-        LOG.exception('早上通知触发失败；稍后在窗口内重试')
-    return last_completed_date
+        LOG.exception('新增义工通知触发失败；在本时段窗口内重试')
+    return last_completed_slot
 
 
 def main():

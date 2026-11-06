@@ -1267,6 +1267,20 @@ def schedule_admin():
                     ]
     for item, day in zip(alert_items, alert_dates):
         item_display = dict(item)
+        # 只修正供台报名提醒的大日子名称，保留原有报名及负责人安排资料。
+        festival_label = ""
+        if day:
+            info = get_special_day_info(day)
+            lunar_text = str(info.get("lunar_text") or "")
+            names = info.get("special_names") or []
+            if isinstance(names, str):
+                names = [names]
+            names = [str(n).strip() for n in names if str(n).strip()]
+            if item.get("type") == "lunar_1_15":
+                festival_label = "初一" if "初一" in lunar_text else ("十五" if "十五" in lunar_text else "初一 / 十五")
+            elif item.get("type") == "buddhist_festival":
+                festival_label = "恩师卢军宏涅槃日" if "十月初六" in lunar_text or "十月初六" in "、".join(names) else ("、".join(names) if names else "佛诞日")
+        item_display["festival_label"] = festival_label
         item_display["scheduled_names"] = scheduled_by_date.get(day.isoformat(), []) if day else []
         supply_alerts_display.append(item_display)
     # 收供台日期独立于设供台日期，允许未来90天内的普通日。
@@ -5291,11 +5305,7 @@ html {
         <div style="margin-bottom:14px;">
             <b>
                 {{ item.date.strftime("%m/%d") }}
-                {% if item.type == "lunar_1_15" %}
-                    初一 / 十五
-                {% elif item.type == "buddhist_festival" %}
-                    佛诞日
-                {% endif %}
+                {{ item.festival_label }}
             </b><br>
 
             {% if item.scheduled_names %}

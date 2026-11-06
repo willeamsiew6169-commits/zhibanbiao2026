@@ -1,10 +1,10 @@
-"""05:30 special day / 07:00 normal day: one test-group late-arrival roster notice.
+"""Test-group late-signup summary: first at 05:30 (special) / 07:00 (normal), then every 30 minutes until 18:30 MYT.
 
-Requires migration whatsapp_morning_snapshot.sql. Snapshot is captured at 22:00
-before the formal roster job is queued. Fail closed when snapshot is missing.
+Requires whatsapp_morning_snapshot.sql and whatsapp_morning_batches.sql.
+Fail closed when the 22:00 snapshot or batch ledger is missing.
 """
 import json
-from datetime import datetime, timedelta
+import re
 from db import get_conn
 from lunar_rules import get_special_day_info
 from schedule.builders.time_utils import malaysia_now
@@ -45,11 +45,26 @@ def capture_2200_snapshot(target):
 
 
 def _time(value):
-    return str(value or '')[:5]
+    """Render schedule time as 24-hour HH:MM (supports am/pm and SQL time)."""
+    if value is None:
+        return ''
+    raw = str(value).strip()
+    match = re.fullmatch(r'(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?\s*([ap]\.?m\.?)?', raw, re.I)
+    if not match:
+        return raw
+    hour, minute = int(match.group(1)), int(match.group(2))
+    suffix = (match.group(3) or '').lower().replace('.', '')
+    if minute > 59 or hour > 23 or (suffix and not 1 <= hour <= 12):
+        return raw
+    if suffix == 'am':
+        hour = hour % 12
+    elif suffix == 'pm':
+        hour = hour % 12 + 12
+    return f'{hour:02d}:{minute:02d}'
 
 
 def _message(target, rows):
-    parts = [f'🌅 {target} 早上新增义工安排', '（昨晚22:00正式值班表后新增）', '']
+    parts = [f'📋 {target} 新增义工安排', '（昨晚22:00正式值班表后新增）', '']
     for role in ROLES:
         selected = [r for r in rows if r['role'] == role]
         if not selected:
@@ -68,18 +83,33 @@ def _message(target, rows):
     return '\n'.join(parts)
 
 
-def run_morning_tick():
-    now = malaysia_now()
-    target = now.date().isoformat()
+def _slot(now):
+    """Notify only for today's duty, after the morning opening and before 19:00.
+
+    Previous evening 22:00 through the night is accumulation-only: no messages.
+    Normal days start 07:00; special days start 05:30.
+    """
     info = get_special_day_info(now.date())
     special = info.get('template_type') != 'normal'
-    hour, minute = (5, 30) if special else (7, 0)
-    start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if not (start <= now < start + timedelta(minutes=20)):
-        return {'status': 'outside_window', 'scheduled_time': f'{hour:02d}:{minute:02d}',
+    opening_minutes = 5 * 60 + 30 if special else 7 * 60
+    current_minutes = now.hour * 60 + now.minute
+    if current_minutes < opening_minutes or current_minutes >= 19 * 60:
+        return None
+    if not (now.minute < 20 or 30 <= now.minute < 50):
+        return None
+    return f'{now.hour:02d}:{"00" if now.minute < 20 else "30"}'
+
+
+def run_morning_tick():
+    now = malaysia_now()
+    slot = _slot(now)
+    # Always today's assignments: after 22:00 yesterday, wait for today's first morning batch.
+    target = now.date().isoformat()
+    if slot is None:
+        return {'status': 'outside_window', 'target_date': target,
                 'malaysia_time': now.isoformat()}
 
-    marker = 'auto_morning_late:' + target
+    marker = 'auto_morning_late:' + target + ':' + now.date().isoformat() + ':' + slot.replace(':', '')
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute('SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))',
@@ -100,14 +130,31 @@ def run_morning_tick():
             if isinstance(baseline, str):
                 baseline = json.loads(baseline)
             old_keys = {tuple(item) for item in baseline}
-            cur.execute('SELECT id FROM whatsapp_notification_jobs WHERE created_by=%s AND target_date=%s',
-                        (marker, target))
+
+            # Old daily job lacks a per-person ledger; fail closed on that date to prevent duplicates.
+            cur.execute('''SELECT id FROM whatsapp_notification_jobs
+                WHERE target_date=%s AND created_by=%s LIMIT 1''',
+                        (target, 'auto_morning_late:' + target))
             if cur.fetchone():
-                return {'status': 'already_queued', 'target_date': target}
+                return {'status': 'legacy_job_exists', 'target_date': target}
+
+            # Ledger contains all previously queued person/role keys, even if ACK is uncertain.
+            # This prevents re-sending a message after uncertain or a network interruption.
+            cur.execute('''SELECT slot_time, notified_keys FROM whatsapp_morning_batches
+                WHERE target_date=%s ORDER BY slot_time''', (target,))
+            batches = _rows(cur)
+            for batch in batches:
+                keys = batch['notified_keys']
+                if isinstance(keys, str):
+                    keys = json.loads(keys)
+                old_keys.update(tuple(item) for item in keys)
+            if any(str(batch['slot_time'])[:5] == slot for batch in batches):
+                return {'status': 'already_queued', 'target_date': target, 'slot': slot}
+
             current = _assignments(cur, target)
             added = [r for r in current if _key(r) not in old_keys]
             if not added:
-                return {'status': 'no_new_assignments', 'target_date': target}
+                return {'status': 'no_new_assignments', 'target_date': target, 'slot': slot}
             body = _message(target, added)
             cur.execute('''INSERT INTO whatsapp_notification_jobs
                 (message_type, target_date, destination, body, status, created_by)
@@ -115,6 +162,11 @@ def run_morning_tick():
                         (target, body, marker))
             result = cur.fetchone()
             job_id = result['id'] if isinstance(result, dict) else result[0]
+            keys = sorted({ _key(r) for r in added })
+            cur.execute('''INSERT INTO whatsapp_morning_batches
+                (target_date, slot_time, notified_keys, job_id)
+                VALUES (%s, %s, %s::jsonb, %s)''',
+                        (target, slot, json.dumps(keys, ensure_ascii=False), job_id))
         conn.commit()
-    return {'status': 'queued', 'target_date': target, 'job_id': job_id,
-            'new_assignment_rows': len(added)}
+    return {'status': 'queued', 'target_date': target, 'slot': slot,
+            'job_id': job_id, 'new_assignment_rows': len(added)}
