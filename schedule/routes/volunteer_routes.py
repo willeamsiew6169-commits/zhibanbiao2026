@@ -162,6 +162,83 @@ def cleaning_signup_closed_message(cutoff_hour):
         '<a href="/volunteer">返回义工报名 / Back</a>'
     )
 
+def cleaning_full_message():
+    """卫生报名满额：中英双语、手机及电脑自适应提示页。"""
+    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>卫生岗位已满 / Cleaning duty is full</title>
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; padding: 24px 16px;
+       display: flex; justify-content: center; align-items: center;
+       font-family: "Microsoft YaHei", "Noto Sans SC", Arial, sans-serif;
+       background: linear-gradient(145deg, #fff8ef 0%, #fff0ee 54%, #f5f7ff 100%);
+       color: #332b2b; }
+.card { width: 100%; max-width: 640px; padding: 38px 34px 32px;
+        border-radius: 26px; background: white; text-align: center;
+        box-shadow: 0 18px 55px rgba(112, 66, 57, .12);
+        border: 1px solid #f8e4e0; }
+.icon { width: 82px; height: 82px; margin: 0 auto 22px;
+        display: grid; place-items: center; border-radius: 50%;
+        background: #fff0ed; color: #d94840; font-size: 44px; }
+h1 { font-size: clamp(26px, 5vw, 34px); color: #a72f31;
+     line-height: 1.35; margin: 0 0 8px; }
+.en-title { font-size: 17px; color: #856a6a; margin-bottom: 26px; }
+.count { display: inline-block; border-radius: 999px;
+         background: #fff0ee; border: 1px solid #ffd4ce;
+         color: #c43837; font-weight: 800; font-size: 24px;
+         padding: 9px 28px; margin-bottom: 24px; }
+.notice { background: #fff9ed; border: 1px solid #f5dfb0;
+          border-radius: 17px; padding: 22px 18px; line-height: 1.8; }
+.notice .zh { font-size: 21px; font-weight: 700; }
+.notice .en { font-size: 15px; color: #71665b; margin-top: 8px; }
+.tip { font-size: 16px; color: #6b655f; margin: 22px 0; }
+.back { display: block; width: 100%; padding: 16px 20px;
+        background: linear-gradient(135deg, #228b66, #157457);
+        color: #fff; font-size: 20px; font-weight: 700;
+        border-radius: 14px; text-decoration: none;
+        box-shadow: 0 5px 16px rgba(24, 121, 86, .2); }
+.back:hover { filter: brightness(1.06); }
+.back:focus-visible { outline: 3px solid #1c7557; outline-offset: 4px; }
+@media (max-width: 480px) {
+  .card { padding: 30px 20px 24px; border-radius: 20px; }
+  .notice .zh { font-size: 18px; }
+  .back { font-size: 18px; }
+}
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="icon" aria-hidden="true">✕</div>
+  <h1>卫生岗位已满</h1>
+  <div class="en-title">Cleaning duty is full</div>
+  <div class="count">3 / 3 人 · FULL</div>
+  <div class="notice">
+    <div class="zh">当天已有 3 位义工成功报名，<br>卫生岗位暂时没有空缺。</div>
+    <div class="en">All 3 cleaning places have been taken.<br>Please choose another date.</div>
+  </div>
+  <div class="tip">🙏 感恩您的发心，欢迎选择其他日期继续护持。</div>
+  <a class="back" href="/volunteer">← 返回义工报名 / Back to Signup</a>
+</main>
+</body>
+</html>"""
+
+
+def lock_and_count_cleaning(cur, signup_date):
+    """同一日期串行检查容量，防止多人同时报名超过3位。"""
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext('cleaning_signup'), hashtext(%s))",
+                (str(signup_date),))
+    cur.execute("""
+        SELECT count(*) AS cnt FROM volunteer_schedule_signups
+        WHERE signup_date = %s AND role = '卫生'
+          AND coalesce(status, 'pending') <> 'cancelled'
+    """, (signup_date,))
+    return int(cur.fetchone()['cnt'] or 0)
+
+
 @schedule_bp.route("/volunteer")
 def volunteer_home():
 
@@ -339,26 +416,6 @@ def volunteer_signup():
         if not cleaning_open:
             return cleaning_signup_closed_message(cutoff_hour)
 
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    select count(*) as cnt
-                    from volunteer_schedule_signups
-                    where signup_date = %s
-                    and role = '卫生'
-                    and coalesce(status, 'pending') <> 'cancelled'
-                """, (signup_date,))
-
-                cleaning_count = int(cur.fetchone()["cnt"] or 0)
-
-        if cleaning_count >= 3:
-            return """
-            <h2>❌ 卫生岗位已满</h2>
-            <p>感恩您的发心，今天卫生已有 3 位义工报名。</p>
-            <p>请改报其他日期或联系负责人。</p>
-            <a href="/volunteer">返回义工报名</a>
-            """
-
         date_obj = datetime.strptime(signup_date, "%Y-%m-%d").date()
         special_info = get_special_day_info(date_obj)
 
@@ -508,6 +565,20 @@ def volunteer_signup():
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
+            # 卫生名额必须与写入同一个数据库事务，避免并发超额。
+            if role == "卫生":
+                cleaning_count = lock_and_count_cleaning(cur, signup_date)
+                cur.execute("""
+                    SELECT id FROM volunteer_schedule_signups
+                    WHERE volunteer_id = %s AND signup_date = %s
+                      AND role = '卫生'
+                      AND coalesce(status, 'pending') <> 'cancelled'
+                    LIMIT 1
+                """, (vol_id, signup_date))
+                already_cleaning = cur.fetchone() is not None
+                if not already_cleaning and cleaning_count >= 3:
+                    return cleaning_full_message()
+
             # 默认值，避免非膳食报名时 meal_role 未定义
             meal_role = None
 
@@ -591,7 +662,23 @@ def volunteer_signup():
                 meal_count = int(cur.fetchone()["cnt"] or 0)
 
                 if existing:
-                    meal_role = None
+                    # 更新已有报名不改变原来的派餐/候补身份。
+                    cur.execute("""
+                        SELECT meal_role FROM volunteer_schedule_signups WHERE id = %s
+                    """, (existing["id"],))
+                    saved_meal = cur.fetchone()
+                    meal_role = (saved_meal or {}).get("meal_role")
+                    if not meal_role:
+                        # 兼容旧记录：按创建顺序重新判定身份。
+                        cur.execute("""
+                            SELECT id FROM volunteer_schedule_signups
+                            WHERE signup_date = %s AND role = '膳食'
+                              AND coalesce(status, 'pending') <> 'cancelled'
+                            ORDER BY created_at, id
+                        """, (signup_date,))
+                        ids_in_order = [r['id'] for r in cur.fetchall()]
+                        meal_role = ('派餐义工' if existing['id'] in ids_in_order[:9]
+                                     else '候补义工')
                 elif meal_count < 9:
                     meal_role = "派餐义工"
                 else:
@@ -2050,6 +2137,12 @@ def volunteer_edit_signup_post(signup_id):
                 if not cleaning_open:
                     return cleaning_signup_closed_message(cutoff_hour)
 
+            if new_role == "卫生":
+                cleaning_count = lock_and_count_cleaning(cur, new_date)
+                same_slot = (old["role"] == "卫生" and str(old["signup_date"]) == new_date)
+                if cleaning_count >= 3 and not same_slot:
+                    return cleaning_full_message()
+
             if new_role == "值班":
                 conflict = find_duty_time_conflict(cur, old['volunteer_id'], new_date,
                                                    new_start, new_end, exclude_id=signup_id)
@@ -2776,6 +2869,19 @@ def volunteer_prebook():
                 if role == "卫生":
                     cleaning_open, _, _ = cleaning_signup_window(signup_date)
                     if not cleaning_open:
+                        skipped += 1
+                        continue
+
+                if role == "卫生":
+                    cleaning_count = lock_and_count_cleaning(cur, signup_date)
+                    cur.execute("""
+                        SELECT 1 FROM volunteer_schedule_signups
+                        WHERE volunteer_id = %s AND signup_date = %s
+                          AND role = '卫生'
+                          AND coalesce(status, 'pending') <> 'cancelled'
+                        LIMIT 1
+                    """, (vol_id, signup_date))
+                    if cleaning_count >= 3 and cur.fetchone() is None:
                         skipped += 1
                         continue
 

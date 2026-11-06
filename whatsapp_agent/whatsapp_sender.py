@@ -9,6 +9,10 @@ import atexit
 import msvcrt
 import os
 import time
+import subprocess
+import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import requests
@@ -225,6 +229,51 @@ def acquire_single_instance_lock():
     return handle
 
 
+def run_1900_trigger_if_due(last_completed_date):
+    """19:00 MYT：使用现有云端接口入队；云端负责开关、时间及防重复。"""
+    now = datetime.now(ZoneInfo('Asia/Kuala_Lumpur'))
+    today = now.date().isoformat()
+    # 当前后台默认 19:00；如在后台修改通知时间，需同步调整这里的触发时间。
+    if not (now.hour == 19 and now.minute < 5) or last_completed_date == today:
+        return last_completed_date
+    try:
+        result = post('/schedule/api/whatsapp-agent/notice-1900/tick', {})
+        LOG.info('19:00 报名通知 tick：%s', result)
+        if result.get('status') in ('queued', 'already_queued', 'disabled'):
+            return today
+        # 云端若返回 outside_window，不记完成；仍仅在本地 19:00-19:04 尝试。
+    except Exception:
+        LOG.exception('19:00 通知触发失败；稍后在时间窗口内重试（云端有防重复）')
+    return last_completed_date
+
+
+def run_2200_trigger_if_due(last_attempt_date):
+    """在 Sender 主循环中触发既有 tick；不重复实现云端排班逻辑。"""
+    now = datetime.now(ZoneInfo('Asia/Kuala_Lumpur'))
+    today = now.date().isoformat()
+    if not (now.hour == 22 and now.minute < 20) or last_attempt_date == today:
+        return last_attempt_date
+    tick = BASE / 'whatsapp_roster_2200_tick.py'
+    if not tick.is_file():
+        LOG.error('22:00 tick 文件不存在：%s；本次不执行', tick)
+        return today
+    LOG.info('22:00 MYT：调用既有排班发布 tick（只启动一个 Sender）')
+    try:
+        result = subprocess.run(
+            [sys.executable, str(tick), '--execute'],
+            cwd=str(BASE), capture_output=True, text=True, timeout=100,
+            check=False,
+        )
+        LOG.info('22:00 tick 返回码=%s；输出=%s', result.returncode,
+                 (result.stdout or '').strip()[:2000])
+        if result.stderr:
+            LOG.warning('22:00 tick 错误输出=%s', result.stderr.strip()[:2000])
+        # 失败时不自动重试 POST，避免未知状态下重复执行；云端须有幂等保护。
+    except Exception:
+        LOG.exception('22:00 tick 调用异常；不自动重试，需人工核对')
+    return today
+
+
 def main():
     _lock_handle = acquire_single_instance_lock()
     if not URL.startswith('https://') or not TOKEN or not GROUP:
@@ -256,7 +305,11 @@ def main():
                     if time.monotonic() >= login_deadline:
                         raise RuntimeError('等待 WhatsApp Web 就绪超时；请检查登录状态') from exc
                     time.sleep(3)
+            last_1900_completed_date = None
+            last_2200_attempt_date = None
             while True:
+                last_1900_completed_date = run_1900_trigger_if_due(last_1900_completed_date)
+                last_2200_attempt_date = run_2200_trigger_if_due(last_2200_attempt_date)
                 try:
                     page = ready_page(context)
                 except (PlaywrightError, RuntimeError) as exc:

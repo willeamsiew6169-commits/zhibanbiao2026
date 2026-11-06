@@ -57,6 +57,17 @@ def build_whatsapp_from_assigned(date_str):
         "黄活动中心": [],
     }
 
+    # 固定佛台人员不一定有 volunteer_schedule_assignments 记录。
+    # 使用与负责人「佛台请假／换人」页面相同的有效名单来源：
+    # schedule_buddha_overrides 优先，否则读取每周固定轮值。
+    # 放在函数内导入，避免 schedule_web 与 whatsapp_service 循环导入。
+    from schedule.schedule_web import get_fixed_buddha_for_date
+
+    for name in get_fixed_buddha_for_date(date_str):
+        name = str(name).strip()
+        if name and name not in arranged["整理佛台"]:
+            arranged["整理佛台"].append(name)
+
     template_type = special_day_info["template_type"]
     is_lunar_day = template_type == "lunar_1_15"
 
@@ -72,7 +83,8 @@ def build_whatsapp_from_assigned(date_str):
             continue
 
         if role == "整理佛台" or place == "整理佛台":
-            arranged["整理佛台"].append(name)
+            if name not in arranged["整理佛台"]:
+                arranged["整理佛台"].append(name)
 
         elif role == "卫生" and place in ["佛堂卫生", "二楼卫生", "楼梯卫生"]:
             arranged[place].append(name)

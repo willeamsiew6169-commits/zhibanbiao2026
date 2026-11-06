@@ -853,8 +853,11 @@ def auto_patch_new_signup_to_assignment(signup_id):
                 return
 
             if role == "卫生":
-                assigned_place = "佛堂卫生"
-                shift_label = "卫生"
+                # 卫生必须统一交给 builder 重排全部卫生岗位，不能固定插入佛堂。
+                # 先结束当前数据库事务，再调用 builder（使用独立连接）。
+                conn.commit()
+                sync_schedule_after_signup_change(signup_id, action="upsert", changed_by="system")
+                return
 
             else:
                 s_min = time_to_minutes(start_time)
@@ -1019,13 +1022,10 @@ def build_signup_notice_whatsapp(date_str):
         shift = r.get("shift_label")
         key = None
 
+        # 19:00 报名通知只显示已安排的卫生人员。
+        # 值班人员必须等到 22:00 正式值班表才显示。
         if place in ["佛堂卫生", "二楼卫生", "楼梯卫生"]:
-            key = place
-        elif shift and place:
-            key = f"{shift}{place}"
-
-        if key in groups:
-            groups[key].append(r)
+            groups[place].append(r)
 
     def format_people(rows):
         if not rows:
@@ -1107,6 +1107,26 @@ https://gyt-checkin-sg.onrender.com/volunteer
     return text
 
 
+def load_admin_signup_details(date_str):
+    """负责人日期面板：显示当日所有报名记录（含取消）。"""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, volunteer_id, name, role, start_time, end_time,
+                       COALESCE(status, 'pending') AS status,
+                       assigned_place
+                FROM volunteer_schedule_signups
+                WHERE signup_date = %s
+                ORDER BY CASE COALESCE(status, 'pending')
+                           WHEN 'pending' THEN 0
+                           WHEN 'assigned' THEN 1
+                           WHEN 'cancelled' THEN 2
+                           ELSE 3 END,
+                         start_time NULLS LAST, name, role
+            """, (date_str,))
+            return cur.fetchall()
+
+
 @schedule_bp.route("/schedule", methods=["GET", "POST"])
 @schedule_bp.route("/schedule/admin", methods=["GET", "POST"])
 def schedule_admin():
@@ -1158,6 +1178,7 @@ def schedule_admin():
     )
     _dashboard_loaded = time.perf_counter()
 
+    signup_details = load_admin_signup_details(override_date) if mode in ("day", "signup", "special", "controls") else []
     buddha_names = load_buddha_name_options()
     fixed_buddha_today = get_fixed_buddha_for_date(override_date)
     _roster_loaded = time.perf_counter()
@@ -1172,6 +1193,59 @@ def schedule_admin():
         )
 
 
+    master_dates = _master_table_dates()
+    flags = dashboard["day_flags"] or {}
+    selected_master_date = override_date if override_date in {v["date"] for v in master_dates} else (master_dates[0]["date"] if master_dates else "")
+    # 日历选中的设供台日期可能不同于负责人主页日期；必须单独读取。
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT setup_people FROM schedule_day_flags WHERE flag_date = %s", (selected_master_date,))
+            setup_row = cur.fetchone()
+    setup_saved = [v.strip() for v in str((setup_row or {}).get("setup_people") or "").splitlines() if v.strip()]
+
+    # 首页提醒：合并义工报名和负责人已安排人员；不改动报名表。
+    supply_alerts_display = []
+    alert_items = dashboard.get("supply_alerts") or []
+    alert_dates = []
+    for item in alert_items:
+        raw_day = item.get("date")
+        try:
+            alert_dates.append(raw_day if isinstance(raw_day, date) else date.fromisoformat(str(raw_day)[:10]))
+        except (ValueError, TypeError):
+            alert_dates.append(None)
+    scheduled_by_date = {}
+    valid_dates = [d for d in alert_dates if d is not None]
+    if valid_dates:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT flag_date, setup_people FROM schedule_day_flags
+                    WHERE flag_date = ANY(%s)
+                """, (valid_dates,))
+                for row in cur.fetchall():
+                    scheduled_by_date[str(row["flag_date"])] = [
+                        name.strip() for name in str(row.get("setup_people") or "").splitlines() if name.strip()
+                    ]
+    for item, day in zip(alert_items, alert_dates):
+        item_display = dict(item)
+        item_display["scheduled_names"] = scheduled_by_date.get(day.isoformat(), []) if day else []
+        supply_alerts_display.append(item_display)
+    # 收供台日期独立于设供台日期，允许未来90天内的普通日。
+    remove_date_arg = request.args.get("remove_date", "").strip()
+    try:
+        remove_day = date.fromisoformat(remove_date_arg)
+    except ValueError:
+        remove_day = malaysia_today()
+    if not malaysia_today() <= remove_day <= malaysia_today() + timedelta(days=90):
+        remove_day = malaysia_today()
+    selected_remove_date = remove_day.isoformat()
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT remove_people FROM schedule_day_flags WHERE flag_date = %s", (selected_remove_date,))
+            remove_row = cur.fetchone()
+    remove_saved = [v.strip() for v in str((remove_row or {}).get("remove_people") or "").splitlines() if v.strip()]
+
+
     return render_template_string(
         SCHEDULE_HTML,
         mode=mode,
@@ -1179,6 +1253,13 @@ def schedule_admin():
         roles=ROLE_OPTIONS,
         tomorrow=default_schedule_date,
         buddha_names=buddha_names,
+        master_dates=master_dates,
+        selected_master_date=selected_master_date,
+        selected_remove_date=selected_remove_date,
+        remove_max_date=(malaysia_today() + timedelta(days=90)).isoformat(),
+        remove_min_date=malaysia_today().isoformat(),
+        setup_saved=setup_saved,
+        remove_saved=remove_saved,
         override_date=override_date,
         fixed_buddha_today=fixed_buddha_today,
         multi_day_signup_open=dashboard["multi_day_signup_open"],
@@ -1187,13 +1268,14 @@ def schedule_admin():
         records=dashboard["records"],
         pending_counts=dashboard["pending_counts"],
         day_summary=dashboard["day_summary"],
+        signup_details=signup_details,
         is_today_or_past=dashboard["is_today_or_past"],
         day_flags=dashboard["day_flags"],
         special_day_info=dashboard["special_day_info"],
         remove_info=dashboard["remove_info"],
         shortage_summary=dashboard["shortage_summary"],
         supply_signups=dashboard["supply_signups"],
-        supply_alerts=dashboard["supply_alerts"],
+        supply_alerts=supply_alerts_display,
         is_published=dashboard["is_published"],
         republish_info=dashboard["republish_info"],
         default_year=dashboard["default_year"],
@@ -2063,78 +2145,109 @@ def schedule_reports():
     )
 
 
+def _master_table_dates(days=90):
+    """Use the existing lunar rules, not a separately maintained festival calendar."""
+    today = malaysia_today()
+    dates = []
+    for offset in range(days + 1):
+        day = today + timedelta(days=offset)
+        info = get_special_day_info(day) or {}
+        if info.get("template_type") not in ("lunar_1_15", "buddhist_festival"):
+            continue
+        title = (info.get("festival_name") or info.get("name") or
+                 info.get("title") or info.get("lunar_text") or "大日子")
+        dates.append({"date": day.isoformat(), "label": f"{day:%Y-%m-%d} · {title}"})
+    return dates
+
+
 @schedule_bp.route("/schedule/save_day_flags", methods=["POST"])
 def save_day_flags():
     if not session.get("schedule_login"):
         return redirect(url_for("schedule.schedule_admin"))
 
     date_str = request.form.get("date", "").strip()
+    form_type = request.form.get("form_type", "legacy").strip()
+    try:
+        selected = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return "❌ 日期格式错误", 400
 
-    setup_person_1 = request.form.get("setup_person_1", "").strip()
-    setup_person_2 = request.form.get("setup_person_2", "").strip()
+    if form_type == "remove_table" and not (malaysia_today() <= selected <= malaysia_today() + timedelta(days=90)):
+        return "❌ 收供台日期必须在未来90天内", 400
 
-    remove_person_1 = request.form.get("remove_person_1", "").strip()
-    remove_person_2 = request.form.get("remove_person_2", "").strip()
-    remove_extra_person = request.form.get("remove_extra_person", "").strip()
+    if form_type == "master_table":
+        allowed = {item["date"] for item in _master_table_dates()}
+        if date_str not in allowed:
+            return "❌ 只能选择未来90天内的系统大日子", 400
 
+    setup_people = "\n".join(dict.fromkeys(x for x in (
+        request.form.get("setup_person_1", "").strip(),
+        request.form.get("setup_person_2", "").strip()
+    ) if x))
+    remove_people = "\n".join(dict.fromkeys(x for x in (
+        request.form.get("remove_person_1", "").strip(),
+        request.form.get("remove_person_2", "").strip(),
+        request.form.get("remove_extra_person", "").strip()
+    ) if x))
     extra_buddha_person = request.form.get("extra_buddha_person", "").strip()
-
-    setup_people = "\n".join(
-        x for x in [
-            setup_person_1,
-            setup_person_2
-        ] if x
-    )
-
-    remove_people = "\n".join(
-        x for x in [
-            remove_person_1,
-            remove_person_2,
-            remove_extra_person
-        ] if x
-    )
-
-    # 兼容旧字段：有填人员 = 有安排
-    need_setup = bool(setup_people)
-    need_remove = bool(remove_people)
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                insert into schedule_day_flags (
-                    flag_date,
-                    need_setup_master_table,
-                    need_remove_master_table,
-                    setup_people,
-                    remove_people,
-                    extra_buddha_person,
-                    updated_at
-                )
-                values (%s, %s, %s, %s, %s, %s, now())
-                on conflict (flag_date)
-                do update set
-                    need_setup_master_table = excluded.need_setup_master_table,
-                    need_remove_master_table = excluded.need_remove_master_table,
-                    setup_people = excluded.setup_people,
-                    remove_people = excluded.remove_people,
-                    extra_buddha_person = excluded.extra_buddha_person,
-                    updated_at = now()
-            """, (
-                date_str,
-                need_setup,
-                need_remove,
-                setup_people,
-                remove_people,
-                extra_buddha_person
-            ))
+            if form_type == "master_table":
+                # Preserve existing extra-buddha override when saving master-table names.
+                cur.execute("""
+                    INSERT INTO schedule_day_flags
+                        (flag_date, need_setup_master_table, need_remove_master_table,
+                         setup_people, remove_people, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (flag_date) DO UPDATE SET
+                        need_setup_master_table=EXCLUDED.need_setup_master_table,
+                        setup_people=EXCLUDED.setup_people,
+                        updated_at=NOW()
+                """, (date_str, bool(setup_people), False,
+                      setup_people, ""))
+            elif form_type == "remove_table":
+                # 没有收供台人员 = 继续供奉，不自动撤台。
+                cur.execute("""
+                    INSERT INTO schedule_day_flags
+                        (flag_date, need_remove_master_table, remove_people, updated_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (flag_date) DO UPDATE SET
+                        need_remove_master_table=EXCLUDED.need_remove_master_table,
+                        remove_people=EXCLUDED.remove_people,
+                        updated_at=NOW()
+                """, (date_str, bool(remove_people), remove_people))
+            elif form_type == "extra_buddha":
+                # Do not wipe master-table names when saving the extra Buddha helper.
+                cur.execute("""
+                    INSERT INTO schedule_day_flags (flag_date, extra_buddha_person, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (flag_date) DO UPDATE SET
+                        extra_buddha_person=EXCLUDED.extra_buddha_person,
+                        updated_at=NOW()
+                """, (date_str, extra_buddha_person))
+            else:
+                # Compatibility with older forms.
+                cur.execute("""
+                    INSERT INTO schedule_day_flags
+                        (flag_date, need_setup_master_table, need_remove_master_table,
+                         setup_people, remove_people, extra_buddha_person, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (flag_date) DO UPDATE SET
+                        need_setup_master_table=EXCLUDED.need_setup_master_table,
+                        need_remove_master_table=EXCLUDED.need_remove_master_table,
+                        setup_people=EXCLUDED.setup_people,
+                        remove_people=EXCLUDED.remove_people,
+                        extra_buddha_person=EXCLUDED.extra_buddha_person,
+                        updated_at=NOW()
+                """, (date_str, bool(setup_people), bool(remove_people),
+                      setup_people, remove_people, extra_buddha_person))
+        conn.commit()
 
-            conn.commit()
-
-    return redirect(url_for(
-        "schedule.schedule_admin",
-        mode="day",
-        override_date=date_str
-    ))
+    return redirect(url_for("schedule.schedule_admin", mode="special",
+                            override_date=(date_str if form_type != "remove_table" else request.form.get("setup_date", "") or date_str),
+                            remove_date=(date_str if form_type == "remove_table" else ""),
+                            panel=("master-table" if form_type in ("master_table", "remove_table") else "extra-buddha")))
 
 
 @schedule_bp.route("/schedule/fill_pending", methods=["POST"])
@@ -4808,7 +4921,37 @@ document.addEventListener("DOMContentLoaded", function () {
 </script>
 
 <script>
+function openMasterDay(day) {
+    const valid = Array.from(document.querySelectorAll('#master_day_select option')).some(o => o.value === day);
+    if (!valid) { alert('请选择列表中的大日子'); return; }
+    window.location.href = '/schedule?mode=special&override_date=' + encodeURIComponent(day) + '&panel=master-table';
+}
+document.addEventListener('DOMContentLoaded', function () {
+    const select = document.getElementById('master_day_select');
+    const calendar = document.getElementById('master_calendar');
+    if (select) select.addEventListener('change', function () { openMasterDay(this.value); });
+    if (calendar) calendar.addEventListener('change', function () {
+        if (select && Array.from(select.options).some(o => o.value === this.value)) openMasterDay(this.value);
+        else { alert('请选择未来90天内的大日子'); calendar.value = select ? select.value : ''; }
+    });
+    const removeCalendar = document.getElementById('remove_day_calendar');
+    if (removeCalendar) removeCalendar.addEventListener('change', function () {
+        const params = new URLSearchParams(window.location.search);
+        params.set('mode', 'special');
+        params.set('panel', 'master-table');
+        params.set('remove_date', this.value);
+        window.location.href = '/schedule?' + params.toString();
+    });
+    const panel = new URLSearchParams(window.location.search).get('panel');
+    if (panel === 'master-table' && select && select.value !== new URLSearchParams(window.location.search).get('override_date')) { openMasterDay(select.value); return; }
+    if (panel === 'master-table' || panel === 'extra-buddha') showSpecial(panel);
+});
 function showSpecial(id) {
+    if (id === 'master-table') {
+        const select = document.getElementById('master_day_select');
+        const shown = new URLSearchParams(window.location.search).get('override_date');
+        if (select && select.value !== shown) { openMasterDay(select.value); return; }
+    }
     const boxes = document.querySelectorAll(".special-box");
 
     boxes.forEach(function(box) {
@@ -4878,11 +5021,19 @@ html {
         font-size:20px;
     }
 }
+/* 每天必用入口：醒目金黄色，避免与其他管理按钮混淆 */
+.daily-entry-highlight { display:block; text-align:center; background:linear-gradient(135deg,#ffbf24,#f17800) !important; color:#172235 !important; border:3px solid #e18a00 !important; font-weight:900 !important; font-size:clamp(21px,3vw,30px) !important; padding:20px 14px !important; border-radius:15px !important; box-shadow:0 5px 0 #b76a00,0 9px 18px rgba(173,99,0,.23) !important; text-decoration:none; }
+.daily-entry-highlight:hover { filter:brightness(1.06); transform:translateY(-2px); }
+/* 滚动时固定在右下角，手机和电脑均可使用 */
+.floating-home { position:fixed; right:20px; bottom:22px; z-index:9999; background:#245de6; color:white !important; padding:11px 16px; border-radius:999px; font-weight:800; font-size:15px; box-shadow:0 4px 15px rgba(0,0,0,.28); text-decoration:none; border:2px solid white; }
+.floating-home:hover { background:#1247b9; }
+@media(max-width:600px) { .floating-home { right:12px; bottom:12px; font-size:14px; padding:10px 13px; } }
 </style>
 
 </head>
 
 <body>
+<a class="floating-home" href="/schedule" aria-label="返回负责人首页">🏠 返回首页</a>
 <div class="box">
 
 <div class="top-bar">
@@ -4903,7 +5054,7 @@ html {
   <div class="date-card">🟢 已安排：<b>{{ day_summary.assigned }}</b></div>
   <div class="date-card">⚪ 已取消：<b>{{ day_summary.cancelled }}</b></div>
  </div>
- <a class="btn-tool btn-primary" href="/schedule?mode=day&override_date={{ override_date }}">⭐ 进入今日安排 →</a>
+ <a class="btn-tool daily-entry-highlight" href="/schedule?mode=day&override_date={{ override_date }}">⭐ 进入今日安排 → <span style="font-size:.7em">（每日必用）</span></a>
 </div>
 
 <div class="card">
@@ -4998,6 +5149,40 @@ html {
         </div>
     </div>
 
+    <div class="info-box" style="margin-top:14px;">
+        <b>👥 当日义工报名详情（{{ override_date }}）</b>
+        <div style="font-size:13px;color:#64748b;margin:5px 0 10px;">显示所有报名记录，包括待安排、已安排及已取消。</div>
+        {% if signup_details %}
+        <div style="overflow-x:auto;">
+          <table style="width:100%;border-collapse:collapse;font-size:14px;min-width:590px;">
+            <thead><tr style="background:#edf3f9;text-align:left;">
+              <th style="padding:9px;border-bottom:1px solid #dce5ee;">义工姓名</th>
+              <th style="padding:9px;border-bottom:1px solid #dce5ee;">报名岗位</th>
+              <th style="padding:9px;border-bottom:1px solid #dce5ee;">报名时段</th>
+              <th style="padding:9px;border-bottom:1px solid #dce5ee;">安排地点</th>
+              <th style="padding:9px;border-bottom:1px solid #dce5ee;">状态</th>
+            </tr></thead>
+            <tbody>
+            {% for person in signup_details %}
+              <tr style="border-bottom:1px solid #edf1f5;{% if person.status == 'cancelled' %}opacity:.55;{% endif %}">
+                <td style="padding:9px;">{{ person.name or person.volunteer_id or '—' }}</td>
+                <td style="padding:9px;">{{ person.role or '—' }}</td>
+                <td style="padding:9px;white-space:nowrap;">{{ person.start_time|string if person.start_time else '—' }} ～ {{ person.end_time|string if person.end_time else '—' }}</td>
+                <td style="padding:9px;">{{ person.assigned_place or '—' }}</td>
+                <td style="padding:9px;white-space:nowrap;">
+                  {% if person.status == 'assigned' %}<span style="color:#16803c;font-weight:700;">🟢 已安排</span>
+                  {% elif person.status == 'cancelled' %}<span style="color:#64748b;">⚪ 已取消</span>
+                  {% elif person.status == 'pending' %}<span style="color:#a66a00;font-weight:700;">🟡 待安排</span>
+                  {% else %}{{ person.status }}{% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}<div style="color:#64748b;">这一天暂时没有报名记录。</div>{% endif %}
+    </div>
+
     <div class="info-box">
         <b>📢 缺义工提醒</b><br>
 
@@ -5044,10 +5229,13 @@ html {
                 {% endif %}
             </b><br>
 
+            {% if item.scheduled_names %}
+                <span style="color:#176b39;">🟢 已安排设供台：{{ "、".join(item.scheduled_names) }}</span><br>
+            {% endif %}
             {% if item.names %}
-                已报名：{{ "、".join(item.names) }}
-            {% else %}
-                <span style="color:#c0392b;">暂时没人报名</span>
+                义工自行报名：{{ "、".join(item.names) }}
+            {% elif not item.scheduled_names %}
+                <span style="color:#c0392b;">尚未安排设供台人员，也没有义工报名</span>
             {% endif %}
         </div>
     {% endfor %}
@@ -5295,8 +5483,28 @@ html {
             </div>
             {% endif %}
 
+            <div class="info-box" style="margin:12px 0;">
+                <b>📅 提前选择未来大日子（90天内）</b>
+                <p style="font-size:16px;">选好日期后会自动载入该日已保存的供台人员。</p>
+                {% if master_dates %}
+                <select id="master_day_select" aria-label="选择大日子" style="width:100%;font-size:19px;">
+                    {% for item in master_dates %}
+                    <option value="{{ item.date }}" {% if item.date == selected_master_date %}selected{% endif %}>{{ item.label }}</option>
+                    {% endfor %}
+                </select>
+                <label for="master_calendar">或打开日历选择：</label>
+                <input type="date" id="master_calendar" value="{{ selected_master_date }}"
+                       min="{{ master_dates[0].date }}" max="{{ master_dates[-1].date }}"
+                       style="width:100%;font-size:19px;padding:9px;">
+                <small>日历只接受上方列表中的大日子；普通日期不会保存。</small>
+                {% else %}
+                <p>未来90天内没有找到大日子，请检查农历规则。</p>
+                {% endif %}
+            </div>
+
             <form method="post" action="/schedule/save_day_flags">
-                <input type="hidden" name="date" value="{{ override_date }}">
+                <input type="hidden" name="form_type" value="master_table">
+                <input type="hidden" name="date" value="{{ selected_master_date }}">
 
                 <div class="info-box">
                     系统会根据初一、十五及佛诞日自动判断是否需要设供台。<br>
@@ -5306,20 +5514,20 @@ html {
                 <h4>🪷 设师父供台人员</h4>
                 <p style="color:#666;font-size:20px;">通常 1 至 2 位佛台组人员即可。</p>
 
-                <select name="setup_person1">
+                <select name="setup_person_1">
 
                     <option value="">请选择</option>
 
                     {% for p in supply_signups %}
                         <option value="{{ p.name }}"
-                            {% if loop.index == 1 %}selected{% endif %}>
+                            {% if setup_saved and setup_saved[0] == p.name %}selected{% endif %}>
                             {{ p.name }}
                         </option>
                     {% endfor %}
 
                     {% for n in buddha_names %}
                         <option value="{{ n }}"
-                            {% if day_flags.setup_person1 == n %}selected{% endif %}>
+                            {% if setup_saved and setup_saved[0] == n %}selected{% endif %}>
                             {{ n }}
                         </option>
                     {% endfor %}
@@ -5331,13 +5539,13 @@ html {
 
                     {% for p in supply_signups %}
                         <option value="{{ p.name }}"
-                            {% if loop.index == 2 %}selected{% endif %}>
+                            {% if setup_saved|length > 1 and setup_saved[1] == p.name %}selected{% endif %}>
                             {{ p.name }}
                         </option>
                     {% endfor %}
 
                     {% for n in buddha_names %}
-                        <option value="{{ n }}" {% if day_flags.setup_person_2 == n %}selected{% endif %}>
+                        <option value="{{ n }}" {% if setup_saved|length > 1 and setup_saved[1] == n %}selected{% endif %}>
                             {{ n }}
                         </option>
                     {% endfor %}
@@ -5345,7 +5553,18 @@ html {
 
                 <hr>
 
+                <button type="submit" class="btn-tool btn-blue">💾 保存设供台人员</button>
+            </form>
+
+            <form method="post" action="/schedule/save_day_flags" style="margin-top:24px;">
+                <input type="hidden" name="form_type" value="remove_table">
+                <input type="hidden" name="setup_date" value="{{ selected_master_date }}">
                 <h4>📦 收师父供台人员</h4>
+                <label for="remove_day_calendar"><b>📅 选择收供台日期（未来90天内，普通日也可以）</b></label>
+                <input id="remove_day_calendar" type="date" name="date" value="{{ selected_remove_date }}"
+                       min="{{ remove_min_date }}" max="{{ remove_max_date }}" required
+                       style="width:100%;font-size:19px;padding:9px;margin:10px 0;">
+                <p style="font-size:15px;color:#666;">更换日期会载入该日已保存的收供台人员。</p>
                 <p style="color:#666;font-size:20px;">
                     通常 1 至 2 位佛台组人员。若没有安排人员，系统视为继续供奉。
                 </p>
@@ -5353,7 +5572,7 @@ html {
                 <select name="remove_person_1">
                     <option value="">请选择</option>
                     {% for n in buddha_names %}
-                    <option value="{{ n }}" {% if day_flags.remove_person_1 == n %}selected{% endif %}>
+                    <option value="{{ n }}" {% if remove_saved and remove_saved[0] == n %}selected{% endif %}>
                         {{ n }}
                     </option>
                     {% endfor %}
@@ -5362,7 +5581,7 @@ html {
                 <select name="remove_person_2">
                     <option value="">请选择</option>
                     {% for n in buddha_names %}
-                    <option value="{{ n }}" {% if day_flags.remove_person_2 == n %}selected{% endif %}>
+                    <option value="{{ n }}" {% if remove_saved|length > 1 and remove_saved[1] == n %}selected{% endif %}>
                         {{ n }}
                     </option>
                     {% endfor %}
@@ -5371,14 +5590,14 @@ html {
                 <p>普通义工帮忙收供台：</p>
                 <input
                     name="remove_extra_person"
-                    value="{{ day_flags.remove_extra_person }}"
+                    value="{{ remove_saved[2] if remove_saved|length > 2 else '' }}"
                     placeholder="例如：张三，可空"
                     style="width:100%;font-size:22px;"
                 >
 
                 <br><br>
 
-                <button type="submit" class="btn-tool btn-blue">💾 保存供台人员</button>
+                <button type="submit" class="btn-tool btn-blue">💾 保存收供台人员</button>
             </form>
         </div>
 
@@ -5399,6 +5618,7 @@ html {
             </div>
 
             <form method="post" action="/schedule/save_day_flags">
+                <input type="hidden" name="form_type" value="extra_buddha">
                 <input type="hidden" name="date" value="{{ override_date }}">
 
                 <p style="font-size:20px;color:#666;">

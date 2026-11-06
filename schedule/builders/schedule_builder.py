@@ -394,6 +394,97 @@ def patch_schedule_for_date(date_str, only_signup_id=None):
         traceback.print_exc()
         return 0
 
+def rebuild_published_cleaning_assignments(date_str):
+    """发布后仅重新分配卫生（最多三处），保留其他岗位和管理员锁定项。"""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 同一天的卫生重排串行化，防止两名义工同时报名造成重复。
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("cleaning:" + str(date_str),))
+            cur.execute("""
+                SELECT id, volunteer_id, name, start_time, end_time
+                FROM volunteer_schedule_signups
+                WHERE signup_date=%s AND role='卫生'
+                  AND COALESCE(status, 'pending') <> 'cancelled'
+                ORDER BY created_at, id
+            """, (date_str,))
+            signups = cur.fetchall()
+            cur.execute("""
+                SELECT signup_id, volunteer_id, name, assigned_place
+                FROM volunteer_schedule_assignments
+                WHERE assignment_date=%s AND role='卫生'
+                  AND COALESCE(status, 'assigned') <> 'cancelled'
+                  AND COALESCE(locked_by_admin, false)=true
+            """, (date_str,))
+            locked = cur.fetchall()
+            locked_ids = {int(x['signup_id']) for x in locked if x.get('signup_id') is not None}
+            locked_people = {str(x.get('volunteer_id') or x.get('name') or '').strip() for x in locked}
+            def place_of(raw):
+                v = str(raw or '')
+                return v.replace('卫生', '').strip() if v.replace('卫生', '').strip() in ('佛堂', '二楼', '楼梯') else None
+            locked_places = {place_of(x['assigned_place']) for x in locked}
+            locked_places.discard(None)
+            # 只安排最多三位，重复报名及锁定的义工不再重复分配。
+            unique, seen = [], set(locked_people)
+            for x in signups:
+                identity = str(x.get('volunteer_id') or x.get('name') or x['id']).strip()
+                if int(x['id']) in locked_ids or identity in seen:
+                    continue
+                seen.add(identity)
+                unique.append(x)
+            slots = ['佛堂', '二楼', '楼梯'][:min(3, len(unique) + len(locked_places))]
+            available = [x for x in slots if x not in locked_places]
+            restricted = ('葉荔銖', '葉茘銖', '叶荔铢')
+            # 佛堂优先分配给可以做佛堂的义工，避免受限义工抢占位置。
+            chosen = []
+            remaining = list(unique)
+            if '佛堂' in available:
+                candidate = next((x for x in remaining if str(x.get('name') or '').strip() not in restricted), None)
+                if candidate:
+                    chosen.append((candidate, '佛堂'))
+                    remaining.remove(candidate)
+                    available.remove('佛堂')
+            for place in available:
+                if not remaining:
+                    break
+                if place == '佛堂':
+                    continue
+                chosen.append((remaining.pop(0), place))
+            # 所有新安排先算好，再在同一事务内删除旧的非锁定卫生记录。
+            cur.execute("""
+                DELETE FROM volunteer_schedule_assignments
+                WHERE assignment_date=%s AND role='卫生'
+                  AND COALESCE(locked_by_admin, false)=false
+            """, (date_str,))
+            for x, place in chosen:
+                cur.execute("""
+                    INSERT INTO volunteer_schedule_assignments
+                      (signup_id, volunteer_id, name, assignment_date, role,
+                       shift_label, assigned_place, start_time, end_time,
+                       status, remarks, assignment_source, locked_by_admin)
+                    VALUES (%s,%s,%s,%s,'卫生','卫生',%s,%s,%s,
+                            'assigned','发布后自动安排卫生','system',false)
+                """, (x['id'], x['volunteer_id'], x['name'], date_str,
+                      place + '卫生', x['start_time'], x['end_time']))
+            # 先清理没有分配到的报名，再以 assignments 为准恢复状态。
+            cur.execute("""
+                UPDATE volunteer_schedule_signups
+                SET status='pending', assigned_place=NULL
+                WHERE signup_date=%s AND role='卫生'
+                  AND COALESCE(status,'pending') <> 'cancelled'
+            """, (date_str,))
+            cur.execute("""
+                UPDATE volunteer_schedule_signups s
+                SET status='assigned', assigned_place=a.assigned_place
+                FROM volunteer_schedule_assignments a
+                WHERE s.id=a.signup_id AND s.signup_date=%s
+                  AND s.role='卫生' AND a.assignment_date=%s
+                  AND a.role='卫生' AND COALESCE(a.status,'assigned') <> 'cancelled'
+                  AND COALESCE(s.status,'pending') <> 'cancelled'
+            """, (date_str, date_str))
+        conn.commit()
+    return len(chosen)
+
+
 def sync_schedule_after_signup_change(signup_id, action="upsert", changed_by="system"):
     """
     V2 统一同步函数
@@ -436,6 +527,15 @@ def sync_schedule_after_signup_change(signup_id, action="upsert", changed_by="sy
     if not published and not same_day_duty:
         print("ℹ️ 尚未发布，未来报名暂不建立 assignments：", signup_id, date_str)
         return 0
+
+    # 卫生报名发布后必须同步全部卫生位置（最多三人）；不影响值班。
+    if signup.get("role") == "卫生":
+        if not published:
+            return 0
+        count = rebuild_published_cleaning_assignments(date_str)
+        mark_schedule_need_republish(date_str)
+        print("✅ 卫生重新安排完成：", date_str, "人数：", count)
+        return count
 
     # 自动补排只处理值班；卫生、供台、佛台由各自流程安排。
     # 取消报名仍可清理该报名原有记录。
@@ -1320,6 +1420,165 @@ def update_assigned_places(target_date, assigned_rows):
 
 
 
+
+# ================================================================
+# 22:00 安全预演：只读数据库，不修改排班、发布状态或 WhatsApp 队列。
+# ================================================================
+def _dry_run_2200_gaps(start, end, intervals):
+    """Pure interval coverage check shared by DB dry-run and offline simulation."""
+    cursor = start
+    missing = []
+    for a, b in sorted(intervals):
+        if b <= cursor or a >= end:
+            continue
+        if a > cursor:
+            missing.append((cursor, min(a, end)))
+        cursor = max(cursor, min(b, end))
+        if cursor >= end:
+            break
+    if cursor < end:
+        missing.append((cursor, end))
+    return missing
+
+
+def simulate_2200_coverage_offline():
+    """No database or network: exercise the same interval coverage used by dry-run."""
+    scenarios = [
+        ('完整排班', (600, 840), [(600, 720), (720, 840)], []),
+        ('只排前半段', (600, 840), [(600, 720)], [(720, 840)]),
+        ('中间漏排', (600, 840), [(600, 660), (720, 840)], [(660, 720)]),
+        ('重叠不等于完整', (600, 840), [(600, 720), (660, 780)], [(780, 840)]),
+        ('没有排班', (600, 840), [], [(600, 840)]),
+    ]
+    def show(pair):
+        return f'{pair[0]//60:02d}:{pair[0]%60:02d}-{pair[1]//60:02d}:{pair[1]%60:02d}'
+    checks = []
+    for label, (start, end), existing, expected in scenarios:
+        actual = _dry_run_2200_gaps(start, end, existing)
+        checks.append({
+            'scenario': label,
+            'passed': actual == expected,
+            'missing_intervals': [show(x) for x in actual],
+        })
+    return {
+        'all_passed': all(x['passed'] for x in checks),
+        'checks': checks,
+        'database_access': False,
+        'writes_performed': 0,
+        'safe_to_publish': False,
+    }
+
+
+def dry_run_2200_missing_assignments(target_date):
+    """比较值班报名、现有排班及理论排班；发现问题时只报告，不写入。"""
+    from datetime import date as _date
+    date_str = _date.fromisoformat(str(target_date)).isoformat()
+
+    def minutes(value):
+        if value is None:
+            return None
+        raw = str(value).strip().lower().replace(" ", "")
+        if re.fullmatch(r"\d{1,2}(am|pm)", raw):
+            raw = raw.replace("am", ":00am").replace("pm", ":00pm")
+        for fmt in ("%H:%M:%S", "%H:%M", "%I:%M%p"):
+            try:
+                t = datetime.strptime(raw, fmt)
+                return t.hour * 60 + t.minute
+            except ValueError:
+                continue
+        return None
+
+    def gaps(start, end, intervals):
+        return _dry_run_2200_gaps(start, end, intervals)
+
+    def fmt(interval):
+        def one(m):
+            return f"{m // 60:02d}:{m % 60:02d}"
+        return f"{one(interval[0])}-{one(interval[1])}"
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, volunteer_id, name, role, start_time, end_time, status
+                FROM volunteer_schedule_signups
+                WHERE signup_date=%s AND role='值班'
+                  AND COALESCE(status,'pending') <> 'cancelled'
+                ORDER BY id
+            """, (date_str,))
+            signups = cur.fetchall()
+            cur.execute("""
+                SELECT id, signup_id, volunteer_id, name, role, shift_label,
+                       assigned_place, start_time, end_time,
+                       COALESCE(locked_by_admin,false) AS locked_by_admin
+                FROM volunteer_schedule_assignments
+                WHERE assignment_date=%s
+                  AND COALESCE(status,'assigned') <> 'cancelled'
+                ORDER BY id
+            """, (date_str,))
+            existing = cur.fetchall()
+            cur.execute("""
+                SELECT COALESCE(is_published,false) AS is_published
+                FROM schedule_day_flags WHERE flag_date=%s
+            """, (date_str,))
+            flag = cur.fetchone()
+
+    # 计算理论结果：本函数本身不调用任何写入函数。
+    _, _, proposed, _, _ = calculate_schedule_for_date(date_str)
+    proposed = [r for r in proposed if r.get('role') == '值班'
+                and r.get('signup_id') is not None]
+    by_signup = {}
+    for row in existing:
+        if row.get('role') == '值班' and row.get('signup_id') is not None:
+            by_signup.setdefault(int(row['signup_id']), []).append(row)
+    proposed_by_signup = {}
+    for row in proposed:
+        proposed_by_signup.setdefault(int(row['signup_id']), []).append(row)
+
+    report = {
+        'date': date_str,
+        'published': bool(flag and flag['is_published']),
+        'signup_count': len(signups),
+        'existing_assignment_count': len(existing),
+        'existing_locked_count': sum(bool(r['locked_by_admin']) for r in existing),
+        'fully_covered': [],
+        'missing': [],
+        'warnings': [],
+        'safe_to_publish': False,
+        'writes_performed': 0,
+    }
+    for signup in signups:
+        sid = int(signup['id'])
+        start, end = minutes(signup['start_time']), minutes(signup['end_time'])
+        if start is None or end is None or end <= start:
+            report['warnings'].append(f"报名 {sid} 时间无法解析：{signup['start_time']} ~ {signup['end_time']}")
+            continue
+        old_intervals = []
+        for row in by_signup.get(sid, []):
+            a, b = minutes(row['start_time']), minutes(row['end_time'])
+            if a is None or b is None or b <= a:
+                report['warnings'].append(f"已有排班 {row['id']} 时间格式错误")
+            else:
+                old_intervals.append((a, b))
+        missing = gaps(start, end, old_intervals)
+        if not missing:
+            report['fully_covered'].append({'signup_id': sid, 'name': signup['name']})
+            continue
+        proposed_intervals = []
+        for row in proposed_by_signup.get(sid, []):
+            a, b = minutes(row.get('start_time')), minutes(row.get('end_time'))
+            if a is not None and b is not None and b > a:
+                proposed_intervals.append((a, b))
+        theoretical_gaps = gaps(start, end, old_intervals + proposed_intervals)
+        report['missing'].append({
+            'signup_id': sid, 'name': signup['name'],
+            'missing_intervals': [fmt(x) for x in missing],
+            'theory_can_cover_missing': not bool(theoretical_gaps),
+            'uncovered_even_with_theory': [fmt(x) for x in theoretical_gaps],
+            'existing_locked': any(r['locked_by_admin'] for r in by_signup.get(sid, [])),
+        })
+    # 仅供人工审查；不代表可以安全自动发布。
+    return report
+
 def insert_2200_assignments_if_empty(target_date, assigned_rows):
     """22:00 专用：只允许空白日期插入；绝不删除既有排班。
 
@@ -2173,25 +2432,26 @@ def assign_jobs(fixed_people, signup_df, special_info, patch_mode=False,):
 
     if cleaning_count == 1:
         p1 = dict(unique_cleaners[0])
-
-        result["佛堂卫生"].append(dict(p1))
-        result["二楼卫生"].append(dict(p1))
-        result["楼梯卫生"].append(dict(p1))
+        if get_person_name(p1) in ("葉荔銖", "葉茘銖", "叶荔铢"):
+            result["二楼卫生"].append(p1)
+        else:
+            result["佛堂卫生"].append(p1)
 
     elif cleaning_count == 2:
         p1 = dict(unique_cleaners[0])
         p2 = dict(unique_cleaners[1])
-
-        result["佛堂卫生"].append(dict(p1))
-        result["二楼卫生"].append(dict(p2))
-        result["楼梯卫生"].append(dict(p1))
-        result["楼梯卫生"].append(dict(p2))
+        if get_person_name(p1) in ("葉荔銖", "葉茘銖", "叶荔铢"):
+            p1, p2 = p2, p1
+        result["佛堂卫生"].append(p1)
+        result["二楼卫生"].append(p2)
 
     elif cleaning_count >= 3:
         p1 = dict(unique_cleaners[0])
         p2 = dict(unique_cleaners[1])
         p3 = dict(unique_cleaners[2])
 
+        if get_person_name(p1) in ("葉荔銖", "葉茘銖", "叶荔铢"):
+            p1, p2 = p2, p1
         result["佛堂卫生"].append(dict(p1))
         result["二楼卫生"].append(dict(p2))
         result["楼梯卫生"].append(dict(p3))
@@ -2913,3 +3173,191 @@ def run_schedule_for_date(date_str):
 if __name__ == "__main__":
     main()
 
+
+
+# ============================================================================
+# Stage 6: 22:00 conservative duty-only merge. Never deletes or updates an
+# existing assignment. Not wired to the automatic tick until integration tests.
+# ============================================================================
+def _wa6_minutes(value):
+    from datetime import time as _time
+    if isinstance(value, _time):
+        return value.hour * 60 + value.minute
+    raw = str(value or '').strip().lower().replace(' ', '')
+    if re.fullmatch(r"\d{1,2}(am|pm)", raw):
+        raw = raw[:-2] + ':00' + raw[-2:]
+    for fmt in ('%H:%M:%S', '%H:%M', '%I:%M%p'):
+        try:
+            t = datetime.strptime(raw, fmt)
+            return t.hour * 60 + t.minute
+        except ValueError:
+            pass
+    raise ValueError(f'无法识别排班时间: {value!r}')
+
+
+def _wa6_gaps(start, end, intervals):
+    if start >= end:
+        raise ValueError('开始时间必须早于结束时间')
+    cursor, missing = start, []
+    for a, b in sorted(intervals):
+        if a >= b:
+            raise ValueError('现有排班时间错误')
+        if b <= cursor or a >= end:
+            continue
+        if a > cursor:
+            missing.append((cursor, min(a, end)))
+        cursor = max(cursor, min(b, end))
+        if cursor >= end:
+            break
+    if cursor < end:
+        missing.append((cursor, end))
+    return missing
+
+
+def _wa6_time(m):
+    return f'{m // 60:02d}:{m % 60:02d}:00'
+
+
+def plan_2200_safe_duty_merge(signups, existing, proposed):
+    """Pure/read-only planner: only adds proposed duty segments, clipped to gaps.
+
+    Fail closed if theoretical rows cannot cover every valid duty signup.
+    Existing rows of any role are never altered. No DB access here.
+    """
+    old_by_signup, new_by_signup = {}, {}
+    for row in existing:
+        if row.get('role') == '值班' and row.get('signup_id') is not None \
+                and str(row.get('status') or 'assigned') != 'cancelled':
+            old_by_signup.setdefault(int(row['signup_id']), []).append(row)
+    for row in proposed:
+        if row.get('role') == '值班' and row.get('signup_id') is not None:
+            new_by_signup.setdefault(int(row['signup_id']), []).append(row)
+    additions = []
+    for signup in signups:
+        if signup.get('role') != '值班' or signup.get('status') == 'cancelled':
+            continue
+        sid = int(signup['id'])
+        start, end = _wa6_minutes(signup['start_time']), _wa6_minutes(signup['end_time'])
+        old = [(_wa6_minutes(r['start_time']), _wa6_minutes(r['end_time']))
+               for r in old_by_signup.get(sid, [])]
+        pending = _wa6_gaps(start, end, old)
+        candidates = sorted(new_by_signup.get(sid, []),
+                            key=lambda r: _wa6_minutes(r['start_time']))
+        # Preserve proposed shift boundaries and assigned places. Only clip.
+        for row in candidates:
+            a, b = _wa6_minutes(row['start_time']), _wa6_minutes(row['end_time'])
+            if a >= b or not row.get('assigned_place'):
+                raise RuntimeError(f'报名 {sid} 理论排班缺少有效时间/地点')
+            for gap_a, gap_b in list(pending):
+                x, y = max(a, gap_a), min(b, gap_b)
+                if x >= y:
+                    continue
+                new_row = dict(row)
+                new_row.update(signup_id=sid, volunteer_id=signup['volunteer_id'],
+                               name=signup['name'], role='值班',
+                               start_time=_wa6_time(x), end_time=_wa6_time(y))
+                additions.append(new_row)
+                pending = _wa6_gaps(start, end, old + [
+                    (_wa6_minutes(r['start_time']), _wa6_minutes(r['end_time']))
+                    for r in additions if int(r['signup_id']) == sid])
+        if pending:
+            raise RuntimeError(f'报名 {sid} 理论排班仍有缺漏: {pending}；停止写入')
+    return additions
+
+
+def merge_2200_duty_assignments_guarded(target_date, proposed_rows=None):
+    """Opt-in PostgreSQL transaction for duty gaps ONLY. Not called by tick yet.
+
+    Guarded by WA_2200_ALLOW_DB_WRITE=1. Uses day row lock, repeats all reads
+    inside transaction and rolls back on incomplete coverage or any failure.
+    """
+    from datetime import date as _date
+    target = _date.fromisoformat(str(target_date)).isoformat()
+    if os.getenv('WA_2200_ALLOW_DB_WRITE', '').strip() != '1':
+        raise RuntimeError('WA_2200_ALLOW_DB_WRITE 未开启；拒绝写入')
+    if proposed_rows is None:
+        _, _, proposed_rows, _, _ = calculate_schedule_for_date(target)
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute('INSERT INTO schedule_day_flags (flag_date) VALUES (%s) '
+                        'ON CONFLICT (flag_date) DO NOTHING', (target,))
+            cur.execute('SELECT is_published FROM schedule_day_flags '
+                        'WHERE flag_date=%s FOR UPDATE', (target,))
+            state = cur.fetchone()
+            if state and state['is_published']:
+                raise RuntimeError('日期已发布；禁止22:00自动补排')
+            cur.execute('SELECT id, volunteer_id, name, role, start_time, end_time, status '
+                        'FROM volunteer_schedule_signups WHERE signup_date=%s '
+                        "AND role='值班' AND coalesce(status,'pending') <> 'cancelled' "
+                        'ORDER BY id FOR UPDATE', (target,))
+            signups = cur.fetchall()
+            cur.execute('SELECT signup_id, volunteer_id, name, role, start_time, '
+                        'end_time, status FROM volunteer_schedule_assignments '
+                        'WHERE assignment_date=%s FOR UPDATE', (target,))
+            existing = cur.fetchall()
+            additions = plan_2200_safe_duty_merge(signups, existing, proposed_rows)
+            for row in additions:
+                cur.execute("""INSERT INTO volunteer_schedule_assignments
+                    (signup_id, volunteer_id, name, assignment_date, role,
+                     shift_label, assigned_place, start_time, end_time,
+                     status, remarks, created_at)
+                    VALUES (%s,%s,%s,%s,'值班',%s,%s,%s,%s,'assigned',%s,now())""",
+                    (row['signup_id'], row['volunteer_id'], row['name'], target,
+                     row.get('shift_label'), row['assigned_place'],
+                     row['start_time'], row['end_time'],
+                     row.get('remarks') or row.get('备注')))
+            # Re-read actual DB rows before committing; any gap rolls back.
+            cur.execute('SELECT signup_id, volunteer_id, name, role, start_time, '
+                        'end_time, status FROM volunteer_schedule_assignments '
+                        'WHERE assignment_date=%s', (target,))
+            after = cur.fetchall()
+            plan_2200_safe_duty_merge(signups, after, [])
+        conn.commit()
+    return {'date': target, 'inserted': len(additions), 'status': 'merged'}
+
+
+# 22:00 atomic duty merge + publish. Non-duty assignments are preserved;
+# this function deliberately does not synthesize missing non-duty roles.
+def merge_and_publish_2200_atomic(target_date, proposed_rows=None):
+    from datetime import date as _date
+    target = _date.fromisoformat(str(target_date)).isoformat()
+    if os.getenv('WA_2200_ALLOW_DB_WRITE', '').strip() != '1':
+        raise RuntimeError('22:00 DB write guard disabled')
+    if proposed_rows is None:
+        _, _, proposed_rows, _, _ = calculate_schedule_for_date(target)
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute('INSERT INTO schedule_day_flags (flag_date) VALUES (%s) ON CONFLICT (flag_date) DO NOTHING', (target,))
+            cur.execute('SELECT is_published FROM schedule_day_flags WHERE flag_date=%s FOR UPDATE', (target,))
+            if cur.fetchone()['is_published']:
+                return {'date': target, 'status': 'already_published', 'inserted': 0}
+            cur.execute("""SELECT id, volunteer_id, name, role, start_time, end_time, status
+                FROM volunteer_schedule_signups WHERE signup_date=%s AND role='值班'
+                AND coalesce(status,'pending') <> 'cancelled' ORDER BY id FOR UPDATE""", (target,))
+            signups = cur.fetchall()
+            cur.execute('SELECT signup_id, volunteer_id, name, role, start_time, end_time, status FROM volunteer_schedule_assignments WHERE assignment_date=%s FOR UPDATE', (target,))
+            existing = cur.fetchall()
+            additions = plan_2200_safe_duty_merge(signups, existing, proposed_rows)
+            for row in additions:
+                cur.execute("""INSERT INTO volunteer_schedule_assignments
+                    (signup_id, volunteer_id, name, assignment_date, role, shift_label,
+                     assigned_place, start_time, end_time, status, remarks, created_at)
+                    VALUES (%s,%s,%s,%s,'值班',%s,%s,%s,%s,'assigned',%s,now())""",
+                    (row['signup_id'], row['volunteer_id'], row['name'], target,
+                     row.get('shift_label'), row['assigned_place'], row['start_time'],
+                     row['end_time'], row.get('remarks') or row.get('备注')))
+            cur.execute("SELECT signup_id, volunteer_id, name, role, start_time, end_time, status FROM volunteer_schedule_assignments WHERE assignment_date=%s AND coalesce(status,'assigned') <> 'cancelled'", (target,))
+            after = cur.fetchall()
+            plan_2200_safe_duty_merge(signups, after, [])
+            if not after:
+                raise RuntimeError('22:00 no assignments: refusing to publish')
+            cur.execute("""UPDATE volunteer_schedule_signups SET status='assigned'
+                WHERE signup_date=%s AND role='值班' AND coalesce(status,'pending') <> 'cancelled'
+                AND id = ANY(%s)""", (target, [r['id'] for r in signups]))
+            cur.execute("""UPDATE schedule_day_flags SET is_published=true,
+                published_at=now(), published_by='AUTO_2200', need_republish=false
+                WHERE flag_date=%s AND coalesce(is_published,false)=false""", (target,))
+            if cur.rowcount != 1:
+                raise RuntimeError('22:00 publish state race; rolled back')
+        conn.commit()
+    return {'date': target, 'status': 'published', 'inserted': len(additions)}

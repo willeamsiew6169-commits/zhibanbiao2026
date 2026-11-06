@@ -11,6 +11,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).with_name(".env.agent"))
 
 
 def main():
@@ -24,7 +28,12 @@ def main():
         print('Outside 22:00–22:19 MYT; no request sent.', flush=True)
         return 0
 
-    url = (os.getenv('WA_API_URL') or os.getenv('URL') or '').strip().rstrip('/')
+    url = (
+        os.getenv("WA_SERVER_URL")
+        or os.getenv("WA_API_URL")
+        or os.getenv("URL")
+        or ""
+    ).strip().rstrip("/")
     token = (os.getenv('WHATSAPP_AGENT_TOKEN') or '').strip()
     if not url or not url.startswith('https://') or not token:
         print('Missing WA_API_URL (https://...) or WHATSAPP_AGENT_TOKEN.', file=sys.stderr)

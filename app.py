@@ -981,10 +981,10 @@ async function lookupVolunteer() {
     }
 
     if (data.today_assignments && data.today_assignments.length > 0) {
-      html += `<br><hr><b>📅 今天正式安排</b>`;
+      html += `<br><hr><b>📅 今天工作安排 / Today's Duties</b>`;
       data.today_assignments.forEach(a => {
         const mark = a.state === "completed" ? (a.auto_signed_out ? "⚠️ 已自动签退" : "✅ 已完成") :
-                     a.state === "active" ? "🟢 进行中" : "🕒 待值班";
+                     a.state === "active" ? "🟢 进行中" : "🕒 待开始";
         html += `
           <div style="margin-top:10px;">
             ${mark}<br>
@@ -1115,7 +1115,7 @@ function refreshRoleAction() {
   }
   // 已完成某一轮值班，不影响同一天其他岗位签到。
   const pending = (data.today_assignments || []).find(a => a.role === role && a.state === 'pending');
-  if (pending) assignmentInput.value = pending.id;
+  if (pending && pending.id && !pending.display_only) assignmentInput.value = pending.id;
   signin.style.display = '';
 }
 
@@ -1914,6 +1914,22 @@ def api_volunteer(volunteer_id):
                     order by start_time, assigned_place
                 """, (v.get("编号"), today))
                 today_assignments = cur.fetchall()
+                # 膳食组报名独立于正式排班；只补显示，不能伪造 assignment_id。
+                cur.execute("""
+                    SELECT id, meal_role, start_time, end_time
+                    FROM volunteer_schedule_signups
+                    WHERE volunteer_id = ANY(%s) AND signup_date = %s
+                      AND role = '膳食'
+                      AND coalesce(status, 'pending') <> 'cancelled'
+                    ORDER BY created_at, id
+                """, (get_assignment_id_candidates(v, volunteer_id), today))
+                meal_signups = cur.fetchall() or []
+                cur.execute("""
+                    SELECT role, end_time FROM attendance
+                    WHERE volunteer_id = %s AND date = %s
+                    ORDER BY id DESC
+                """, (v.get('编号'), now_date_str()))
+                today_attendance_roles = cur.fetchall() or []
                 cur.execute("""
                     select assignment_id from volunteer_attendance_logs
                     where volunteer_id = %s and attendance_date = %s
@@ -1942,6 +1958,46 @@ def api_volunteer(volunteer_id):
                     """, (v.get("编号"),))
                     paid_row = cur.fetchone()
                     paid_until = paid_row.get("paid_until") if paid_row else None
+        # 固定佛台由排班系统的「Excel 固定轮值 + 当日云端覆盖」决定。
+        # 不将它插入正式排班表，避免破坏发布、自动补排逻辑。
+        from schedule.schedule_web import get_fixed_buddha_for_date
+        from opencc import OpenCC
+        _cc = OpenCC('t2s')
+        _normalize_name = lambda name: ''.join(_cc.convert(str(name or '')).split())
+        fixed_buddha_names = get_fixed_buddha_for_date(today.strftime('%Y-%m-%d'))
+        is_fixed_buddha = _normalize_name(v.get('姓名')) in {
+            _normalize_name(name) for name in fixed_buddha_names
+        }
+
+        def _extra_state(role):
+            records = [r for r in today_attendance_roles if r.get('role') == role]
+            if any(not r.get('end_time') for r in records):
+                return 'active'
+            if records:
+                return 'completed'
+            return 'pending'
+
+        if is_fixed_buddha and not any(a.get('role') in ('佛台', '整理佛台') for a in today_assignments):
+            today_assignments.append({
+                'id': None, 'role': '佛台', 'assigned_place': '整理佛台',
+                'start_time': '8:00am', 'end_time': '完成佛台工作',
+                'shift_label': '', 'state': _extra_state('佛台'),
+                'display_only': True,
+            })
+        if meal_signups and not any(a.get('role') == '膳食' for a in today_assignments):
+            meal = meal_signups[0]
+            meal_position = next((i for i, r in enumerate(meal_signups)
+                                  if r['id'] == meal['id']), 0)
+            meal_role = meal.get('meal_role') or ('派餐义工' if meal_position < 9 else '候补义工')
+            today_assignments.append({
+                'id': None, 'role': '膳食', 'assigned_place': meal_role,
+                'start_time': meal.get('start_time') or '8:00am',
+                'end_time': meal.get('end_time') or '2:00pm',
+                'shift_label': '', 'state': _extra_state('膳食'),
+                'display_only': True,
+            })
+        today_assignments.sort(key=lambda x: str(x.get('start_time') or ''))
+
         completed_ids = {int(x["assignment_id"]) for x in completed_rows if x.get("assignment_id") is not None}
         auto_ids = {int(x["assignment_id"]) for x in completed_rows
                     if x.get("assignment_id") is not None and "系统自动签退" in str(x.get("remarks") or "")}
@@ -1952,6 +2008,8 @@ def api_volunteer(volunteer_id):
         current_assignment_text = ""
 
         for a in today_assignments:
+            if a.get('display_only'):
+                continue
             aid = int(a.get("id") or 0)
             if aid == open_assignment_id:
                 a["state"] = "active"
@@ -1970,13 +2028,14 @@ def api_volunteer(volunteer_id):
         elif not today_assignments:
             attendance_action = "walkin"
         elif today_assignments:
-            pending = next((a for a in today_assignments if a.get("state") == "pending"), None)
+            pending = next((a for a in today_assignments if a.get("state") == "pending" and not a.get('display_only')), None)
             if pending:
                 attendance_action = "signin"
                 current_assignment_id = pending.get("id")
                 current_assignment_text = f"{pending.get('start_time') or ''} ～ {pending.get('end_time') or ''} {pending.get('assigned_place') or ''}".strip()
             else:
-                attendance_action = "completed"
+                attendance_action = ("walkin" if any(a.get('display_only') and a.get('state') == 'pending'
+                                                       for a in today_assignments) else "completed")
 
         safe_v = {
             "编号": v.get("编号", ""),

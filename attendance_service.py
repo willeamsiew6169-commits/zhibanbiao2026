@@ -669,6 +669,11 @@ def auto_signout_unfinished_today():
             """, (today,))
             for row in cur.fetchall() or []:
                 cutoff, ids = _scheduled_end_minutes(cur, row)
+                # 固定佛台不一定写入正式排班表；现场签到亦按 10:00 结束。
+                # 10:30 后由正常网页请求触发自动签退，避免误处理其他岗位。
+                altar_fallback = cutoff is None and str(row.get("role") or "").strip() == "佛台"
+                if altar_fallback:
+                    cutoff = 10 * 60
                 if cutoff is None or now_minutes < cutoff + 30:
                     continue
                 credited_end = f"{cutoff // 60:02d}:{cutoff % 60:02d}"
@@ -679,12 +684,27 @@ def auto_signout_unfinished_today():
                     update attendance set end_time=%s, hours=%s, remark=%s
                     where id=%s
                 """, (credited_end, hours, remark, row["id"]))
-                cur.execute("""
-                    update volunteer_attendance_logs
-                    set check_out_time=now(),
-                        remarks=concat_ws('｜', nullif(remarks, ''), '系统自动签退；服务计至排班结束')
-                    where assignment_id=any(%s) and volunteer_id=%s
-                      and attendance_date=%s and check_out_time is null
-                """, (ids, row["volunteer_id"], today))
+                if altar_fallback:
+                    # 只关闭本人最新一笔尚未签退的佛台现场签到日志。
+                    cur.execute("""
+                        update volunteer_attendance_logs
+                        set check_out_time=now(),
+                            remarks=concat_ws('｜', nullif(remarks, ''), '系统自动签退；佛台服务计至10:00')
+                        where id = (
+                            select id from volunteer_attendance_logs
+                            where volunteer_id=%s and attendance_date=%s
+                              and actual_role='佛台' and assignment_id is null
+                              and check_out_time is null
+                            order by id desc limit 1
+                        )
+                    """, (row["volunteer_id"], today))
+                else:
+                    cur.execute("""
+                        update volunteer_attendance_logs
+                        set check_out_time=now(),
+                            remarks=concat_ws('｜', nullif(remarks, ''), '系统自动签退；服务计至排班结束')
+                        where assignment_id=any(%s) and volunteer_id=%s
+                          and attendance_date=%s and check_out_time is null
+                    """, (ids, row["volunteer_id"], today))
                 count += 1
     return {"ok": True, "msg": f"自动签退完成：{count} 位", "count": count}
