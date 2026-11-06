@@ -6260,7 +6260,7 @@ def whatsapp_automation_admin():
         ("wa_test_mode", "测试模式 / Test mode"),
         ("wa_notice_1900", "🕖 19:00 报名通知 / Signup notice"),
         ("wa_roster_2200", "🕙 22:00 正式值班表 / Full roster"),
-        ("wa_late_signup", "发布后新报名通知（尚未开发）/ Late signup (not implemented)"),
+        ("wa_late_signup", "🌅 早上新增义工汇总通知（普通日 07:00／大日子 05:30）/ Morning late-signup summary"),
         ("wa_auto_publish_2200", "🕙 22:00 自动排班发布 / Auto publish"),
     )
     message = ""
@@ -6274,18 +6274,14 @@ def whatsapp_automation_admin():
             else:
                 # 测试阶段：只有测试模式开启时才允许启用 22:00 功能。
                 test_mode_requested = request.form.get("wa_test_mode") == "on"
-                restricted_keys = ("wa_roster_2200", "wa_auto_publish_2200")
+                restricted_keys = ("wa_roster_2200", "wa_auto_publish_2200", "wa_late_signup")
                 rejected = (not test_mode_requested and any(
                     request.form.get(key) == "on" for key in restricted_keys
                 ))
                 if rejected:
-                    message = "❌ 请先开启测试模式，才能启用 22:00 功能 / Enable test mode first"
+                    message = "❌ 请先开启测试模式，才能启用 22:00 或早上通知 / Enable test mode first"
                 else:
                     for key, _ in flags:
-                        if key == "wa_late_signup":
-                            # 后续阶段才开放；始终保持关闭。
-                            save_schedule_setting(key, "false")
-                            continue
                         enabled = request.form.get(key) == "on"
                         if key in restricted_keys and not test_mode_requested:
                             enabled = False
@@ -6342,13 +6338,10 @@ TEST GROUP ONLY. Test messages may be sent when the Windows Agent is running.</p
 {% if message %}<p class="success">{{ message }}</p>{% endif %}
 <div class="card"><form method="post"><input type="hidden" name="action" value="save">
 {% for key,label in flags %}
-{% if key == 'wa_late_signup' %}
-<label><span style="color:#888">{{ label }}</span><input type="checkbox" disabled></label>
-{% else %}
 <label><span>{{ label }}</span><input type="checkbox" name="{{ key }}" {% if current[key] %}checked{% endif %}></label>
-{% endif %}
 {% endfor %}
-<p class="warning">⚠️ 22:00 开关仅限测试模式；开启自动发布可能修改共用数据库中的真实排班。请先保持两个 22:00 开关关闭。<br>22:00 switches require test mode. Auto publish may modify live shared schedule data.</p>
+<p class="warning">⚠️ 22:00 与早上通知开关仅限测试模式；开启自动发布可能修改共用数据库中的真实排班。请先保持两个 22:00 开关关闭。<br>22:00 switches require test mode. Auto publish may modify live shared schedule data.</p>
+<p class="warning">🌅 早上通知只汇总昨晚正式值班表之后新增的值班／卫生义工；需要 22:00 快照及 Windows Agent 定时检查。<br>Morning summary requires the 22:00 snapshot and a scheduled Windows Agent tick.</p>
 <label><span>🕖 报名通知时间（马来西亚）<br>Signup notice time (MYT)</span><input type="time" name="wa_notice_time" value="{{ notice_time }}" required></label>
 <p class="warning">定时任务需要每分钟运行一次检查脚本；设置时间不会自动修改 Windows Task Scheduler。<br>Run the Windows tick every minute; changing this time does not reconfigure Task Scheduler.</p>
 <button type="submit">💾 保存设置 / Save settings</button></form></div>
