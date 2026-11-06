@@ -167,6 +167,27 @@ def same_role_contiguous_group(assignments, selected):
     return ordered[left:right + 1]
 
 
+
+
+def is_fixed_buddha_volunteer(volunteer_name, duty_date):
+    """Match the effective fixed altar roster (including day overrides).
+
+    Uses OpenCC to handle traditional/simplified name spellings.  An explicit
+    empty override means no assigned altar volunteers on that day.
+    """
+    from opencc import OpenCC
+    from schedule.schedule_web import get_fixed_buddha_for_date
+
+    converter = OpenCC("t2s")
+    def normalized(value):
+        return "".join(converter.convert(str(value or "")).split()).casefold()
+
+    target = normalized(volunteer_name)
+    return bool(target) and any(
+        normalized(name) == target
+        for name in get_fixed_buddha_for_date(str(duty_date))
+    )
+
 def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignment_id=None) -> tuple[bool, str]:
     raw_id = str(volunteer_id or "").strip()
     role = str(role or "").strip()
@@ -284,6 +305,14 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
 
         return True, f"{volunteer['姓名']} 已签到\n\n岗位：{role}\n安排：{job_text}\n\n同岗位连续换地点无需重新签到；完成后请签退。"
 
+    # 固定佛台不写普通 assignments：依有效固定名单判断正式签到。
+    fixed_altar = role == "佛台" and is_fixed_buddha_volunteer(
+        volunteer["姓名"], now_date_str()
+    )
+    fallback_signup = 1 if fixed_altar else 0
+    fallback_walk_in = not fixed_altar
+    fallback_remark = "按固定佛台安排签到" if fixed_altar else f"现场签到：{role}"
+
     # 没有该岗位正式排班：允许符合政策的现场签到。
     if role not in ROLES:
         return False, "今天没有排班记录，请选择实际协助岗位。"
@@ -295,18 +324,20 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
                 (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
                 values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (
-                now_date_str(), volunteer["编号"], volunteer["姓名"], 0, 1, role,
-                now_time_str(), "", None, card_no, f"现场签到：{role}"
+                now_date_str(), volunteer["编号"], volunteer["姓名"], fallback_signup, 1, role,
+                now_time_str(), "", None, card_no, fallback_remark
             ))
             cur.execute("""
                 insert into volunteer_attendance_logs (
                     assignment_id, volunteer_id, name, attendance_date,
                     actual_role, actual_place, walk_in, remarks
-                ) values (null,%s,%s,%s,%s,%s,true,%s)
+                ) values (null,%s,%s,%s,%s,%s,%s,%s)
             """, (
                 volunteer["编号"], volunteer["姓名"], now_date_str(), role, role,
-                f"现场签到：{role}"
+                fallback_walk_in, fallback_remark
             ))
+    if fixed_altar:
+        return True, f"{volunteer['姓名']} 已按固定佛台安排签到\n\n岗位：佛台\n\n完成后请记得签退。"
     return True, f"{volunteer['姓名']} 已签到\n\n今天没有正式排班记录。\n已登记：{role}\n\n完成后请记得签退。"
 
 

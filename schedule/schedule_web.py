@@ -3742,14 +3742,42 @@ def schedule_attendance_status():
         else:
             not_checked_in_raw.append(a)
 
+    # 固定佛台由 Excel 轮值和负责人当天覆盖名单决定，不一定有普通排班 ID。
+    # 旧签到记录即使 walk_in=True，仍按当天有效名单在页面上归入正式签到。
+    fixed_altar_names = {
+        "".join(cc.convert(str(name or "")).split()).casefold()
+        for name in get_fixed_buddha_for_date(date_str)
+    }
+
+    def is_fixed_altar_checkin(log):
+        if str(log.get("actual_role") or "").strip() != "佛台":
+            return False
+        name = "".join(cc.convert(str(log.get("name") or "")).split()).casefold()
+        return bool(name) and name in fixed_altar_names
+
+    fixed_altar_logs = []
     for l in logs:
-        if l.get("walk_in"):
+        if is_fixed_altar_checkin(l):
+            fixed_altar_logs.append(l)
+        elif l.get("walk_in"):
             walk_ins_raw.append(l)
 
         if not l.get("check_out_time"):
             not_checked_out_raw.append(l)
 
     checked_in = group_by_person(checked_in_raw, source="assignment")
+    for person in group_by_person(fixed_altar_logs, source="log"):
+        key = person.get("volunteer_id") or person.get("name")
+        existing = next((p for p in checked_in if (p.get("volunteer_id") or p.get("name")) == key), None)
+        if existing:
+            for field, value in (("role_text", "佛台"), ("place_text", "佛台")):
+                parts = [x.strip() for x in existing[field].split(" / ") if x.strip()]
+                if value not in parts:
+                    parts.append(value)
+                    existing[field] = " / ".join(parts)
+        else:
+            checked_in.append(person)
+
     not_checked_in = group_by_person(not_checked_in_raw, source="assignment")
     walk_ins = group_by_person(walk_ins_raw, source="log")
     not_checked_out = group_by_person(not_checked_out_raw, source="log")
