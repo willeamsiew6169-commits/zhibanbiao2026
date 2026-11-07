@@ -3369,3 +3369,85 @@ def merge_and_publish_2200_atomic(target_date, proposed_rows=None):
                 raise RuntimeError('22:00 publish state race; rolled back')
         conn.commit()
     return {'date': target, 'status': 'published', 'inserted': len(additions)}
+
+
+# 22:00 complete automatic scheduling, atomic with publishing.
+# The calculation is shared with the admin "重新自动排班" button.
+def publish_full_schedule_2200_atomic(target_date):
+    from datetime import date as _date
+    target = _date.fromisoformat(str(target_date)).isoformat()
+    if os.getenv("WA_2200_ALLOW_DB_WRITE", "").strip() != "1":
+        raise RuntimeError("22:00 写入保护未开启：仅允许在独立测试数据库验证后启用")
+    # Compute before starting the transaction. Failure cannot modify DB.
+    _, _, proposed, _, _ = calculate_schedule_for_date(target)
+    rows = []
+    for row in proposed:
+        name = row.get('name') or row.get('姓名')
+        role = row.get('role') or row.get('岗位')
+        place = row.get('assigned_place')
+        if not name or not role or not place:
+            raise RuntimeError('22:00 排班有缺少姓名、岗位或地点的记录；停止发布')
+        if not row.get('start_time') or not row.get('end_time'):
+            raise RuntimeError(f'22:00 排班 {name} ({role}) 缺少时间；停止发布')
+        rows.append(row)
+    if not rows:
+        raise RuntimeError('22:00 无有效排班记录；停止发布')
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute('INSERT INTO schedule_day_flags (flag_date) VALUES (%s) ON CONFLICT (flag_date) DO NOTHING', (target,))
+            cur.execute('SELECT is_published FROM schedule_day_flags WHERE flag_date=%s FOR UPDATE', (target,))
+            state = cur.fetchone()
+            if state and state['is_published']:
+                return {'status': 'already_published', 'date': target, 'inserted': 0}
+            # Fail closed if somebody has already made manual/partial assignments.
+            # Do not silently erase administrator choices.
+            cur.execute('SELECT count(*) AS n FROM volunteer_schedule_assignments WHERE assignment_date=%s', (target,))
+            if int(cur.fetchone()['n']):
+                raise RuntimeError('22:00 检测到已有排班；为保护人工安排，停止自动覆盖，请负责人检查')
+
+            cur.execute('''SELECT id, role, start_time, end_time FROM volunteer_schedule_signups
+                WHERE signup_date=%s AND coalesce(status,'pending') <> 'cancelled' FOR UPDATE''', (target,))
+            signups = cur.fetchall()
+            by_signup = {}
+            for row in rows:
+                sid = row.get('signup_id') or row.get('id')
+                if sid is not None:
+                    by_signup.setdefault(str(sid), []).append(row)
+            for signup in signups:
+                if signup['role'] not in ('值班', '卫生'):
+                    continue
+                related = by_signup.get(str(signup['id']), [])
+                if not related:
+                    raise RuntimeError(f"22:00 报名 {signup['id']} ({signup['role']}) 未安排，停止发布")
+                if signup['role'] == '值班':
+                    required_a, required_b = _wa6_minutes(signup['start_time']), _wa6_minutes(signup['end_time'])
+                    intervals = sorted((_wa6_minutes(r['start_time']), _wa6_minutes(r['end_time'])) for r in related)
+                    cursor = required_a
+                    for a, z in intervals:
+                        if a > cursor:
+                            raise RuntimeError(f"22:00 值班报名 {signup['id']} 时间未完整覆盖")
+                        cursor = max(cursor, z)
+                    if cursor < required_b:
+                        raise RuntimeError(f"22:00 值班报名 {signup['id']} 时间未完整覆盖")
+
+            for row in rows:
+                sid = row.get('signup_id') or row.get('id')
+                cur.execute('''INSERT INTO volunteer_schedule_assignments
+                    (signup_id,volunteer_id,name,assignment_date,role,shift_label,
+                     assigned_place,start_time,end_time,status,remarks,created_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'assigned',%s,now())''',
+                    (sid,row.get('volunteer_id'),row.get('name') or row.get('姓名'),target,
+                     row.get('role') or row.get('岗位'),row.get('shift_label'),
+                     row['assigned_place'],row.get('start_time'),row.get('end_time'),
+                     row.get('remarks') or row.get('备注')))
+            cur.execute('''UPDATE volunteer_schedule_signups SET status='assigned'
+                WHERE signup_date=%s AND coalesce(status,'pending') <> 'cancelled'
+                AND id=ANY(%s)''', (target, [int(s['id']) for s in signups if str(s['id']) in by_signup]))
+            cur.execute('''UPDATE schedule_day_flags SET is_published=true,
+                published_at=now(),published_by='AUTO_2200',need_republish=false
+                WHERE flag_date=%s AND coalesce(is_published,false)=false''', (target,))
+            if cur.rowcount != 1:
+                raise RuntimeError('22:00 发布状态冲突，事务回滚')
+        conn.commit()
+    return {'status':'published','date':target,'inserted':len(rows)}

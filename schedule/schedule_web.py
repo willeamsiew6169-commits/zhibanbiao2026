@@ -1007,26 +1007,100 @@ def build_signup_notice_whatsapp(date_str):
         "黄活动中心": [],
     }
 
+    # 19:00 初步表：读取全部有效报名，不依赖 22:00 才产生的正式排班。
+    # 只在内存中预览地点，绝不写入 assignments / 发布标志。
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                select *
-                from volunteer_schedule_assignments
-                where assignment_date = %s
-                and coalesce(status, 'assigned') <> 'cancelled'
-                order by start_time, name
+                SELECT id, volunteer_id, name, role, start_time, end_time
+                FROM volunteer_schedule_signups
+                WHERE signup_date = %s
+                  AND COALESCE(status, 'pending') <> 'cancelled'
+                  AND role IN ('卫生', '值班')
+                ORDER BY start_time NULLS LAST, id
             """, (date_str,))
-            rows = cur.fetchall()
+            signups = cur.fetchall()
+            cur.execute("""
+                SELECT signup_id, volunteer_id, name, role, assigned_place,
+                       shift_label, start_time, end_time
+                FROM volunteer_schedule_assignments
+                WHERE assignment_date = %s
+                  AND COALESCE(status, 'assigned') <> 'cancelled'
+                ORDER BY start_time NULLS LAST, name
+            """, (date_str,))
+            assigned_rows = cur.fetchall()
 
-    for r in rows:
-        place = r.get("assigned_place")
-        shift = r.get("shift_label")
-        key = None
+    # 卫生：优先沿用已经补排的地点；其余按佛堂、二楼、楼梯依次预览。
+    cleaning_places = ('佛堂卫生', '二楼卫生', '楼梯卫生')
+    assigned_by_signup = {}
+    assigned_by_person = {}
+    for row in assigned_rows:
+        if row.get('role') != '卫生' or row.get('assigned_place') not in cleaning_places:
+            continue
+        if row.get('signup_id') is not None:
+            assigned_by_signup[row['signup_id']] = row['assigned_place']
+        assigned_by_person[str(row.get('volunteer_id') or row.get('name') or '')] = row['assigned_place']
 
-        # 19:00 报名通知只显示已安排的卫生人员。
-        # 值班人员必须等到 22:00 正式值班表才显示。
-        if place in ["佛堂卫生", "二楼卫生", "楼梯卫生"]:
-            groups[place].append(r)
+    def _minutes(value):
+        """支持数据库中的 11:00am、6:00pm、18:00 及 time 对象。"""
+        if value is None:
+            return None
+        if hasattr(value, 'hour'):
+            return value.hour * 60 + value.minute
+        import re
+        value = str(value).strip().lower().replace(' ', '')
+        match = re.fullmatch(r'(\d{1,2}):(\d{2})(am|pm)?', value)
+        if not match:
+            return None
+        hour, minute = int(match.group(1)), int(match.group(2))
+        meridiem = match.group(3)
+        if minute > 59:
+            return None
+        if meridiem:
+            if not 1 <= hour <= 12:
+                return None
+            hour = hour % 12 + (12 if meridiem == 'pm' else 0)
+        elif hour > 23:
+            return None
+        return hour * 60 + minute
+
+    def _clock(minutes):
+        hour, minute = divmod(minutes, 60)
+        return f"{hour % 12 or 12}:{minute:02d}{'am' if hour < 12 else 'pm'}"
+
+    duty_signups = []
+    for signup in signups:
+        role = signup.get('role')
+        if role == '卫生':
+            person_key = str(signup.get('volunteer_id') or signup.get('name') or '')
+            place = (assigned_by_signup.get(signup.get('id'))
+                     or assigned_by_person.get(person_key))
+            if place not in cleaning_places:
+                place = min(cleaning_places, key=lambda k: len(groups[k]))
+            groups[place].append(signup)
+        elif role == '值班':
+            duty_signups.append(signup)
+
+    # 值班：按上午／下午拆开，地点仅供 19:00 初步通知参考。
+    # 22:00 仍由原自动排班器正式计算，可能重新调整。
+    duty_counts = {key: 0 for key in ('橙观音堂', '橙活动中心', '黄观音堂', '黄活动中心')}
+    for signup in duty_signups:
+        start = _minutes(signup.get('start_time'))
+        end = _minutes(signup.get('end_time'))
+        if start is None or end is None or end <= start:
+            continue
+        for part_start, part_end, prefix in ((600, 840, '橙'), (840, 1080, '黄')):
+            seg_start, seg_end = max(start, part_start), min(end, part_end)
+            if seg_start >= seg_end:
+                continue
+            place_a, place_b = prefix + '观音堂', prefix + '活动中心'
+            key = place_a if duty_counts[place_a] <= duty_counts[place_b] else place_b
+            duty_counts[key] += 1
+            groups[key].append({
+                'name': signup.get('name'),
+                'start_time': _clock(seg_start),
+                'end_time': _clock(seg_end),
+            })
 
     def format_people(rows):
         if not rows:
@@ -3704,7 +3778,13 @@ def schedule_signup_notice():
     else:
         default_date = now.strftime("%Y-%m-%d")
 
-    date_str = default_date
+    # 优先使用负责人页面所选日期；不能每次都强制改为今日/明日。
+    selected_date = (request.args.get("date") or "").strip()
+    try:
+        datetime.strptime(selected_date, "%Y-%m-%d")
+        date_str = selected_date
+    except ValueError:
+        date_str = default_date
 
     text = build_signup_notice_whatsapp(date_str)
 

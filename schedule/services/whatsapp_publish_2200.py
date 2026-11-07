@@ -1,7 +1,7 @@
 """22:00 MYT: independent auto-publish and TEST_GROUP_ONLY roster notification.
 
-SAFETY: database writes are opt-in via WA_2200_ALLOW_DB_WRITE=1.
-Never turn this on while production and test services share the same database.
+SAFETY: automatic publishing requires explicit admin switch and full transactional validation.
+Do not deploy without staging tests and a database backup.
 """
 import logging
 import os
@@ -111,22 +111,19 @@ def run_2200_tick():
 
 def _execute_locked(target, marker, auto_publish, send_roster):
     from schedule.services.publish_service import is_schedule_published
-    from schedule.builders.schedule_builder import merge_and_publish_2200_atomic
+    from schedule.builders.schedule_builder import publish_full_schedule_2200_atomic
     from schedule.services.whatsapp_service import build_whatsapp_from_assigned
 
     published = is_schedule_published(target)
     preserved = bool(_scalar('SELECT count(*) FROM volunteer_schedule_assignments WHERE assignment_date=%s', (target,)))
-    # 已发布的日期仅检查并发送，不需要开放数据库排班写入权限。
-    # 未发布时，必须先通过明确的 DB 写入安全许可，才能执行自动排班。
+    # 开启自动发布才允许写入；使用与负责人蓝色按钮相同的排班计算器。
+    # 事务中同时写入全部岗位并发布；失败则整体回滚。
     if auto_publish and not published:
-        if os.getenv('WA_2200_ALLOW_DB_WRITE', '').strip() != '1':
-            return {
-                'status': 'db_write_guard_off',
-                'target_date': target,
-                'detail': '日期尚未发布；自动排班需要独立测试数据库及 WA_2200_ALLOW_DB_WRITE=1',
-            }
-        result = merge_and_publish_2200_atomic(target)
-        LOG.info('22:00 atomic merge/publish result: %s', result)
+        if os.getenv("WA_2200_ALLOW_DB_WRITE", "").strip() != "1":
+            return {"status": "db_write_guard_off", "target_date": target,
+                    "detail": "22:00 自动排班尚未通过独立测试数据库验证，禁止写入正式数据库"}
+        result = publish_full_schedule_2200_atomic(target)
+        LOG.info('22:00 full auto schedule/publish result: %s', result)
         published = is_schedule_published(target)
         if not published:
             raise RuntimeError('22:00 publish not confirmed')

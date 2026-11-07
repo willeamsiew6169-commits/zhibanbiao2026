@@ -24,6 +24,7 @@ DEFAULT_SCHEDULE_SETTINGS = {
     # 手动临时开放仅持续到当前活动窗口结束；不永久影响下一次佛日。
     "meal_manual_event_date": "",
     "meal_manual_state": "",
+    "meal_manual_expires_at": "",
 }
 
 
@@ -83,30 +84,60 @@ def current_meal_event_date(now=None):
     return None
 
 
-def is_meal_signup_open(now=None):
-    """自动窗口 + 仅本次活动有效的负责人覆盖。"""
+def _meal_manual_override(now, settings):
+    """读取有效的人工覆盖；过期后自动恢复佛日规则。"""
+    state = str(settings.get("meal_manual_state", "")).strip().lower()
+    if state not in ("true", "false"):
+        return None
+
     event_date = current_meal_event_date(now)
-    if event_date is None:
-        return False
+    if event_date is not None and settings.get("meal_manual_event_date") == event_date.isoformat():
+        return state == "true"
+
+    # 非佛日的临时人工开放，到指定时间自动失效。
+    if settings.get("meal_manual_event_date") == "":
+        expiry_text = str(settings.get("meal_manual_expires_at", "")).strip()
+        try:
+            expiry = datetime.fromisoformat(expiry_text)
+            if expiry.tzinfo is None and now.tzinfo is not None:
+                expiry = expiry.replace(tzinfo=now.tzinfo)
+            if now < expiry:
+                return state == "true"
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def is_meal_signup_open(now=None):
+    """佛日自动开放；负责人也可临时手动开启或关闭。"""
+    now = now or malaysia_now()
     settings = get_schedule_settings()
-    if settings.get("meal_manual_event_date") == event_date.isoformat():
-        state = settings.get("meal_manual_state", "").strip().lower()
-        if state in ("true", "false"):
-            return state == "true"
-    return True
+    override = _meal_manual_override(now, settings)
+    if override is not None:
+        return override
+    return current_meal_event_date(now) is not None
 
 
 def set_meal_signup_override(enabled, updated_by="admin"):
-    """仅对当前活动窗口生效。非窗口期间不创建未来活动覆盖。"""
-    event_date = current_meal_event_date()
-    if event_date is None:
-        return False
+    """佛日内覆盖本次活动；其他日期临时覆盖至下一天14:00。"""
+    now = malaysia_now()
+    event_date = current_meal_event_date(now)
+    if event_date is not None:
+        manual_event_date = event_date.isoformat()
+        expires_at = ""
+    else:
+        manual_event_date = ""
+        # 非活动窗口临时开关不会永久影响以后的佛日。
+        expires_at = datetime.combine(now.date() + timedelta(days=1), time(14, 0)).isoformat()
+
+    values = (
+        ("meal_manual_event_date", manual_event_date),
+        ("meal_manual_state", "true" if enabled else "false"),
+        ("meal_manual_expires_at", expires_at),
+    )
     with get_conn() as conn:
         with conn.cursor() as cur:
-            for key, value in (
-                ("meal_manual_event_date", event_date.isoformat()),
-                ("meal_manual_state", "true" if enabled else "false"),
-            ):
+            for key, value in values:
                 cur.execute("""
                     insert into schedule_settings (key, value, updated_at, updated_by)
                     values (%s, %s, %s, %s)
@@ -114,7 +145,7 @@ def set_meal_signup_override(enabled, updated_by="admin"):
                     do update set value = excluded.value,
                                   updated_at = excluded.updated_at,
                                   updated_by = excluded.updated_by
-                """, (key, value, malaysia_now(), updated_by))
+                """, (key, value, now, updated_by))
         conn.commit()
     get_schedule_settings.cache_clear()
     return True
