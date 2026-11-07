@@ -45,7 +45,7 @@ def capture_2200_snapshot(target):
 
 
 def _time(value):
-    """Render schedule time as 24-hour HH:MM (supports am/pm and SQL time)."""
+    """Render schedule time in 12-hour am/pm format (supports SQL time and am/pm)."""
     if value is None:
         return ''
     raw = str(value).strip()
@@ -60,7 +60,9 @@ def _time(value):
         hour = hour % 12
     elif suffix == 'pm':
         hour = hour % 12 + 12
-    return f'{hour:02d}:{minute:02d}'
+    shown_hour = hour % 12 or 12
+    meridiem = 'am' if hour < 12 else 'pm'
+    return f'{shown_hour}:{minute:02d}{meridiem}'
 
 
 def _message(target, rows):
