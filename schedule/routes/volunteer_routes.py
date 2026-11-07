@@ -830,14 +830,13 @@ def volunteer_signup():
         assignment_lines = ""
 
         for a in assignment_rows:
-            shift = a.get("shift_label") or ""
             place = a.get("assigned_place") or ""
             s = a.get("start_time") or ""
             e = a.get("end_time") or ""
 
             assignment_lines += f"""
             <div class="assignment-line">
-                ✅ {shift} {place}<br>
+                ✅ {place}<br>
                 <span>{s} ~ {e}</span>
             </div>
             """

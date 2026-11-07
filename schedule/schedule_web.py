@@ -1108,13 +1108,12 @@ https://gyt-checkin-sg.onrender.com/volunteer
 
 
 def load_admin_signup_details(date_str):
-    """负责人日期面板：显示当日所有报名记录（含取消）。"""
+    """负责人日期面板：显示所有报名（含取消），地点以正式 assignments 为准。"""
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, volunteer_id, name, role, start_time, end_time,
-                       COALESCE(status, 'pending') AS status,
-                       assigned_place
+                       COALESCE(status, 'pending') AS status, assigned_place
                 FROM volunteer_schedule_signups
                 WHERE signup_date = %s
                 ORDER BY CASE COALESCE(status, 'pending')
@@ -1124,7 +1123,53 @@ def load_admin_signup_details(date_str):
                            ELSE 3 END,
                          start_time NULLS LAST, name, role
             """, (date_str,))
-            return cur.fetchall()
+            signups = cur.fetchall()
+            if not signups:
+                return signups
+
+            cur.execute("""
+                SELECT signup_id, volunteer_id, role, assigned_place,
+                       start_time, end_time
+                FROM volunteer_schedule_assignments
+                WHERE assignment_date = %s
+                  AND COALESCE(status, 'assigned') <> 'cancelled'
+                ORDER BY start_time NULLS LAST, end_time NULLS LAST, assigned_place
+            """, (date_str,))
+            assignments = cur.fetchall()
+
+    by_signup = {}
+    by_person_role = {}
+    for item in assignments:
+        sid = item.get('signup_id')
+        if sid is not None:
+            by_signup.setdefault(str(sid), []).append(item)
+        key = (str(item.get('volunteer_id') or '').strip(),
+               str(item.get('role') or '').strip())
+        by_person_role.setdefault(key, []).append(item)
+
+    for signup in signups:
+        # 已取消的报名不能显示其他有效排班，避免误导负责人。
+        if signup.get('status') == 'cancelled':
+            continue
+        key = (str(signup.get('volunteer_id') or '').strip(),
+               str(signup.get('role') or '').strip())
+        items = by_signup.get(str(signup['id'])) or by_person_role.get(key, [])
+        if items:
+            places = []
+            seen = set()
+            for item in items:
+                place = str(item.get('assigned_place') or '').strip()
+                if not place:
+                    continue
+                start = str(item.get('start_time') or '').strip()
+                end = str(item.get('end_time') or '').strip()
+                detail = f'{place}（{start}～{end}）' if start and end else place
+                if detail not in seen:
+                    places.append(detail)
+                    seen.add(detail)
+            if places:
+                signup['assignment_places'] = places
+    return signups
 
 
 @schedule_bp.route("/schedule/api/admin-signup-version", methods=["GET"])
@@ -3741,7 +3786,10 @@ def schedule_attendance_status():
                 place = r.get("assigned_place") or ""
                 shift = r.get("shift_label") or ""
 
-            place_text = f"{shift} {place}".strip()
+            # 签到情况只展示实际岗位地点；橙班／黄班仅供后台排班使用。
+            place_text = str(place).strip()
+            if role == "卫生" and place_text == "卫生":
+                place_text = "卫生"
 
             if place_text and place_text not in grouped[key]["places"]:
                 grouped[key]["places"].append(place_text)
@@ -5251,7 +5299,15 @@ html {
                 <td style="padding:9px;">{{ person.name or person.volunteer_id or '—' }}</td>
                 <td style="padding:9px;">{{ person.role or '—' }}</td>
                 <td style="padding:9px;white-space:nowrap;">{{ person.start_time|string if person.start_time else '—' }} ～ {{ person.end_time|string if person.end_time else '—' }}</td>
-                <td style="padding:9px;">{{ person.assigned_place or '—' }}</td>
+                <td style="padding:9px;">
+                  {% if person.assignment_places %}
+                    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;">
+                      {% for place in person.assignment_places %}
+                        <span style="display:inline-block;white-space:nowrap;padding:5px 9px;border-radius:7px;font-size:13px;line-height:1.4;{% if '观音堂' in place %}background:#ffedd5;color:#9a3412;{% elif '活动中心' in place %}background:#fef9c3;color:#854d0e;{% else %}background:#e8f3ff;color:#1e40af;{% endif %}">{{ place }}</span>
+                      {% endfor %}
+                    </div>
+                  {% else %}{{ person.assigned_place or '—' }}{% endif %}
+                </td>
                 <td style="padding:9px;white-space:nowrap;">
                   {% if person.status == 'assigned' %}<span style="color:#16803c;font-weight:700;">🟢 已安排</span>
                   {% elif person.status == 'cancelled' %}<span style="color:#64748b;">⚪ 已取消</span>

@@ -131,12 +131,21 @@ def run_morning_tick():
                 baseline = json.loads(baseline)
             old_keys = {tuple(item) for item in baseline}
 
-            # Old daily job lacks a per-person ledger; fail closed on that date to prevent duplicates.
-            cur.execute('''SELECT id FROM whatsapp_notification_jobs
-                WHERE target_date=%s AND created_by=%s LIMIT 1''',
-                        (target, 'auto_morning_late:' + target))
-            if cur.fetchone():
-                return {'status': 'legacy_job_exists', 'target_date': target}
+            # 兼容旧版07:00通知：只排除旧消息正文明确列出的姓名，
+            # 不再因为存在旧 Job 而禁止整天的新批次。
+            cur.execute('''SELECT body, status FROM whatsapp_notification_jobs
+                WHERE target_date=%s AND created_by=%s
+                ORDER BY id''', (target, 'auto_morning_late:' + target))
+            legacy_jobs = _rows(cur)
+            # 旧版通知正文使用「• 姓名」逐人列出；若格式无法识别，
+            # 为避免重复发送，保守停止并要求人工核查。
+            legacy_names = set()
+            for legacy in legacy_jobs:
+                body_text = str(legacy.get('body') or '')
+                names = re.findall(r'^\s*•\s*(.+?)\s*$', body_text, re.M)
+                if not names:
+                    return {'status': 'legacy_unparseable', 'target_date': target}
+                legacy_names.update(names)
 
             # Ledger contains all previously queued person/role keys, even if ACK is uncertain.
             # This prevents re-sending a message after uncertain or a network interruption.
@@ -152,7 +161,9 @@ def run_morning_tick():
                 return {'status': 'already_queued', 'target_date': target, 'slot': slot}
 
             current = _assignments(cur, target)
-            added = [r for r in current if _key(r) not in old_keys]
+            added = [r for r in current
+                     if _key(r) not in old_keys
+                     and str(r.get('name') or '').strip() not in legacy_names]
             if not added:
                 return {'status': 'no_new_assignments', 'target_date': target, 'slot': slot}
             body = _message(target, added)
