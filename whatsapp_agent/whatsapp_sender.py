@@ -1,4 +1,4 @@
-"""观音堂 WhatsApp Web 发送端 V7：人工模式 + 测试群无人值守模式。
+"""观音堂 WhatsApp Web 发送端 V9：人工模式 + 测试群无人值守模式。
 
 硬性限制：Render API 只领取 message_type=test，且本程序只接受
 TEST_GROUP_ONLY。不能发送正式群。发送动作不自动重试。
@@ -100,7 +100,15 @@ def outgoing_snapshot(page, message):
         if (!main) throw new Error('找不到聊天主区域 #main');
         const canonical = s => (s || '')
             .replace(/[\s\u00a0\u200b\u200c\u200d\ufeff\ufe0e\ufe0f]/g, '');
+        // WhatsApp Web 的 selectable-text 常把 emoji / 项目符号渲染成独立节点，
+        // innerText / textContent 会丢掉它们；仅在严格匹配失败后允许忽略这些装饰符号。
+        // 姓名、日期、时间、地点及所有普通文字仍必须完整一致。
+        const contentCanonical = s => canonical(s)
+            .replace(/\p{Extended_Pictographic}/gu, '')
+            .replace(/[•▪●◦]/g, '')
+            .replace(/[\u20e3\u200d]/g, '');
         const want = canonical(expected);
+        const wantContent = contentCanonical(expected);
         const matched = [], samples = [], ids = [];
         let total = 0;
         // 新版 WhatsApp Web 的本人消息通常使用 .message-out。
@@ -139,7 +147,10 @@ def outgoing_snapshot(page, message):
                 }
                 return copy.textContent || '';
             }).join('\n'));
-            if (variants.some(body => canonical(body) === want)) matched.push({id});
+            const exact = variants.some(body => canonical(body) === want);
+            const contentExact = !exact && wantContent.length >= 30 &&
+                variants.some(body => contentCanonical(body) === wantContent);
+            if (exact || contentExact) matched.push({id, mode: exact ? 'exact' : 'text-without-decorative-emoji'});
             if (samples.length < 5) samples.push({
                 id, bodies: [...new Set(variants)].filter(Boolean).slice(0, 3)
                     .map(x => x.slice(0, 160)),
@@ -202,7 +213,7 @@ def send_test(page, message):
                 after = outgoing_snapshot(page, message)
                 LOG.info('发送后检查：本人消息=%s，完全匹配=%s，匹配ID=%s',
                          after['total'], len(after['matched']),
-                         [x['id'] for x in after['matched']][-3:])
+                         [(x['id'], x.get('mode')) for x in after['matched']][-3:])
                 if newly_visible_outgoing(before, after):
                     return 'sent', '自动检测到测试群聊天区新增本人消息（仅本地界面确认，非送达回执）'
             LOG.warning('未匹配到新增本人消息；发送后正文样本=%s', after['samples'][-5:])
