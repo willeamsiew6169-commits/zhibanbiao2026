@@ -22,6 +22,7 @@ import schedule.routes
 from schedule.services.quote_service import get_daily_dharma
 from schedule.builders.time_utils import malaysia_today, malaysia_now
 from datetime import datetime, timedelta, date, timezone
+from zoneinfo import ZoneInfo
 from schedule.builders.schedule_builder import sync_schedule_after_signup_change
 from schedule.services.admin_dashboard_service import load_admin_dashboard_data
 from lunar_rules import get_special_day_info, get_next_day_remove_info
@@ -2715,6 +2716,10 @@ def generate_shortage_notice():
         or request.args.get("date")
     )
 
+    return_section = request.values.get("return_section", "")
+    if return_section not in ("management", "today"):
+        return_section = ""
+
     msg = build_shortage_notice_from_assignments(date_str)
 
     return render_template_string("""
@@ -2788,9 +2793,9 @@ def generate_shortage_notice():
 
                 <a
                     class="btn-tool btn-secondary"
-                    href="/schedule?mode=day&override_date={{ date_str }}">
+                    href="{{ url_for('schedule.schedule_notice_center', date=date_str, return_section=return_section) }}">
 
-                    ← 返回负责人首页
+                    ← 返回通知中心
 
                 </a>
 
@@ -2828,7 +2833,8 @@ def generate_shortage_notice():
     </html>
     """,
     msg=msg,
-    date_str=date_str
+    date_str=date_str,
+    return_section=return_section
     )
 
 
@@ -3322,6 +3328,168 @@ def public_reports():
     """, report_files=report_files)
 
 
+# 手动查看正式发布后的新增报名；不触发 WhatsApp 自动发送。
+@schedule_bp.route("/schedule/late_signup_notice", methods=["GET"])
+def schedule_late_signup_notice():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    date_str = (request.args.get("date") or "").strip()
+    try:
+        target_date = date.fromisoformat(date_str)
+    except ValueError:
+        return "日期格式不正确", 400
+
+    def _late_notice_aware(value):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT is_published, published_at, late_notice_sent_at, now() AS page_snapshot_at
+                FROM schedule_day_flags WHERE flag_date = %s
+            """, (date_str,))
+            flag = cur.fetchone() or {}
+            signups = []
+            assignments = []
+            if flag.get("is_published") and flag.get("published_at"):
+                cur.execute("""
+                    SELECT id, volunteer_id, name, role, start_time, end_time
+                    FROM volunteer_schedule_signups
+                    WHERE signup_date = %s
+                      AND created_at > %s
+                      AND created_at <= %s
+                      AND COALESCE(status, 'pending') <> 'cancelled'
+                    ORDER BY created_at, id
+                """, (date_str, max(
+                    # PostgreSQL may return timestamp without timezone as naive datetime.
+                    # Treat legacy naive DB timestamps as UTC before comparing with MYT 22:00.
+                    _late_notice_aware(flag["published_at"]),
+                    _late_notice_aware(flag.get("late_notice_sent_at") or flag["published_at"]),
+                    datetime.combine(target_date - timedelta(days=1), datetime.min.time(),
+                                     tzinfo=ZoneInfo("Asia/Kuala_Lumpur")) + timedelta(hours=22)
+                ), flag["page_snapshot_at"]))
+                signups = cur.fetchall()
+                if signups:
+                    ids = [row["id"] for row in signups]
+                    cur.execute("""
+                        SELECT signup_id, role, assigned_place, start_time, end_time
+                        FROM volunteer_schedule_assignments
+                        WHERE assignment_date = %s
+                          AND signup_id = ANY(%s)
+                          AND COALESCE(status, 'assigned') <> 'cancelled'
+                        ORDER BY start_time NULLS LAST, end_time NULLS LAST
+                    """, (date_str, ids))
+                    assignments = cur.fetchall()
+
+    by_signup = {}
+    for item in assignments:
+        by_signup.setdefault(item["signup_id"], []).append(item)
+
+    def time_text(value):
+        if value is None:
+            return "?"
+        if hasattr(value, "hour"):
+            hour, minute = value.hour, value.minute
+        else:
+            parts = str(value).split(":")
+            try:
+                hour, minute = int(parts[0]), int(parts[1])
+            except (ValueError, IndexError):
+                return str(value)
+        return f"{(hour - 1) % 12 + 1}:{minute:02d}{'am' if hour < 12 else 'pm'}"
+
+    groups = {}
+    seen = set()
+    for signup in signups:
+        rows = by_signup.get(signup["id"], [])
+        if not rows:
+            continue
+        for row in rows:
+            place = str(row.get("assigned_place") or row.get("role") or signup["role"]).strip()
+            name = str(signup.get("name") or signup.get("volunteer_id") or "").strip()
+            start = time_text(row.get("start_time"))
+            end = time_text(row.get("end_time"))
+            key = (signup["id"], place, start, end)
+            if key in seen:
+                continue
+            seen.add(key)
+            groups.setdefault(place, []).append(f"{name}\n{start}~{end}")
+
+    weekday = "一二三四五六日"[target_date.weekday()]
+    lines = ["📣 观音堂新增义工报名通知", "", f"日期：{target_date.day}/{target_date.month}/{target_date.year}（星期{weekday}）", ""]
+    if not flag.get("is_published"):
+        lines.append("当天值班表尚未发布，暂无发布后新增报名。")
+    elif not flag.get("published_at"):
+        lines.append("缺少首次发布时间，无法准确判断新增报名。")
+    elif not signups:
+        lines.append("目前没有新增报名。")
+    else:
+        lines.append("以下义工已新增报名：")
+        for place, people in groups.items():
+            lines.extend(["", f"📍 {place}：", *people])
+        lines.extend(["", "感恩以上师兄发心护持观音堂！", "🙏🙏🙏"])
+    if signups and not groups:
+        lines = ["目前没有已完成自动补排的新增报名。"]
+    message = "\n".join(lines)
+    return render_template_string("""
+<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>新报名通知（手动）</title>
+<style>body{font-family:Arial,'Microsoft YaHei',sans-serif;background:#f5f4fa;margin:0;padding:20px}
+main{max-width:720px;margin:auto;background:white;padding:22px;border-radius:14px}
+h2{color:#6b35b5}textarea{width:100%;box-sizing:border-box;min-height:420px;font-size:17px;line-height:1.6;padding:12px}
+button,a{display:inline-block;margin:12px 10px 0 0;padding:12px 18px;border:0;border-radius:9px;text-decoration:none;font-size:16px}
+button{background:#8039e8;color:white;cursor:pointer}a{background:#e7e5ed;color:#333}</style></head>
+<body><main><h2>📣 新报名通知（手动）</h2>
+<p>仅显示首次正式发布后、上次确认发送以来的新报名及实际排班；不会自动发送。</p>
+<textarea id="late-notice" readonly>{{ message }}</textarea><br>
+{% if has_notice %}
+<button type="button" onclick="copyNotice()">📋 复制通知</button>
+<form method="post" action="{{ url_for('schedule.schedule_late_signup_notice_confirm') }}" onsubmit="return confirm('确认已经把本次通知发送到 WhatsApp 群？\n确认后本次名单将不再显示，但不会删除报名或排班。');">
+<input type="hidden" name="date" value="{{ date_str }}">
+<input type="hidden" name="snapshot_at" value="{{ snapshot_at }}">
+<button type="submit" style="background:#17864a">✅ 已发送，清空本次名单</button>
+</form>
+{% endif %}
+<a href="{{ url_for('schedule.schedule_notice_center', date=date_str) }}">← 返回通知中心</a>
+<script>async function copyNotice(){const box=document.getElementById('late-notice');
+try{await navigator.clipboard.writeText(box.value);alert('已复制，可以贴到 WhatsApp 群组');}
+catch(e){box.select();document.execCommand('copy');alert('已尝试复制，请检查剪贴板');}}</script>
+</main></body></html>
+    """, message=message, date_str=date_str, has_notice=bool(groups),
+        snapshot_at=flag.get("page_snapshot_at").isoformat() if flag.get("page_snapshot_at") else "")
+
+
+@schedule_bp.route("/schedule/late_signup_notice/confirm", methods=["POST"])
+def schedule_late_signup_notice_confirm():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+    date_str = (request.form.get("date") or "").strip()
+    snapshot_text = (request.form.get("snapshot_at") or "").strip()
+    try:
+        date.fromisoformat(date_str)
+        snapshot_at = datetime.fromisoformat(snapshot_text)
+        if snapshot_at.tzinfo is None:
+            raise ValueError("missing timezone")
+    except ValueError:
+        return "日期或通知快照格式不正确", 400
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE schedule_day_flags
+                SET late_notice_sent_at = GREATEST(
+                    COALESCE(late_notice_sent_at, published_at),
+                    LEAST(%s, now())
+                )
+                WHERE flag_date = %s AND is_published = true AND published_at IS NOT NULL
+            """, (snapshot_at, date_str))
+        conn.commit()
+    return redirect(url_for("schedule.schedule_late_signup_notice", date=date_str))
+
+
 @schedule_bp.route("/schedule/notice_center")
 def schedule_notice_center():
     
@@ -3337,6 +3505,44 @@ def schedule_notice_center():
 
     date_str = request.args.get("date") or default_date
     republish_info = get_schedule_republish_info(date_str)
+    return_section = request.args.get("return_section", "")
+    if return_section not in ("management", "today"):
+        return_section = ""
+
+    # 与「新报名通知（手动）」页面使用同一截止时间和已发送水位。
+    # 仅统计仍有效、已安排岗位的新增义工；同一人多个地点只计一位。
+    late_notice_count = 0
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT is_published, published_at, late_notice_sent_at
+                FROM schedule_day_flags WHERE flag_date = %s
+            """, (date_str,))
+            late_flag = cur.fetchone() or {}
+            if late_flag.get("is_published") and late_flag.get("published_at"):
+                def _aware_notice_time(value):
+                    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+                target_date = date.fromisoformat(date_str)
+                cutoff = max(
+                    _aware_notice_time(late_flag["published_at"]),
+                    _aware_notice_time(late_flag.get("late_notice_sent_at") or late_flag["published_at"]),
+                    datetime.combine(target_date - timedelta(days=1), datetime.min.time(),
+                                     tzinfo=ZoneInfo("Asia/Kuala_Lumpur")) + timedelta(hours=22),
+                )
+                cur.execute("""
+                    SELECT COUNT(DISTINCT COALESCE(NULLIF(s.volunteer_id, ''), s.id::text)) AS total
+                    FROM volunteer_schedule_signups s
+                    WHERE s.signup_date = %s
+                      AND s.created_at > %s
+                      AND COALESCE(s.status, 'pending') <> 'cancelled'
+                      AND EXISTS (
+                          SELECT 1 FROM volunteer_schedule_assignments a
+                          WHERE a.assignment_date = %s AND a.signup_id = s.id
+                            AND COALESCE(a.status, 'assigned') <> 'cancelled'
+                      )
+                """, (date_str, cutoff, date_str))
+                late_notice_count = int((cur.fetchone() or {}).get("total") or 0)
 
     return render_template_string("""
 <!doctype html>
@@ -3395,6 +3601,7 @@ body{
 .green{background:#25D366;}
 .orange{background:#FF9800;}
 .gray{background:#607D8B;}
+.purple{background:#7136b7;}
 </style>
 </head>
 <body>
@@ -3454,22 +3661,34 @@ line-height:1.8;
 
 </a>
 
+<a class="notice-btn purple"
+   href="/schedule/late_signup_notice?date={{ date_str }}">
+    📣 新报名通知（手动）<br>
+    {% if late_notice_count > 0 %}
+    <small style="color:#fff5a6;font-weight:bold;">🔴 有 {{ late_notice_count }} 位新报名 · 待发送</small><br>
+    <small>📋 点击查看并复制通知</small>
+    {% else %}
+    <small>✅ 目前没有新报名</small>
+    {% endif %}
+</a>
+
 <a class="notice-btn orange"
-   href="/schedule/generate_shortage_notice?date={{ date_str }}">
+   href="{{ url_for('schedule.generate_shortage_notice', date=date_str, return_section=return_section) }}">
 
     📣 缺义工通知<br>
     <small>📌 缺人时发送</small>
 
 </a>
 
-<a class="notice-btn gray" href="/schedule?mode=day&override_date={{ date_str }}">
+<a class="notice-btn gray" href="{{ '/schedule?override_date=' ~ date_str ~ '#management-functions' if return_section == 'management' else ('/schedule?mode=day&amp;override_date=' ~ date_str ~ '#today-operations' if return_section == 'today' else '/schedule?override_date=' ~ date_str) }}">
    ⬅ 返回负责人首页
 </a>
 
 </div>
 </body>
 </html>
-""", date_str=date_str,republish_info=republish_info)
+""", date_str=date_str, republish_info=republish_info,
+        late_notice_count=late_notice_count, return_section=return_section)
 
 
 @schedule_bp.route("/schedule/signup_notice")
@@ -5188,11 +5407,11 @@ html {
  <a class="btn-tool daily-entry-highlight" href="/schedule?mode=day&override_date={{ override_date }}">⭐ 进入今日安排 → <span style="font-size:.7em">（每日必用）</span></a>
 </div>
 
-<div class="card">
+<div class="card" id="management-functions">
     <h2 class="section-title">🌸 管理功能</h2>
     <div class="main-menu">
       <a class="btn-tool btn-green" style="background:#159947;border-color:#159947;color:#fff" href="/schedule?mode=signup&override_date={{ override_date }}">👥 报名管理（代报名 / WhatsApp 解析）</a>
-      <a class="btn-tool btn-orange" style="background:#ef7118;border-color:#ef7118;color:#fff" href="/schedule/notice_center?date={{ override_date }}">📢 通知中心</a>
+      <a class="btn-tool btn-orange" style="background:#ef7118;border-color:#ef7118;color:#fff" href="/schedule/notice_center?date={{ override_date }}&amp;return_section=management">📢 通知中心</a>
       <a class="btn-tool btn-purple" style="background:#8039e8;border-color:#8039e8;color:#fff" href="/schedule/signups">📋 报名记录</a>
       <a class="btn-tool btn-gray" style="background:#d64a84;border-color:#d64a84;color:#fff" href="/schedule?mode=special&override_date={{ override_date }}">🌸 供台及佛台特别安排</a>
       <a class="btn-tool btn-gray" style="background:#078b9b;border-color:#078b9b;color:#fff" href="/schedule?mode=controls&override_date={{ override_date }}">🔧 报名开放控制</a>
@@ -5380,7 +5599,7 @@ html {
     </div>
 </div>
 
-<div class="card">
+<div class="card" id="today-operations">
     <h2 class="section-title">📝 今日操作｜负责人工作流程</h2>
     <div class="dashboard-note" style="margin-bottom:14px;line-height:1.8;">
         请按① → ② → ③ → ④操作。以下按钮针对目前选择的排班日期；发送 WhatsApp 前请先核对日期及名单。
@@ -5389,7 +5608,7 @@ html {
     <div class="action-grid">
         <div>
             <div style="font-weight:700;margin-bottom:7px;">① 晚上7:00｜发出报名通知</div>
-            <a href="/schedule/notice_center?date={{ override_date }}" class="btn-tool btn-orange">
+            <a href="/schedule/notice_center?date={{ override_date }}&amp;return_section=today" class="btn-tool btn-orange">
                 📢 报名通知／通知中心
                 <span class="helper-text">进入通知中心，复制明日的报名通知，发送到 WhatsApp 群组；也可查看缺义工通知。</span>
             </a>

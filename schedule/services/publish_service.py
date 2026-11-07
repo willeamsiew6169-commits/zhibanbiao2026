@@ -112,7 +112,7 @@ def publish_schedule_for_date(
                 on conflict (flag_date)
                 do update set
                     is_published = true,
-                    published_at = now(),
+                    published_at = coalesce(schedule_day_flags.published_at, excluded.published_at),
                     published_by = excluded.published_by,
                     need_republish = false
             """, (

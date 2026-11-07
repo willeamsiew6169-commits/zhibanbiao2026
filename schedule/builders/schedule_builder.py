@@ -2793,38 +2793,45 @@ def to_ampm_text(t):
 
 
 def format_shift_block(items):
+    """WhatsApp 紧凑排版：同地点、同时间合并姓名；姓名上、时间下。"""
     if not items:
         return ""
 
-    lines = []
-
+    groups = {}  # 保留排班原始出现顺序
     for item in items:
         if isinstance(item, dict):
             name = item.get("name") or item.get("姓名") or ""
             start = item.get("start_time") or item.get("开始时间")
             end = item.get("end_time") or item.get("结束时间")
-
         elif isinstance(item, (list, tuple)):
             name = item[0] if len(item) > 0 else ""
             start = item[1] if len(item) > 1 else ""
             end = item[2] if len(item) > 2 else ""
-
         else:
-            name = str(item)
-            start = ""
-            end = ""
+            name, start, end = item, "", ""
 
+        name = str(name or "").strip()
         if not name:
             continue
+        start_txt = to_ampm_text(start) if start else ""
+        end_txt = to_ampm_text(end) if end else ""
+        key = (start_txt, end_txt)
+        names = groups.setdefault(key, [])
+        if name not in names:
+            names.append(name)
 
-        lines.append(str(name))
-
-        if start and end:
-            start_txt = to_ampm_text(start)
-            end_txt = to_ampm_text(end)
+    lines = []
+    for (start_txt, end_txt), names in groups.items():
+        lines.append("、".join(names))
+        if start_txt and end_txt:
             lines.append(f"{start_txt}~{end_txt}")
-
     return "\n".join(lines)
+
+
+def _compact_whatsapp_message(message):
+    """只压缩多余空行，不修改义工名单、岗位或注意事项。"""
+    lines = [line.strip() for line in message.splitlines()]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip() + "\n"
 
 
 def get_display_name(p):
@@ -2889,13 +2896,11 @@ def build_normal_message(date_obj, arranged, special_info, remove_info):
 
 十点正请安
 
-8:00am~10:00am  或      
 8:00am~完成佛台工作 
 整理佛台: 
 {format_people_inline(arranged.get("整理佛台", []))}
 
 {master_section}
-8:00am~10:00am 或 
 8:00am~完成卫生工作 
 佛堂卫生: {format_people_inline(arranged.get("佛堂卫生", []))}
 二楼卫生: {format_people_inline(arranged.get("二楼卫生", []))}
@@ -2935,7 +2940,7 @@ def build_normal_message(date_obj, arranged, special_info, remove_info):
 大家功德无量！
 🙏🙏🙏
 """
-    return msg
+    return _compact_whatsapp_message(msg)
 
 
 def build_lunar_1_15_message(date_obj, arranged, special_info, remove_info):
@@ -2951,14 +2956,12 @@ def build_lunar_1_15_message(date_obj, arranged, special_info, remove_info):
 
 八点正请安 
 
-6:00am~8:00am 或 
 6:00am~完成佛台工作 
 整理佛台:  
 {format_people_inline(arranged["整理佛台"])}
 
 {build_master_table_section(arranged)}
 
-6:00am~8:00am 或 
 6:00am~完成卫生工作 
 佛堂卫生: {format_people_inline(arranged["佛堂卫生"])}
 二楼卫生: {format_people_inline(arranged["二楼卫生"])}
@@ -2967,8 +2970,10 @@ def build_lunar_1_15_message(date_obj, arranged, special_info, remove_info):
 
 🟢 8:00am~10:00am
 每个岗位1位师兄
-观音堂: {format_people_inline(arranged["绿观音堂"])}
-活动中心: {format_people_inline(arranged["绿活动中心"])}
+观音堂:
+{format_shift_block(arranged["绿观音堂"])}
+活动中心:
+{format_shift_block(arranged["绿活动中心"])}
 
 10:00am~2:00pm 
 🟠 观音堂: 
@@ -3002,7 +3007,7 @@ def build_lunar_1_15_message(date_obj, arranged, special_info, remove_info):
 大家功德无量！
 🙏🙏🙏
 """
-    return msg
+    return _compact_whatsapp_message(msg)
 
 
 def build_buddhist_festival_message(date_obj, arranged, special_info, remove_info):
@@ -3025,14 +3030,12 @@ def build_buddhist_festival_message(date_obj, arranged, special_info, remove_inf
 
 八点正请安 
 
-6:00am~8:00am 或 
 6:00am~完成佛台工作
 整理佛台: 
 {format_people_inline(arranged["整理佛台"])}
 
 {build_master_table_section(arranged)}
 
-6:00am~8:00am 或 
 6:00am~完成卫生工作 
 佛堂卫生: {format_people_inline(arranged["佛堂卫生"])}
 二楼卫生: {format_people_inline(arranged["二楼卫生"])}
@@ -3041,8 +3044,10 @@ def build_buddhist_festival_message(date_obj, arranged, special_info, remove_inf
 
 8:00am~10:00am
 每个岗位1位师兄
-观音堂: {format_people_inline(arranged["绿观音堂"])}
-活动中心: {format_people_inline(arranged["绿活动中心"])}
+观音堂:
+{format_shift_block(arranged["绿观音堂"])}
+活动中心:
+{format_shift_block(arranged["绿活动中心"])}
 
 10:00am~2:00pm 
 🔴 观音堂: 
@@ -3076,7 +3081,7 @@ def build_buddhist_festival_message(date_obj, arranged, special_info, remove_inf
 大家功德无量！
 🙏🙏🙏
 """
-    return msg
+    return _compact_whatsapp_message(msg)
 
 
 def main():
