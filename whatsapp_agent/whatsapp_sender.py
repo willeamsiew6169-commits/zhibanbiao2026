@@ -94,54 +94,56 @@ def open_test_chat(page):
 
 
 def outgoing_snapshot(page, message):
-    """读取本人消息 ID 和正文；同时记录有限诊断样本，绝不把旧消息当新消息。"""
+    """按 WhatsApp 的 message-out 容器识别本人消息；严格比较正文和新增 ID。"""
     return page.evaluate(r"""(expected) => {
         const main = document.querySelector('#main');
         if (!main) throw new Error('找不到聊天主区域 #main');
-        const normalize = s => (s || '')
-            .replace(/\u00a0/g, ' ').replace(/\u200b|\u200c|\u200d|\ufeff/g, '')
-            .replace(/\r\n?/g, '\n').replace(/[ \t]+/g, ' ')
-            .replace(/[ \t]*\n[ \t]*/g, '\n').trim();
-        // WhatsApp Web 会合并空行、调整空格，并可能加入 emoji 变体选择符。
-        // 只忽略这些显示差异；仍要求整条消息的所有非空白字符完全一致。
-        const canonical = s => normalize(s)
-            .replace(/[\s\u00a0\u200b\u200c\u200d\ufeff]/g, '')
-            .replace(/[\ufe0e\ufe0f]/g, '');
+        const canonical = s => (s || '')
+            .replace(/[\s\u00a0\u200b\u200c\u200d\ufeff\ufe0e\ufe0f]/g, '');
         const want = canonical(expected);
         const matched = [], samples = [], ids = [];
         let total = 0;
+        // 新版 WhatsApp Web 的本人消息通常使用 .message-out。
+        // 旧版仅用 aria-label="你："，可能漏掉刚发送的新消息。
         for (const node of main.querySelectorAll('[data-id]')) {
-            if (!node.querySelector('[aria-label="你："]')) continue;
-            const container = node.querySelector('[data-testid="msg-container"]');
+            const container = node.matches('[data-testid="msg-container"]')
+                ? node : node.querySelector('[data-testid="msg-container"]');
             if (!container) continue;
+            const outgoing = node.classList.contains('message-out') ||
+                !!node.closest('.message-out') ||
+                !!node.querySelector('.message-out') ||
+                container.classList.contains('message-out') ||
+                !!node.querySelector('[aria-label="你："]');
+            if (!outgoing) continue;
             const id = node.getAttribute('data-id') || '';
-            if (!id) continue;
+            if (!id || ids.includes(id)) continue;
             total++;
             ids.push(id);
-            // WhatsApp 常将正文拆成多个 selectable-text；也可能嵌套。
-            // 只选最外层，避免相同文字被拼接两次。
             const all = Array.from(container.querySelectorAll('[data-testid="selectable-text"]'));
             const top = all.filter(el => !el.parentElement?.closest('[data-testid="selectable-text"]'));
             const variants = [];
             for (const el of top) {
-                // innerText 与 textContent 在 WhatsApp 的 emoji/隐藏节点上可能不同。
-                variants.push(normalize(el.innerText || ''));
-                variants.push(normalize(el.textContent || ''));
-                // emoji 图片的 alt 是真实消息内容的一部分。
+                variants.push(el.innerText || '');
+                variants.push(el.textContent || '');
                 const copy = el.cloneNode(true);
                 for (const img of copy.querySelectorAll('img[alt]')) {
                     img.replaceWith(document.createTextNode(img.getAttribute('alt') || ''));
                 }
-                variants.push(normalize(copy.textContent || ''));
+                variants.push(copy.textContent || '');
             }
-            const combined = normalize(top.map(el => el.innerText || '').join('\n'));
-            variants.push(combined);
-            // 忽略显示层空白与 emoji 变体差异，但必须整条正文相符；不做包含匹配。
+            variants.push(top.map(el => el.innerText || '').join('\n'));
+            variants.push(top.map(el => {
+                const copy = el.cloneNode(true);
+                for (const img of copy.querySelectorAll('img[alt]')) {
+                    img.replaceWith(document.createTextNode(img.getAttribute('alt') || ''));
+                }
+                return copy.textContent || '';
+            }).join('\n'));
             if (variants.some(body => canonical(body) === want)) matched.push({id});
             if (samples.length < 5) samples.push({
-                id, bodies: [...new Set(variants)].filter(Boolean).slice(0, 4)
+                id, bodies: [...new Set(variants)].filter(Boolean).slice(0, 3)
                     .map(x => x.slice(0, 160)),
-                expectedLength: normalize(expected).length
+                expectedLength: expected.length
             });
         }
         return {total, ids, matched, samples};
