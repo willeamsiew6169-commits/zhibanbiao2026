@@ -68,6 +68,15 @@ def build_whatsapp_from_assigned(date_str):
         if name and name not in arranged["整理佛台"]:
             arranged["整理佛台"].append(name)
 
+    # 初一额外第3位整理佛台义工：直接读取已保存设置，
+    # 即使正式排班尚未同步，也要显示在 WhatsApp 正式值班表。
+    extra_buddha_person = str(day_flags.get("extra_buddha_person") or "").strip()
+    if (special_day_info.get("template_type") == "lunar_1_15"
+            and "初一" in str(special_day_info.get("lunar_text") or "")
+            and extra_buddha_person
+            and extra_buddha_person not in arranged["整理佛台"]):
+        arranged["整理佛台"].append(extra_buddha_person)
+
     template_type = special_day_info["template_type"]
     is_lunar_day = template_type == "lunar_1_15"
 

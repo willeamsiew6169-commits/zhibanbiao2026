@@ -1064,6 +1064,22 @@ def build_signup_notice_whatsapp(date_str):
             """, (date_str,))
             supply_signup_rows = cur.fetchall()
 
+    # 整理佛台：保留固定轮值，并补上已保存的初一第3位及正式排班人员。
+    # 只影响本报名通知的显示，不更改任何数据库排班。
+    for row in assigned_rows:
+        if row.get("role") == "整理佛台" or row.get("assigned_place") == "整理佛台":
+            name = str(row.get("name") or "").strip()
+            if name and name not in fixed_buddha:
+                fixed_buddha.append(name)
+    if big_day and "初一" in lunar_label:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT extra_buddha_person FROM schedule_day_flags WHERE flag_date = %s", (date_str,))
+                extra_row = cur.fetchone()
+        extra_name = str((extra_row or {}).get("extra_buddha_person") or "").strip()
+        if extra_name and extra_name not in fixed_buddha:
+            fixed_buddha.append(extra_name)
+
     setup_people = [name.strip() for name in str((setup_row or {}).get('setup_people') or '').splitlines() if name.strip()]
     supply_people = list(dict.fromkeys(setup_people + [str(r.get('name') or '').strip() for r in supply_signup_rows if r.get('name')]))
 
@@ -2567,6 +2583,34 @@ def save_day_flags():
                         extra_buddha_person=EXCLUDED.extra_buddha_person,
                         updated_at=NOW()
                 """, (date_str, extra_buddha_person))
+                # 已发布的初一：只同步本按钮管理的第3位佛台义工，不重排其他人员。
+                cur.execute("""
+                    SELECT is_published FROM schedule_day_flags
+                    WHERE flag_date=%s FOR UPDATE
+                """, (date_str,))
+                published_row = cur.fetchone()
+                if published_row and published_row.get("is_published"):
+                    # 仅清除本功能以前插入的记录；原有固定佛台及其他岗位不动。
+                    cur.execute("""
+                        DELETE FROM volunteer_schedule_assignments
+                        WHERE assignment_date=%s AND role='整理佛台'
+                          AND remarks='初一额外第3位整理佛台义工'
+                    """, (date_str,))
+                    if extra_buddha_person:
+                        cur.execute("""
+                            SELECT 1 FROM volunteer_schedule_assignments
+                            WHERE assignment_date=%s AND role='整理佛台'
+                              AND name=%s AND COALESCE(status,'assigned') <> 'cancelled'
+                            LIMIT 1
+                        """, (date_str, extra_buddha_person))
+                        if not cur.fetchone():
+                            cur.execute("""
+                                INSERT INTO volunteer_schedule_assignments
+                                    (name, assignment_date, role, shift_label,
+                                     assigned_place, status, remarks, created_at)
+                                VALUES (%s,%s,'整理佛台','整理佛台',
+                                        '整理佛台','assigned','初一额外第3位整理佛台义工',NOW())
+                            """, (extra_buddha_person, date_str))
             else:
                 # Compatibility with older forms.
                 cur.execute("""

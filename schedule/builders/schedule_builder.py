@@ -2421,16 +2421,6 @@ def assign_jobs(fixed_people, signup_df, special_info, patch_mode=False,):
 
         item["role"] = "卫生"
         item["岗位"] = "卫生"
-        # 卫生是固定时段；仅在报名没有有效时间时补默认时间。
-        cleaning_time = (SPECIAL_DEFAULT_TIME if special_info.get("template_type") != "normal"
-                         else DEFAULT_TIME)["佛堂卫生"]
-        for field, alias, default in (("start_time", "开始时间", cleaning_time[0]),
-                                      ("end_time", "结束时间", cleaning_time[1])):
-            value = item.get(field) or item.get(alias)
-            if value is None or pd.isna(value) or not str(value).strip():
-                value = default
-            item[field] = value
-            item[alias] = value
         unique_cleaners.append(item)
 
     # ✅ 重新分配卫生
@@ -3136,6 +3126,18 @@ def calculate_schedule_for_date(date_str, patch_mode=False,):
     # 特别是 [] 代表全部请假，不是没有设置。
     if override_names is not None:
         fixed_people["整理佛台"] = override_names
+
+    # 初一额外第3位：只追加到当天名单，避免自动排班遗漏已保存的补人。
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT extra_buddha_person FROM schedule_day_flags
+                WHERE flag_date=%s
+            """, (date_str,))
+            extra_row = cur.fetchone()
+    extra_name = str((extra_row or {}).get("extra_buddha_person") or "").strip()
+    if extra_name and extra_name not in fixed_people["整理佛台"]:
+        fixed_people["整理佛台"].append(extra_name)
 
     special_info = get_special_day_info(date_obj)
     remove_info = get_next_day_remove_info(date_obj)
