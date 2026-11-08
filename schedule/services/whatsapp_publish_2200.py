@@ -128,6 +128,10 @@ def _execute_locked(target, marker, auto_publish, send_roster):
         if not published:
             raise RuntimeError('22:00 publish not confirmed')
 
+    if published:
+        from schedule.services.whatsapp_morning_summary import capture_2200_snapshot
+        capture_2200_snapshot(target)  # 已发布就建立首次快照，不依赖发送开关。
+
     if not send_roster:
         return {'status': 'published_no_message' if published else 'no_action',
                 'target_date': target, 'preserved_existing': preserved}
@@ -148,11 +152,16 @@ def finalize_published_roster(target):
     from schedule.services.whatsapp_morning_summary import _assignments, _key
     import json
 
+    if not is_schedule_published(target):
+        return {'status': 'not_published', 'target_date': target}
+
+    # 通知验证失败也不应影响已发布排班的首次快照。
+    from schedule.services.whatsapp_morning_summary import capture_2200_snapshot
+    capture_2200_snapshot(target)
+
     flags = _settings(('wa_auto_enabled', 'wa_test_mode', 'wa_roster_2200'))
     if not all(flags.values()):
         return {'status': 'disabled', 'target_date': target}
-    if not is_schedule_published(target):
-        return {'status': 'not_published', 'target_date': target}
 
     # 先核对实际值班时间覆盖，避免将不完整的值班表发送出去。
     _validate_coverage(target)
