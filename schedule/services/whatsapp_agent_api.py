@@ -52,6 +52,17 @@ def register_whatsapp_agent_api(bp):
             LOG.exception('WhatsApp morning summary enqueue failed')
             return jsonify(error='morning_enqueue_error'), 500
 
+    @bp.route('/schedule/api/whatsapp-agent/config', methods=['POST'])
+    def wa_agent_config():
+        if not authenticated():
+            return jsonify(error='unauthorized'), 401
+        try:
+            from schedule.services.settings_service import is_schedule_setting_on
+            return jsonify(auto_send=is_schedule_setting_on('wa_agent_auto_send'))
+        except Exception:
+            LOG.exception('WhatsApp Agent config read failed')
+            return jsonify(error='config_unavailable'), 503
+
     @bp.route('/schedule/api/whatsapp-agent/claim', methods=['POST'])
     def wa_agent_claim():
         if not authenticated():

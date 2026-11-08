@@ -50,8 +50,11 @@ def main():
         print('Result:', response.text[:3000], flush=True)
         response.raise_for_status()
         data = response.json()
-        if data.get('status') in ('db_write_guard_off', 'busy', 'not_published', 'disabled', 'outside_window'):
-            print('No roster was queued by this invocation.', flush=True)
+        if data.get('status') in ('db_write_guard_off', 'busy', 'not_published', 'outside_window'):
+            print('22:00 roster not queued; retry required.', file=sys.stderr, flush=True)
+            return 1
+        if data.get('status') == 'disabled':
+            print('22:00 automation disabled by settings.', flush=True)
         return 0
     except (requests.RequestException, ValueError) as exc:
         print('Request failed:', str(exc), file=sys.stderr)

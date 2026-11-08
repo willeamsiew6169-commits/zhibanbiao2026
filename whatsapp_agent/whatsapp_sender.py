@@ -26,7 +26,9 @@ TOKEN = os.getenv('WHATSAPP_AGENT_TOKEN', '').strip()
 GROUP = os.getenv('WA_TEST_GROUP', '').strip()
 AGENT = os.getenv('WA_AGENT_ID', 'windows-test-pc').strip()[:80]
 POLL = max(5, int(os.getenv('WA_POLL_SECONDS', '15')))
-AUTO = os.getenv('WA_AUTO_SEND', 'false').strip().lower() == 'true'
+# Local setting is an additional safety gate; webpage controls runtime mode.
+LOCAL_AUTO_ALLOWED = os.getenv('WA_AUTO_SEND', 'false').strip().lower() == 'true'
+AUTO = False
 AUTO_ACK = os.getenv('WA_TEST_AUTO_ACKNOWLEDGED', '').strip() == 'YES'
 HEADERS = {'Authorization': 'Bearer ' + TOKEN}
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -286,10 +288,23 @@ def run_2200_trigger_if_due(last_attempt_date):
                  (result.stdout or '').strip()[:2000])
         if result.stderr:
             LOG.warning('22:00 tick 错误输出=%s', result.stderr.strip()[:2000])
-        # 失败时不自动重试 POST，避免未知状态下重复执行；云端须有幂等保护。
+        # 仅在明确成功/已入队时标记完成；失败时窗口内可安全重试。
+        # 云端使用事务锁、固定 created_by 和不可覆盖快照防止重复。
+        import json
+        output = (result.stdout or '').strip()
+        for line in reversed(output.splitlines()):
+            if line.startswith('Result:'):
+                try:
+                    data = json.loads(line.partition('Result:')[2].strip())
+                except (ValueError, TypeError):
+                    data = {}
+                if result.returncode == 0 and data.get('status') in (
+                        'queued', 'already_queued', 'published_no_message', 'disabled'):
+                    return today
+                break
     except Exception:
-        LOG.exception('22:00 tick 调用异常；不自动重试，需人工核对')
-    return today
+        LOG.exception('22:00 tick 调用异常；在窗口内尝试重试')
+    return last_attempt_date
 
 
 def run_morning_trigger_if_due(last_completed_slot):
@@ -322,10 +337,10 @@ def main():
     _lock_handle = acquire_single_instance_lock()
     if not URL.startswith('https://') or not TOKEN or not GROUP:
         raise SystemExit('请配置 HTTPS WA_SERVER_URL、WHATSAPP_AGENT_TOKEN、WA_TEST_GROUP')
-    if AUTO and not AUTO_ACK:
-        raise SystemExit('自动测试需同时设置 WA_TEST_AUTO_ACKNOWLEDGED=YES；仅限测试群')
+    if LOCAL_AUTO_ALLOWED and not AUTO_ACK:
+        LOG.warning('未设置 WA_TEST_AUTO_ACKNOWLEDGED=YES；网页自动模式将保持关闭')
     print('仅领取 test / TEST_GROUP_ONLY 消息；正式群发送未启用。')
-    print('模式：', '测试群自动发送' if AUTO else '人工 SEND + CONFIRM')
+    print('模式：由网页开关控制；本机 WA_AUTO_SEND=true 与 WA_TEST_AUTO_ACKNOWLEDGED=YES 才允许自动发送')
     print('测试群：', GROUP, '；轮询：', POLL, '秒')
     with sync_playwright() as pw:
         context = pw.chromium.launch_persistent_context(
@@ -361,6 +376,17 @@ def main():
                 except (PlaywrightError, RuntimeError) as exc:
                     LOG.error('浏览器检查失败，暂停领取：%s', exc)
                     break
+                # Fetch the webpage switch before claiming each job. Fail closed if unreachable.
+                global AUTO
+                try:
+                    config = post('/schedule/api/whatsapp-agent/config', {})
+                    if not isinstance(config.get('auto_send'), bool):
+                        raise ValueError('Agent config missing auto_send boolean')
+                    AUTO = bool(config['auto_send']) and LOCAL_AUTO_ALLOWED and AUTO_ACK
+                except Exception:
+                    LOG.exception('无法读取网页自动发送开关；暂停领取，避免模式不明时发送')
+                    time.sleep(POLL)
+                    continue
                 try:
                     job = post('/schedule/api/whatsapp-agent/claim', {'agent_id': AGENT}).get('job')
                 except requests.RequestException:

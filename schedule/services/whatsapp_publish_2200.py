@@ -134,33 +134,62 @@ def _execute_locked(target, marker, auto_publish, send_roster):
     if not published:
         return {'status': 'not_published', 'target_date': target}
 
-    # Even for previously published dates, do not send incomplete rosters.
-    _validate_coverage(target)
-    # Freeze the 22:00 baseline even if a roster job already exists.
-    # Do not overwrite a prior snapshot on subsequent ticks.
-    from schedule.services.whatsapp_morning_summary import capture_2200_snapshot
-    capture_2200_snapshot(target)
-    exists = _scalar('SELECT count(*) FROM whatsapp_notification_jobs WHERE created_by=%s AND target_date=%s',
-                     (marker, target))
-    if int(exists):
-        return {'status': 'already_queued', 'target_date': target}
+    return finalize_published_roster(target)
 
+
+def finalize_published_roster(target):
+    '''首次发布后建立不可覆盖的基准并入队正式表；可由自动或手动发布调用。
+
+    快照和通知 Job 同一事务提交；相同日期的重复调用不会重复发送。
+    仅限现有 TEST_GROUP_ONLY 测试模式及已开启的自动正式表通知。
+    '''
+    from schedule.services.publish_service import is_schedule_published
+    from schedule.services.whatsapp_service import build_whatsapp_from_assigned
+    from schedule.services.whatsapp_morning_summary import _assignments, _key
+    import json
+
+    flags = _settings(('wa_auto_enabled', 'wa_test_mode', 'wa_roster_2200'))
+    if not all(flags.values()):
+        return {'status': 'disabled', 'target_date': target}
+    if not is_schedule_published(target):
+        return {'status': 'not_published', 'target_date': target}
+
+    # 先核对实际值班时间覆盖，避免将不完整的值班表发送出去。
+    _validate_coverage(target)
     body = build_whatsapp_from_assigned(target)
     if not isinstance(body, str) or not body.strip() or body.lstrip().startswith('❌'):
         raise RuntimeError('正式值班表文案生成失败；停止通知')
+
+    marker = 'auto_roster_2200:' + target  # 沿用旧标记，防止重复发送。
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO whatsapp_notification_jobs
-                (message_type, target_date, destination, body, status, created_by)
-                VALUES ('test', %s, 'TEST_GROUP_ONLY', %s, 'pending', %s)
-                RETURNING id
-            """, (target, body, marker))
-            row = cur.fetchone()
-            job_id = row['id'] if isinstance(row, dict) else row[0]
+            cur.execute('SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))',
+                        ('gyt_morning_baseline', target))
+            # 在同一事务内建立基准和 Job，防止只建快照却未入队。
+            # 首次基准不可覆盖；发布后新增报名只在早上汇总通知。
+            cur.execute('SELECT baseline FROM whatsapp_morning_snapshots WHERE target_date=%s', (target,))
+            previous_snapshot = cur.fetchone()
+            if not previous_snapshot:
+                rows = _assignments(cur, target)
+                cur.execute('''INSERT INTO whatsapp_morning_snapshots(target_date, baseline)
+                    VALUES (%s, %s::jsonb) ON CONFLICT(target_date) DO NOTHING''',
+                    (target, json.dumps([list(_key(r)) for r in rows], ensure_ascii=False)))
+            cur.execute('''SELECT id FROM whatsapp_notification_jobs
+                WHERE created_by=%s AND target_date=%s ORDER BY id LIMIT 1''', (marker, target))
+            existing = cur.fetchone()
+            if existing:
+                job_id = existing['id'] if isinstance(existing, dict) else existing[0]
+                result = {'status': 'already_queued', 'target_date': target, 'job_id': job_id}
+            else:
+                cur.execute('''INSERT INTO whatsapp_notification_jobs
+                    (message_type, target_date, destination, body, status, created_by)
+                    VALUES ('test', %s, 'TEST_GROUP_ONLY', %s, 'pending', %s)
+                    RETURNING id''', (target, body, marker))
+                row = cur.fetchone()
+                job_id = row['id'] if isinstance(row, dict) else row[0]
+                result = {'status': 'queued', 'target_date': target, 'job_id': job_id}
         conn.commit()
-    return {'status': 'queued', 'target_date': target, 'job_id': job_id,
-            'already_published': not auto_publish, 'preserved_existing': preserved}
+    return result
 
 
 # ---------------------------------------------------------------------------

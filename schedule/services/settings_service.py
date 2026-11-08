@@ -91,8 +91,12 @@ def _meal_manual_override(now, settings):
         return None
 
     event_date = current_meal_event_date(now)
-    if event_date is not None and settings.get("meal_manual_event_date") == event_date.isoformat():
-        return state == "true"
+    if event_date is not None:
+        # 进入佛日前一天 00:00 的新窗口后，忽略此前非佛日的临时开关。
+        # 只有在本次佛日窗口内操作的人工开关，才可以覆盖自动状态。
+        if settings.get("meal_manual_event_date") == event_date.isoformat():
+            return state == "true"
+        return None
 
     # 非佛日的临时人工开放，到指定时间自动失效。
     if settings.get("meal_manual_event_date") == "":

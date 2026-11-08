@@ -995,12 +995,34 @@ def build_signup_notice_whatsapp(date_str):
 
     date_text = f"{date_obj.day}/{date_obj.month}/{date_obj.year} ({weekday_map[date_obj.weekday()]})"
 
+    # 依通知所选日期判断模板，而非依服务器实际日期。
+    day_info = get_special_day_info(date_obj)
+    big_day = day_info.get("template_type") in ("lunar_1_15", "buddhist_festival")
+    # 优先显示完整农历月份，例如「农历十月初一」。
+    lunar_label = str(day_info.get("lunar_text") or "").strip()
+    festival_names = [str(name).strip() for name in (day_info.get("special_names") or []) if str(name).strip()]
+    # 农历与节日名称同时显示，不能因为有农历文字就省略节日名称。
+    day_label = "\n".join(part for part in [
+        f"（{lunar_label}）" if lunar_label else "",
+        *[f"🙏 {name}" for name in festival_names],
+    ] if part)
     fixed_buddha = get_fixed_buddha_for_date(date_str)
+
+    # 以下文案必须以通知指定的 date_str 判断，不能使用服务器当天日期。
+    special_heading = f"\n{day_label}" if day_label else ""
+    altar_start, altar_end = ("6:00am", "8:00am") if big_day else ("8:00am", "10:00am")
+    cleaning_start, cleaning_end = altar_start, altar_end
+    green_section = (
+        "8:00am~10:00am \n🟢 观音堂: \n{hall}\n🟢 活动中心: \n{center}\n\n"
+        if big_day else ""
+    )
 
     groups = {
         "佛堂卫生": [],
         "二楼卫生": [],
         "楼梯卫生": [],
+        "绿观音堂": [],
+        "绿活动中心": [],
         "橙观音堂": [],
         "橙活动中心": [],
         "黄观音堂": [],
@@ -1029,17 +1051,39 @@ def build_signup_notice_whatsapp(date_str):
                 ORDER BY start_time NULLS LAST, name
             """, (date_str,))
             assigned_rows = cur.fetchall()
+            # 供台可能由负责人直接指定（schedule_day_flags），不一定有报名。
+            cur.execute("""
+                SELECT setup_people FROM schedule_day_flags WHERE flag_date = %s
+            """, (date_str,))
+            setup_row = cur.fetchone()
+            cur.execute("""
+                SELECT name FROM volunteer_schedule_signups
+                WHERE signup_date = %s AND role = '供台'
+                  AND COALESCE(status, 'pending') <> 'cancelled'
+                ORDER BY id
+            """, (date_str,))
+            supply_signup_rows = cur.fetchall()
 
-    # 卫生：优先沿用已经补排的地点；其余按佛堂、二楼、楼梯依次预览。
+    setup_people = [name.strip() for name in str((setup_row or {}).get('setup_people') or '').splitlines() if name.strip()]
+    supply_people = list(dict.fromkeys(setup_people + [str(r.get('name') or '').strip() for r in supply_signup_rows if r.get('name')]))
+
+    # 卫生：已发布排班可能给同一人多条地点记录，通知必须逐条对应，
+    # 不可用单一字典值覆盖前面的地点（例如佛堂+楼梯被误写成只有楼梯）。
     cleaning_places = ('佛堂卫生', '二楼卫生', '楼梯卫生')
     assigned_by_signup = {}
     assigned_by_person = {}
     for row in assigned_rows:
         if row.get('role') != '卫生' or row.get('assigned_place') not in cleaning_places:
             continue
+        place = row['assigned_place']
         if row.get('signup_id') is not None:
-            assigned_by_signup[row['signup_id']] = row['assigned_place']
-        assigned_by_person[str(row.get('volunteer_id') or row.get('name') or '')] = row['assigned_place']
+            assigned_by_signup.setdefault(row['signup_id'], [])
+            if place not in assigned_by_signup[row['signup_id']]:
+                assigned_by_signup[row['signup_id']].append(place)
+        person_key = str(row.get('volunteer_id') or row.get('name') or '')
+        assigned_by_person.setdefault(person_key, [])
+        if place not in assigned_by_person[person_key]:
+            assigned_by_person[person_key].append(place)
 
     def _minutes(value):
         """支持数据库中的 11:00am、6:00pm、18:00 及 time 对象。"""
@@ -1073,23 +1117,28 @@ def build_signup_notice_whatsapp(date_str):
         role = signup.get('role')
         if role == '卫生':
             person_key = str(signup.get('volunteer_id') or signup.get('name') or '')
-            place = (assigned_by_signup.get(signup.get('id'))
-                     or assigned_by_person.get(person_key))
-            if place not in cleaning_places:
-                place = min(cleaning_places, key=lambda k: len(groups[k]))
-            groups[place].append(signup)
+            places = (assigned_by_signup.get(signup.get('id'))
+                      or assigned_by_person.get(person_key) or [])
+            if not places:
+                places = [min(cleaning_places, key=lambda k: len(groups[k]))]
+            for place in places:
+                # 防止重复报名/重复 assignment 在同一地点显示重复姓名。
+                if not any(str(r.get('volunteer_id') or r.get('name') or '') == person_key
+                           for r in groups[place]):
+                    groups[place].append(signup)
         elif role == '值班':
             duty_signups.append(signup)
 
     # 值班：按上午／下午拆开，地点仅供 19:00 初步通知参考。
     # 22:00 仍由原自动排班器正式计算，可能重新调整。
-    duty_counts = {key: 0 for key in ('橙观音堂', '橙活动中心', '黄观音堂', '黄活动中心')}
+    duty_counts = {key: 0 for key in ('绿观音堂', '绿活动中心', '橙观音堂', '橙活动中心', '黄观音堂', '黄活动中心')}
     for signup in duty_signups:
         start = _minutes(signup.get('start_time'))
         end = _minutes(signup.get('end_time'))
         if start is None or end is None or end <= start:
             continue
-        for part_start, part_end, prefix in ((600, 840, '橙'), (840, 1080, '黄')):
+        shifts = ([(480, 600, '绿')] if big_day else []) + [(600, 840, '橙'), (840, 1080, '黄')]
+        for part_start, part_end, prefix in shifts:
             seg_start, seg_end = max(start, part_start), min(end, part_end)
             if seg_start >= seg_end:
                 continue
@@ -1119,44 +1168,69 @@ def build_signup_notice_whatsapp(date_str):
 
         return "\n".join(lines)
 
+    def format_duty_people(rows):
+        """仅用于值班通知：同地点且起止时间相同的姓名合并一行。"""
+        if not rows:
+            return ""
+        from collections import OrderedDict
+        grouped = OrderedDict()
+        for row in rows:
+            start = str(row.get("start_time") or "").strip()
+            end = str(row.get("end_time") or "").strip()
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            key = (start, end)
+            names = grouped.setdefault(key, [])
+            if name not in names:
+                names.append(name)
+        lines = []
+        for (start, end), names in grouped.items():
+            lines.append("　".join(names))
+            if start and end:
+                lines.append(f"{start}~{end}")
+        return "\n".join(lines)
+
     buddha_text = "　".join(fixed_buddha) if fixed_buddha else ""
+    if big_day:
+        green_section = green_section.format(
+            hall=format_duty_people(groups["绿观音堂"]),
+            center=format_duty_people(groups["绿活动中心"]),
+        )
+
+    greeting_time = "八点正请安" if big_day else "十点正请安"
 
     text = f"""师兄们大家好！
 
-{date_text}
+{date_text}{special_heading}
 
-十点正请安
+{greeting_time}
 
-8:00am~10:00am  或      
-8:00am~完成佛台工作 
+{altar_start}~{altar_end}  或      
+{altar_start}~完成佛台工作 
 整理佛台: 
 {buddha_text}
 
-
-8:00am~10:00am 或 
-8:00am~完成卫生工作 
-佛堂卫生: 
-{format_people(groups["佛堂卫生"])}
-二楼卫生: 
-{format_people(groups["二楼卫生"])}
-楼梯卫生: 
-{format_people(groups["楼梯卫生"])}
+{('设师父供台：' + chr(10) + ('　'.join(supply_people) if supply_people else '尚未安排') + chr(10) + chr(10)) if big_day else ''}
+{cleaning_start}~{cleaning_end} 或 
+{cleaning_start}~完成卫生工作 
+佛堂卫生: {"　".join(str(r.get("name") or "").strip() for r in groups["佛堂卫生"] if str(r.get("name") or "").strip())}
+二楼卫生: {"　".join(str(r.get("name") or "").strip() for r in groups["二楼卫生"] if str(r.get("name") or "").strip())}
+楼梯卫生: {"　".join(str(r.get("name") or "").strip() for r in groups["楼梯卫生"] if str(r.get("name") or "").strip())}
 每日卫生义工请注意：清理完卫生之后，请把卫生用具包括吸尘机放回原位（活动中心store里面的小房间）
 
-
-
-10:00am~2:00pm 
+{green_section}10:00am~2:00pm 
 🟠 观音堂: 
-{format_people(groups["橙观音堂"])}
+{format_duty_people(groups["橙观音堂"])}
 🟠 活动中心: 
-{format_people(groups["橙活动中心"])}
+{format_duty_people(groups["橙活动中心"])}
 
 2:00pm~6:00pm 
 🟡 观音堂: 
-{format_people(groups["黄观音堂"])}
+{format_duty_people(groups["黄观音堂"])}
 
 🟡 活动中心: 
-{format_people(groups["黄活动中心"])}
+{format_duty_people(groups["黄活动中心"])}
 
 
 观音堂早晚香 由值班义工带领上香。
@@ -1885,6 +1959,58 @@ def schedule_prebook_add():
     <a href="/schedule/admin">返回后台</a>
     """
     
+@schedule_bp.route("/schedule/dry_run_2200", methods=["GET"])
+def schedule_dry_run_2200():
+    # 负责人专用，只读预演
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    target = (request.args.get("date") or "").strip()
+    try:
+        target = datetime.strptime(target, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return "日期格式错误，请返回负责人首页重新选择日期。", 400
+
+    report = None
+    error = None
+    try:
+        from schedule.services.whatsapp_publish_2200 import dry_run_2200
+        report = dry_run_2200(target)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("22:00 read-only dry-run failed for %s", target)
+        error = "预演计算失败，请检查 Render 日志（没有执行发布或发送）。"
+
+    return render_template_string('''<!doctype html><html lang="zh"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>22:00 自动排班安全预演</title>
+<style>body{font-family:Arial,"Microsoft YaHei",sans-serif;background:#f2f6f8;color:#172a39;margin:0;padding:20px}
+main{max-width:920px;margin:auto;background:white;padding:24px;border-radius:16px;box-shadow:0 4px 20px #0001}
+.badge{display:inline-block;background:#d9f4e8;color:#075a35;padding:8px 12px;border-radius:9px;font-weight:bold}
+.warn{background:#fff3d8;padding:12px;border-radius:9px;margin:14px 0}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #e1e8ed;text-align:left}
+th{background:#eef4f7}a{display:inline-block;margin:12px 0;color:#0755b6}ul{line-height:1.9}
+</style></head><body><main>
+<h1>🧪 22:00 自动排班安全预演</h1><div class="badge">只读测试 · 不保存 · 不发布 · 不发送 WhatsApp</div>
+<p><b>预演日期：</b>{{ target }}</p>
+<a href="/schedule?mode=day&amp;override_date={{ target }}">← 返回负责人页面</a>
+{% if error %}<div class="warn">❌ {{ error }}</div>{% elif report %}
+<p><b>发布状态：</b>{{ '已发布' if report.published else '未发布' }}　｜　
+<b>现有排班记录：</b>{{ report.existing_assignment_count }}　｜　
+<b>理论排班记录：</b>{{ report.theoretical_assignment_count }}　｜　
+<b>值班报名：</b>{{ report.duty_signup_count }}</p>
+<div class="warn">⚠️ 当前预演只核对<strong>值班报名</strong>的时间覆盖；不代表卫生、佛台及其他岗位已通过完整验证。<br>
+“未安排”指数据库当前尚无对应排班，不代表正式自动排班一定失败；请参考右侧理论排班。</div>
+<h2>值班报名检查</h2>
+{% if report.coverage_checks %}<div style="overflow-x:auto"><table><thead><tr><th>义工</th><th>报名时间</th><th>当前排班状态</th><th>理论安排</th></tr></thead><tbody>
+{% for c in report.coverage_checks %}<tr><td>{{ c.name }}</td><td>{{ c.signup_time|join(' ~ ') }}</td>
+<td>{% if c.status == 'covered' %}✅ 已覆盖{% elif c.status == 'missing' %}⚪ 当前未安排{% elif c.status == 'invalid_signup_time' %}❌ 报名时间异常{% else %}⚠️ 当前排班未完全覆盖{% endif %}</td>
+<td>{% if c.theoretical %}{% for a in c.theoretical %}{{ a.assigned_place }} {{ a.start_time }}–{{ a.end_time }}<br>{% endfor %}{% else %}—{% endif %}</td></tr>{% endfor %}
+</tbody></table></div>{% else %}<p>此日期没有有效值班报名。</p>{% endif %}
+<h2>预演注意事项</h2><ul>{% for w in report.warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+{% endif %}<a href="/schedule?mode=day&amp;override_date={{ target }}">← 返回负责人页面</a>
+</main></body></html>''', target=target, report=report, error=error)
+
+
 @schedule_bp.route("/schedule/generate_day", methods=["POST"])
 def schedule_generate_day():
     if not session.get("schedule_login"):
@@ -6623,6 +6749,7 @@ def whatsapp_automation_admin():
     flags = (
         ("wa_auto_enabled", "自动发送总开关 / Master switch"),
         ("wa_test_mode", "测试模式 / Test mode"),
+        ("wa_agent_auto_send", "🤖 Windows Agent 自动发送（关闭则人工确认 SEND）/ Agent auto send"),
         ("wa_notice_1900", "🕖 19:00 报名通知 / Signup notice"),
         ("wa_roster_2200", "🕙 22:00 正式值班表 / Full roster"),
         ("wa_late_signup", "🌅 早上新增义工汇总通知（普通日 07:00／大日子 05:30）/ Morning late-signup summary"),

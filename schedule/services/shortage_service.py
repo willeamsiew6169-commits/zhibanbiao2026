@@ -11,7 +11,7 @@ def build_shortage_summary_for_admin(date_str, conn=None):
     msg = build_shortage_notice_from_assignments(date_str, conn=conn) or ""
     lines = []
     for line in msg.splitlines():
-        if line.startswith("🔴") or line.startswith("🟡"):
+        if line.startswith(("🧹", "🕙", "🕑")):
             lines.append(line)
     return lines
 
