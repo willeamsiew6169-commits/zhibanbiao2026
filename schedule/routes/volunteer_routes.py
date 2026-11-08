@@ -314,7 +314,7 @@ def volunteer_home():
 
         meal_count = min(total_meal, 9)
 
-        meal_button_date = check_date.strftime("%d/%m").lstrip("0").replace("/0", "/")
+        meal_button_date = f"{check_date.month}月{check_date.day}日（星期{'一二三四五六日'[check_date.weekday()]}）"
 
         meal_status_text = "已满" if meal_count >= 9 else f"{meal_count}/9"
 

@@ -188,6 +188,60 @@ def is_fixed_buddha_volunteer(volunteer_name, duty_date):
         for name in get_fixed_buddha_for_date(str(duty_date))
     )
 
+def get_eligible_signin_roles(volunteer, raw_id, assignments=None):
+    """Today's eligible roles; always read current DB state and policy switches."""
+    from opencc import OpenCC
+    from schedule.schedule_web import get_fixed_buddha_for_date
+
+    today = malaysia_today()
+    ids = get_assignment_id_candidates(volunteer, raw_id)
+    assignments = assignments if assignments is not None else load_today_assignments_for_volunteer(volunteer, raw_id)
+    roles = set()
+
+    # 严格智能筛选：当天有值班排班或对应岗位有效报名才显示。
+    # 不受负责人旧版「报名后才能签到」开关关闭的影响。
+    if any(a.get("role") == "值班" for a in assignments):
+        roles.add("值班")
+    for role in ("卫生", "膳食"):
+        if has_active_signup_for_role(volunteer, raw_id, role):
+            roles.add(role)
+
+    converter = OpenCC("t2s")
+    def norm(value):
+        return "".join(converter.convert(str(value or "")).split()).casefold()
+
+    name = norm(volunteer.get("姓名"))
+    if name and any(norm(n) == name for n in get_fixed_buddha_for_date(today.isoformat())):
+        roles.add("佛台")
+
+    # Supply: manager-assigned setup/removal people OR an active supply signup.
+    flags = db_query("""
+        SELECT setup_people, remove_people FROM schedule_day_flags WHERE flag_date=%s
+    """, (today,), fetchone=True) or {}
+    assigned_people = (str(flags.get("setup_people") or "") + "\n" +
+                       str(flags.get("remove_people") or "")).splitlines()
+    if name and any(norm(n) == name for n in assigned_people):
+        roles.add("供台")
+    if has_active_signup_for_role(volunteer, raw_id, "供台"):
+        roles.add("供台")
+
+    fixed = db_query("""
+        SELECT role FROM volunteer_fixed_roles
+        WHERE volunteer_id = ANY(%s) AND role IN ('供花','供果','佛学班')
+    """, (ids,), fetchall=True) or []
+    fixed_roles = {r["role"] for r in fixed}
+    if "佛学班" in fixed_roles and today.weekday() in (5, 6):
+        roles.add("佛学班")
+    if fixed_roles.intersection(("供花", "供果")):
+        work = db_query("""
+            SELECT 1 FROM flower_fruit_work_days WHERE work_date=%s LIMIT 1
+        """, (today,), fetchone=True)
+        if work:
+            roles.update(fixed_roles.intersection(("供花", "供果")))
+
+    return [role for role in ROLES if role in roles]
+
+
 def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignment_id=None) -> tuple[bool, str]:
     raw_id = str(volunteer_id or "").strip()
     role = str(role or "").strip()
@@ -221,23 +275,9 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
 
     assignments = load_today_assignments_for_volunteer(volunteer, raw_id)
 
-    # 每次签到读取 Supabase 最新开关；不依赖重启或 Python 常量。
-    policies = get_signin_policies()
-    require_duty = policies["duty"]
-    require_cleaning = policies["cleaning"]
-    require_meal = policies["meal"]
-
-    # 按岗位独立控制；卫生只需报名，不需负责人正式安排。
-    # 注意：不能用值班排班冒充卫生/膳食报名。
-    if role == "值班" and require_duty:
-        if not any(a.get("role") == "值班" for a in assignments):
-            return False, "今天没有有效的值班正式排班，不能签到。"
-    elif role == "卫生" and require_cleaning:
-        if not has_active_signup_for_role(volunteer, raw_id, "卫生"):
-            return False, "今天没有有效的卫生报名，请先报名后再签到。"
-    elif role == "膳食" and require_meal:
-        if not has_active_signup_for_role(volunteer, raw_id, "膳食"):
-            return False, "今天没有有效的膳食组报名，请先报名后再签到。"
+    # 方案 A：前端显示与后台签到使用同一份当天资格判断，防止绕过页面提交。
+    if role not in get_eligible_signin_roles(volunteer, raw_id, assignments):
+        return False, f"今天没有有效的{role}报名、排班或固定岗位资格，不能签到。"
 
     # 即使限制关闭，也不允许把其他岗位的 assignment_id 当作本岗位。
     assignments = [a for a in assignments if a.get("role") == role]

@@ -69,6 +69,7 @@ from attendance_service import (
     AUTO_SIGNOUT_TIME,
     AUTO_SIGNOUT_DISPLAY,
     auto_signout_unfinished_today,
+    get_eligible_signin_roles,
 )
 
 from utils import (
@@ -590,7 +591,7 @@ PAGE = """
       </div>
 
       <div class="hero-date">
-          🙏 {{ t.get("welcome_home", "欢迎回来，感恩您的发心护持") }}
+          🙏 {{ t.welcome_home }}
       </div>
 
       <div class="hero-links">
@@ -746,9 +747,7 @@ PAGE = """
                 id="role"
                 onchange="toggleCardNo(); refreshRoleAction()">
 
-                {% for role in roles %}
-                    <option value="{{ role }}">{{ role_label(role) }}</option>
-                {% endfor %}
+                <option value="">{{ t.lookup_placeholder }}</option>
 
             </select>
 
@@ -778,7 +777,7 @@ PAGE = """
                 class="btn-tool btn-success"
                 type="submit"
                 style="display:none;">
-            {{ "确认签到" if t.html_lang.startswith("zh") else "Confirm Check-in" }}
+            {{ t.confirm_checkin }}
         </button>
 
         <button id="signOutBtn"
@@ -786,7 +785,7 @@ PAGE = """
                 type="button"
                 style="display:none;"
                 onclick="submitQuickSignOut();">
-            {{ "确认签退" if t.html_lang.startswith("zh") else "Confirm Check-out" }}
+            {{ t.confirm_checkout }}
         </button>
       </div>
 
@@ -892,6 +891,8 @@ PAGE = """
 </div>
 
 <script>
+const ROLE_LABELS = {{ role_text_labels|tojson }};
+window.ROLE_LABELS = ROLE_LABELS;
 const TXT = {
   enter_id_first: {{ t.enter_id_first|tojson }},
   not_found_id: {{ t.not_found_id|tojson }},
@@ -903,7 +904,28 @@ const TXT = {
   signout_prompt: {{ t.signout_prompt|tojson }},
   pin_empty: {{ t.pin_empty|tojson }},
   paid_until: {{ t.paid_until|tojson }},
-  pin_wrong: {{ t.pin_wrong|tojson }}
+  pin_wrong: {{ t.pin_wrong|tojson }},
+  lookup_placeholder: {{ t.lookup_placeholder|tojson }},
+  no_eligible_role: {{ t.no_eligible_role|tojson }},
+  verify_pin_first: {{ t.verify_pin_first|tojson }},
+  today_duties: {{ t.today_duties|tojson }},
+  duty_completed: {{ t.duty_completed|tojson }},
+  duty_auto_out: {{ t.duty_auto_out|tojson }},
+  duty_active: {{ t.duty_active|tojson }},
+  duty_pending: {{ t.duty_pending|tojson }},
+  duty_place: {{ t.duty_place|tojson }},
+  duty_role: {{ t.duty_role|tojson }},
+  duty_time: {{ t.duty_time|tojson }},
+  no_formal_duty: {{ t.no_formal_duty|tojson }},
+  currently_checked_in: {{ t.currently_checked_in|tojson }},
+  currently_can_checkin: {{ t.currently_can_checkin|tojson }},
+  formal_duty_finished: {{ t.formal_duty_finished|tojson }},
+  pin_search_again: {{ t.pin_search_again|tojson }},
+  lookup_required_alert: {{ t.lookup_required_alert|tojson }},
+  confirm_checkin: {{ t.confirm_checkin|tojson }},
+  confirm_checkout: {{ t.confirm_checkout|tojson }},
+  welcome_home: {{ t.welcome_home|tojson }},
+  card_no_tip: {{ t.card_no_duty_tip|tojson }}
 };
 
 let verifiedLookupKey = null;
@@ -922,6 +944,9 @@ function invalidateLookup() {
   document.getElementById('signOutBtn').style.display = 'none';
   document.getElementById('assignment_id').value = '';
   document.getElementById('personBox').style.display = 'none';
+  const roleSelect = document.getElementById('role');
+  roleSelect.innerHTML = '';
+  roleSelect.add(new Option(TXT.lookup_placeholder, ''));
 }
 async function lookupVolunteer() {
   invalidateLookup();
@@ -969,7 +994,11 @@ async function lookupVolunteer() {
   `${TXT.name}：<b>${data.volunteer.姓名}</b>`;
 
     if (data.volunteer.pin_ok) {
-      html += `<br>${TXT.phone}：${data.volunteer.电话号码 || '-'}`;
+       const phoneDigits = String(data.volunteer.电话号码 || '').replace(/\D/g, '');
+       const displayPhone = /^0\d{8,10}$/.test(phoneDigits)
+         ? phoneDigits.slice(0, 3) + '-' + phoneDigits.slice(3)
+         : (data.volunteer.电话号码 || '-');
+       html += `<br>${TXT.phone}：${displayPhone}`;
 
       const paidUntil = data.volunteer["月费已缴费至"];
 
@@ -981,20 +1010,20 @@ async function lookupVolunteer() {
     }
 
     if (data.today_assignments && data.today_assignments.length > 0) {
-      html += `<br><hr><b>📅 今天工作安排 / Today's Duties</b>`;
+      html += `<br><hr><b>${TXT.today_duties}</b>`;
       data.today_assignments.forEach(a => {
-        const mark = a.state === "completed" ? (a.auto_signed_out ? "⚠️ 已自动签退" : "✅ 已完成") :
-                     a.state === "active" ? "🟢 进行中" : "🕒 待开始";
+        const mark = a.state === "completed" ? (a.auto_signed_out ? "⚠️ " + TXT.duty_auto_out : "✅ " + TXT.duty_completed) :
+                     a.state === "active" ? "🟢 " + TXT.duty_active : "🕒 " + TXT.duty_pending;
         html += `
           <div style="margin-top:10px;">
             ${mark}<br>
-            地点：<b>${a.assigned_place || "-"}</b><br>
-            岗位：${a.role || "-"}<br>
-            时间：${a.start_time || "-"} ～ ${a.end_time || "-"}
+            ${TXT.duty_place}：<b>${a.assigned_place || "-"}</b><br>
+            ${TXT.duty_role}：${(window.ROLE_LABELS || {})[a.role] || a.role || "-"}<br>
+            ${TXT.duty_time}：${a.start_time || "-"} ～ ${a.end_time || "-"}
           </div>`;
       });
     } else {
-      html += `<br><hr><b style="color:#b02a37;">今天没有正式安排</b>`;
+      html += `<br><hr><b style="color:#b02a37;">${TXT.no_formal_duty}</b>`;
     }
 
     const signInBtn = document.getElementById('signInBtn');
@@ -1005,19 +1034,38 @@ async function lookupVolunteer() {
     assignmentInput.value = '';
 
     window.lastAttendanceLookup = data;
+    const roleSelect = document.getElementById('role');
+    roleSelect.innerHTML = '';
+    if (pin && data.volunteer.pin_ok) {
+      (data.eligible_roles || []).forEach(item => {
+        const option = document.createElement('option');
+        option.value = item.role;
+        option.textContent = item.label;
+        roleSelect.appendChild(option);
+      });
+    }
+    if (!roleSelect.options.length) {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = (pin && data.volunteer.pin_ok)
+        ? TXT.no_eligible_role
+        : TXT.verify_pin_first;
+      roleSelect.appendChild(option);
+    }
+    toggleCardNo();
     // 空 PIN 仅查看排班；填写 PIN 时必须验证正确才能操作。
     verifiedLookupKey = (pin && data.volunteer.pin_ok) ? lookupKey : null;
     updateSigninOnlyVisibility(data.attendance_action === 'signout');
     if (data.attendance_action === 'signout') {
       signOutBtn.style.display = '';
       assignmentInput.value = data.current_assignment_id || '';
-      html += `<br><hr><b style="color:#198754;">当前状态：已签到，请完成后签退。</b>`;
+      html += `<br><hr><b style="color:#198754;">${TXT.currently_checked_in}</b>`;
     } else if (data.attendance_action === 'signin') {
       signInBtn.style.display = '';
       assignmentInput.value = data.current_assignment_id || '';
-      html += `<br><hr><b style="color:#0d6efd;">当前可签到：${data.current_assignment_text || ''}</b>`;
+      html += `<br><hr><b style="color:#0d6efd;">${TXT.currently_can_checkin}：${data.current_assignment_text || ''}</b>`;
     } else if (data.attendance_action === 'completed') {
-      html += `<br><hr><b style="color:#198754;">✅ 今日正式值班已完成</b>`;
+      html += `<br><hr><b style="color:#198754;">✅ ${TXT.formal_duty_finished}</b>`;
     } else {
       // 试用期：没有正式排班时仍保留现场签到。
       signInBtn.style.display = '';
@@ -1028,7 +1076,7 @@ async function lookupVolunteer() {
     if (!pin) {
       signInBtn.style.display = 'none';
       signOutBtn.style.display = 'none';
-      html += `<br><span style="color:#666;">如需签到或签退，请输入 PIN 后再次查询。 / Enter PIN and search again to check in or out.</span>`;
+      html += `<br><span style="color:#666;">${TXT.pin_search_again}</span>`;
       box.innerHTML = html;
     }
     if (pin && !data.volunteer.pin_ok) {
@@ -1113,6 +1161,8 @@ function refreshRoleAction() {
     assignmentInput.value = data.current_assignment_id || '';
     return;
   }
+  // 没有当天符合资格的岗位时，不允许提交空岗位。
+  if (!role || !(data.eligible_roles || []).some(item => item.role === role)) return;
   // 已完成某一轮值班，不影响同一天其他岗位签到。
   const pending = (data.today_assignments || []).find(a => a.role === role && a.state === 'pending');
   if (pending && pending.id && !pending.display_only) assignmentInput.value = pending.id;
@@ -1145,7 +1195,7 @@ function toggleAdminBox() {
 
 function quickSignIn() {
   if (verifiedLookupKey !== currentLookupKey()) {
-    alert('请先输入正确 PIN 并点击查询 / Enter a valid PIN and search first');
+    alert(TXT.lookup_required_alert);
     return false;
   }
   const pin = document.getElementById('pin').value.trim();
@@ -1170,14 +1220,14 @@ let pendingSignOutId = "";
 
 function submitQuickSignOut() {
   if (verifiedLookupKey !== currentLookupKey()) {
-    alert('请先输入正确 PIN 并点击查询 / Enter a valid PIN and search first');
+    alert(TXT.lookup_required_alert);
     return;
   }
   const pin = document.getElementById('pin').value.trim();
   const volunteerId = document.getElementById("volunteer_id").value.trim();
 
   if (!volunteerId) {
-    alert("请先输入义工编号");
+    alert(TXT.enter_id_first);
     return;
   }
 
@@ -1269,7 +1319,7 @@ window.addEventListener("load", function() {
         </h2>
 
         <div class="page-subtitle">
-            请输入该义工 PIN
+            {{ t.enter_volunteer_pin }}
         </div>
 
         <div class="form-group">
@@ -1278,7 +1328,7 @@ window.addEventListener("load", function() {
                 id="dialog_pin"
                 class="form-input"
                 type="password"
-                placeholder="请输入 PIN">
+                placeholder="{{ t.enter_pin_for_checkout }}">
 
         </div>
 
@@ -1288,7 +1338,7 @@ window.addEventListener("load", function() {
                 type="checkbox"
                 onchange="toggleDialogPin(this)">
 
-            显示 PIN
+            {{ t.show_pin }}
 
         </label>
 
@@ -1298,7 +1348,7 @@ window.addEventListener("load", function() {
                 class="btn-tool btn-secondary"
                 onclick="closeSignOutDialog()">
 
-                取消
+                {{ t.cancel }}
 
             </button>
 
@@ -1306,7 +1356,7 @@ window.addEventListener("load", function() {
                 class="btn-tool btn-danger"
                 onclick="confirmSignOut()">
 
-                确认签退
+                {{ t.confirm_checkout }}
 
             </button>
 
@@ -1607,7 +1657,8 @@ def index():
         6: "星期日",
     }
 
-    today_text = now.strftime("%Y年%m月%d日") + " " + weekday_map[now.weekday()]
+    today_text = (now.strftime("%Y年%m月%d日") + " " + weekday_map[now.weekday()]
+                  if get_lang() == "zh" else now.strftime("%d %B %Y (%A)"))
     malaysia_time = now.strftime("%I:%M %p")
 
     special_day_info = get_special_day_info(now.date())
@@ -1622,6 +1673,7 @@ def index():
         t=get_text(),
         roles=ROLES,
         role_label=role_label,
+        role_text_labels={r: role_label(r) for r in ROLES},
         today_count=stats["total"],
         not_out=stats["open"],
         done_out=stats["finished"],
@@ -2055,9 +2107,14 @@ def api_volunteer(volunteer_id):
 
             safe_v["月费已缴费至"] = paid_until
 
+        eligible_roles = ([{"role": role, "label": role_label(role)}
+                           for role in get_eligible_signin_roles(v, volunteer_id)]
+                          if pin_ok else [])
+
         return jsonify({
             "ok": True,
             "volunteer": safe_v,
+            "eligible_roles": eligible_roles,
             "today_assignments": today_assignments,
             "attendance_action": attendance_action,
             "current_assignment_id": current_assignment_id,

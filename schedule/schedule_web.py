@@ -1414,6 +1414,34 @@ def schedule_admin():
     signup_details = load_admin_signup_details(override_date) if mode in ("day", "signup", "special", "controls") else []
     buddha_names = load_buddha_name_options()
     fixed_buddha_today = get_fixed_buddha_for_date(override_date)
+    # 佛台请假日期独立于负责人主页日期；允许提前安排未来30天。
+    buddha_leave_dates = [(malaysia_today() + timedelta(days=i)).isoformat() for i in range(31)] if mode == "special" else []
+    requested_leave_date = request.args.get("buddha_leave_date", "")
+    selected_buddha_leave_date = (requested_leave_date if requested_leave_date in buddha_leave_dates
+                                  else (override_date if override_date in buddha_leave_dates
+                                        else (buddha_leave_dates[0] if buddha_leave_dates else override_date)))
+    buddha_leave_names = (get_fixed_buddha_for_date(selected_buddha_leave_date)
+                          if mode == "special" else [])
+    # 初一补人独立选日期，不影响负责人页面及佛台请假使用的日期。
+    extra_buddha_dates = []
+    for offset in (range(91) if mode == "special" else ()):
+        candidate = malaysia_today() + timedelta(days=offset)
+        info = get_special_day_info(candidate) or {}
+        if info.get("template_type") == "lunar_1_15" and "初一" in str(info.get("lunar_text") or ""):
+            extra_buddha_dates.append(candidate.isoformat())
+    requested_extra_date = request.args.get("extra_buddha_date", "")
+    selected_extra_buddha_date = (requested_extra_date if requested_extra_date in extra_buddha_dates
+                                  else (extra_buddha_dates[0] if extra_buddha_dates else ""))
+    extra_buddha_fixed_names = (get_fixed_buddha_for_date(selected_extra_buddha_date)
+                                if selected_extra_buddha_date else [])
+    extra_buddha_saved = ""
+    if selected_extra_buddha_date:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT extra_buddha_person FROM schedule_day_flags WHERE flag_date = %s",
+                            (selected_extra_buddha_date,))
+                saved_row = cur.fetchone()
+                extra_buddha_saved = (saved_row.get("extra_buddha_person") or "") if saved_row else ""
     _roster_loaded = time.perf_counter()
 
     if os.environ.get("SCHEDULE_DASHBOARD_TIMING") == "1":
@@ -1509,6 +1537,13 @@ def schedule_admin():
         remove_saved=remove_saved,
         override_date=override_date,
         fixed_buddha_today=fixed_buddha_today,
+        buddha_leave_dates=buddha_leave_dates,
+        selected_buddha_leave_date=selected_buddha_leave_date,
+        buddha_leave_names=buddha_leave_names,
+        extra_buddha_dates=extra_buddha_dates,
+        selected_extra_buddha_date=selected_extra_buddha_date,
+        extra_buddha_fixed_names=extra_buddha_fixed_names,
+        extra_buddha_saved=extra_buddha_saved,
         multi_day_signup_open=dashboard["multi_day_signup_open"],
         meal_signup_open=is_meal_signup_open(),
         food_offering_open=dashboard["food_offering_open"],
@@ -2474,6 +2509,13 @@ def save_day_flags():
     if form_type == "remove_table" and not (malaysia_today() <= selected <= malaysia_today() + timedelta(days=90)):
         return "❌ 收供台日期必须在未来90天内", 400
 
+    if form_type == "extra_buddha":
+        info = get_special_day_info(selected) or {}
+        if not (malaysia_today() <= selected <= malaysia_today() + timedelta(days=90)
+                and info.get("template_type") == "lunar_1_15"
+                and "初一" in str(info.get("lunar_text") or "")):
+            return "❌ 初一补人只能选择未来90天内的农历初一", 400
+
     if form_type == "master_table":
         allowed = {item["date"] for item in _master_table_dates()}
         if date_str not in allowed:
@@ -2546,7 +2588,8 @@ def save_day_flags():
     return redirect(url_for("schedule.schedule_admin", mode="special",
                             override_date=(date_str if form_type != "remove_table" else request.form.get("setup_date", "") or date_str),
                             remove_date=(date_str if form_type == "remove_table" else ""),
-                            panel=("master-table" if form_type in ("master_table", "remove_table") else "extra-buddha")))
+                            panel=("master-table" if form_type in ("master_table", "remove_table") else "extra-buddha"),
+                            extra_buddha_date=(date_str if form_type == "extra_buddha" else "")))
 
 
 @schedule_bp.route("/schedule/fill_pending", methods=["POST"])
@@ -2808,6 +2851,11 @@ def schedule_override():
     except Exception as exc:
         flash(f"保存佛台请假失败：{exc}")
 
+    panel = request.form.get("return_panel", "")
+    if panel in ("extra-buddha", "buddha-leave"):
+        kwargs = {"mode": "special", "override_date": request.form.get("return_override_date") or date, "panel": panel}
+        kwargs["extra_buddha_date" if panel == "extra-buddha" else "buddha_leave_date"] = date
+        return redirect(url_for("schedule.schedule_admin", **kwargs))
     return redirect(url_for("schedule.schedule_admin", mode="day", override_date=date))
 
 
@@ -2821,6 +2869,11 @@ def schedule_override_reset():
         delete_buddha_override(date_str)
     except Exception as exc:
         flash(f"恢复固定佛台失败：{exc}")
+    panel = request.form.get("return_panel", "")
+    if panel in ("extra-buddha", "buddha-leave"):
+        kwargs = {"mode": "special", "override_date": request.form.get("return_override_date") or date_str, "panel": panel}
+        kwargs["extra_buddha_date" if panel == "extra-buddha" else "buddha_leave_date"] = date_str
+        return redirect(url_for("schedule.schedule_admin", **kwargs))
     return redirect(url_for("schedule.schedule_admin", mode="day", override_date=date_str))
 
 
@@ -5413,6 +5466,107 @@ window.addEventListener("DOMContentLoaded",function(){
 """
 
 
+
+
+# 固定岗位人员管理：独立页面，不影响现有排班、佛台及通知功能。
+_FIXED_ROLE_OPTIONS = ("供花", "供果", "佛学班")
+
+_FIXED_ROLES_HTML = """
+<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>固定岗位人员管理</title>
+<style>
+body{font-family:"Microsoft YaHei",Arial,sans-serif;background:#f5f7fa;margin:0;padding:20px;color:#243047}
+.wrap{max-width:900px;margin:auto}.card{background:white;padding:22px;margin:16px 0;border-radius:14px;box-shadow:0 2px 10px #0001}
+h1{font-size:26px}h2{font-size:21px}input,select,button{font-size:17px;padding:12px;border-radius:8px;border:1px solid #ccd3df}
+button{background:#187c71;color:white;border:0;cursor:pointer}.danger{background:#ba3e43;padding:7px 12px}
+.row{display:flex;flex-wrap:wrap;gap:12px;align-items:center}table{width:100%;border-collapse:collapse}td,th{padding:11px;border-bottom:1px solid #e5e9ef;text-align:left}
+.notice{padding:12px;background:#e6f4ed;border-radius:8px}.error{background:#ffe7e7}a{color:#187c71}
+</style></head><body><div class="wrap">
+<a href="/schedule/admin">← 返回负责人首页</a>
+<h1>👥 固定岗位人员管理</h1>
+<p>只管理供花、供果及佛学班固定成员；不会修改排班或签到记录。</p>
+{% with messages = get_flashed_messages(with_categories=true) %}{% for category,msg in messages %}
+<div class="notice {{ 'error' if category == 'error' else '' }}">{{ msg }}</div>
+{% endfor %}{% endwith %}
+<div class="card"><h2>➕ 加入固定成员</h2>
+<form method="post" class="row"><input type="hidden" name="action" value="add">
+<label>岗位 <select name="role" required>{% for role in roles %}<option value="{{ role }}">{{ role }}</option>{% endfor %}</select></label>
+<label>义工编号 <input name="volunteer_id" placeholder="CHE-208 / STW-xxx / 8xx" required autocomplete="off"></label>
+<button type="submit">查询并加入</button></form>
+<p style="color:#667">以 Supabase volunteers 的正式编号为准；若编号无匹配，将拒绝加入。</p></div>
+{% for role in roles %}
+<div class="card"><h2>{{ '🌸' if role == '供花' else ('🍎' if role == '供果' else '📖') }} {{ role }}（{{ members[role]|length }} 人）</h2>
+{% if members[role] %}<table><thead><tr><th>编号</th><th>姓名</th><th>操作</th></tr></thead><tbody>
+{% for member in members[role] %}<tr><td>{{ member.volunteer_id }}</td><td>{{ member.name }}</td>
+<td><form method="post" onsubmit="return confirm('确定从{{ role }}移除 {{ member.name }}？');">
+<input type="hidden" name="action" value="remove"><input type="hidden" name="role" value="{{ role }}">
+<input type="hidden" name="volunteer_id" value="{{ member.volunteer_id }}"><button class="danger">移除</button></form></td></tr>{% endfor %}
+</tbody></table>{% else %}<p>尚无固定成员。</p>{% endif %}</div>
+{% endfor %}</div></body></html>
+"""
+
+
+@schedule_bp.route("/schedule/fixed-roles", methods=["GET", "POST"])
+def schedule_fixed_roles():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+
+    if request.method == "POST":
+        action = request.form.get("action", "").strip()
+        role = request.form.get("role", "").strip()
+        raw_id = request.form.get("volunteer_id", "").strip().upper()
+        if action not in ("add", "remove") or role not in _FIXED_ROLE_OPTIONS or not raw_id:
+            flash("操作资料不正确。", "error")
+            return redirect(url_for("schedule.schedule_fixed_roles"))
+        try:
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    if action == "add":
+                        # 数字 CHE 编号与 8xx 编号均支持；禁止模糊匹配姓名。
+                        candidates = [raw_id]
+                        if raw_id.isdigit() and not raw_id.startswith("8"):
+                            candidates.append("CHE-" + raw_id)
+                        cur.execute("""
+                            SELECT id, name FROM volunteers
+                            WHERE id = ANY(%s) AND status = '在册'
+                            ORDER BY CASE WHEN id=%s THEN 0 ELSE 1 END LIMIT 1
+                        """, (candidates, raw_id))
+                        volunteer = cur.fetchone()
+                        if not volunteer:
+                            flash("找不到在册义工编号，请检查后重试。", "error")
+                            return redirect(url_for("schedule.schedule_fixed_roles"))
+                        cur.execute("""
+                            INSERT INTO volunteer_fixed_roles (volunteer_id, role)
+                            VALUES (%s, %s) ON CONFLICT (volunteer_id, role) DO NOTHING
+                        """, (volunteer["id"], role))
+                        flash(f"已保存：{volunteer['name']}（{volunteer['id']}）→ {role}", "ok")
+                    else:
+                        cur.execute("""
+                            DELETE FROM volunteer_fixed_roles
+                            WHERE volunteer_id=%s AND role=%s
+                        """, (raw_id, role))
+                        flash("已移除固定岗位成员。", "ok")
+        except Exception:
+            flash("保存失败：请先确认 Supabase 已建立 volunteer_fixed_roles 数据表。", "error")
+        return redirect(url_for("schedule.schedule_fixed_roles"))
+
+    try:
+        rows = db_query("""
+            SELECT f.volunteer_id, f.role, COALESCE(v.name, '义工资料已不存在') AS name
+            FROM volunteer_fixed_roles f
+            LEFT JOIN volunteers v ON v.id=f.volunteer_id
+            WHERE f.role = ANY(%s)
+            ORDER BY f.role, v.name, f.volunteer_id
+        """, (list(_FIXED_ROLE_OPTIONS),), fetchall=True) or []
+    except Exception:
+        rows = []
+        flash("读取名单失败：请先执行 Supabase 建表 SQL。", "error")
+    members = {role: [] for role in _FIXED_ROLE_OPTIONS}
+    for row in rows:
+        members[row["role"]].append(row)
+    return render_template_string(_FIXED_ROLES_HTML, roles=_FIXED_ROLE_OPTIONS, members=members)
+
 SCHEDULE_HTML = """
 <!doctype html>
 <html>
@@ -5498,7 +5652,7 @@ document.addEventListener('DOMContentLoaded', function () {
     });
     const panel = new URLSearchParams(window.location.search).get('panel');
     if (panel === 'master-table' && select && select.value !== new URLSearchParams(window.location.search).get('override_date')) { openMasterDay(select.value); return; }
-    if (panel === 'master-table' || panel === 'extra-buddha') showSpecial(panel);
+    if (panel === 'master-table' || panel === 'extra-buddha' || panel === 'buddha-leave') showSpecial(panel);
 });
 function showSpecial(id) {
     if (id === 'master-table') {
@@ -5622,6 +5776,7 @@ html {
       <a class="btn-tool btn-gray" style="background:#d64a84;border-color:#d64a84;color:#fff" href="/schedule?mode=special&override_date={{ override_date }}">🌸 供台及佛台特别安排</a>
       <a class="btn-tool btn-gray" style="background:#078b9b;border-color:#078b9b;color:#fff" href="/schedule?mode=controls&override_date={{ override_date }}">🔧 报名开放控制</a>
       <a class="btn-tool btn-green" style="background:#b47a17;border-color:#b47a17;color:#fff" href="/reports">📚 资料中心</a>
+      <a class="btn-tool btn-green" style="background:#237d76;border-color:#237d76;color:#fff" href="/schedule/fixed-roles">👥 固定岗位人员管理</a>
       <a class="btn-tool btn-gray" style="background:#596879;border-color:#596879;color:#fff" href="/schedule/settings">⚙️ 排班设置</a>
       <a class="btn-tool btn-gray" style="background:#146e86;border-color:#146e86;color:#fff" href="/schedule/whatsapp-automation">📲 WhatsApp 自动通知</a>
       <a class="btn-tool btn-blue" style="background:#275de4;border-color:#275de4;color:#fff" href="/volunteer">👥 打开义工报名页面</a>
@@ -6165,21 +6320,61 @@ html {
         <div id="extra-buddha" class="special-box" style="display:none;">
             <h3>🌸 初一整理佛台补人</h3>
 
+            {% if extra_buddha_dates %}
+            <form method="get" action="/schedule">
+                <input type="hidden" name="mode" value="special">
+                <input type="hidden" name="override_date" value="{{ override_date }}">
+                <input type="hidden" name="panel" value="extra-buddha">
+                <label for="extra_buddha_date">选择初一日期：</label>
+                <select id="extra_buddha_date" name="extra_buddha_date" onchange="this.form.submit()" style="width:100%;font-size:22px;">
+                    {% for d in extra_buddha_dates %}
+                    <option value="{{ d }}" {% if d == selected_extra_buddha_date %}selected{% endif %}>{{ d }}（初一）</option>
+                    {% endfor %}
+                </select>
+            </form>
             <div class="info-box">
                 <b>🛕 当天负责整理佛台义工</b><br><br>
 
-                {% if fixed_buddha_today %}
-                    {% for n in fixed_buddha_today %}
-                        🟢 {{ n }}<br>
-                    {% endfor %}
+                {% if extra_buddha_fixed_names %}
+                    <form method="post" action="/schedule/override">
+                        <input type="hidden" name="date" value="{{ selected_extra_buddha_date }}">
+                        <input type="hidden" name="return_panel" value="extra-buddha">
+                        <input type="hidden" name="return_override_date" value="{{ override_date }}">
+                        {% for n in extra_buddha_fixed_names %}
+                        <div style="margin:10px 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                            <span>🟢 {{ n }}</span>
+                            <input type="hidden" name="original_name" value="{{ n }}">
+                            <select name="replacement_name" style="font-size:20px;max-width:100%;">
+                                <option value="">不变，保留原本</option>
+                                <option value="__REMOVE__">请假，不找替补</option>
+                                {% for candidate in buddha_names %}
+                                {% if candidate != n %}<option value="{{ candidate }}">换人：{{ candidate }}</option>{% endif %}
+                                {% endfor %}
+                            </select>
+                        </div>
+                        {% endfor %}
+                        <button type="submit" class="btn-tool btn-blue">💾 保存请假 / 换人</button>
+                    </form>
+                    <form method="post" action="/schedule/override/reset" style="margin-top:10px;">
+                        <input type="hidden" name="date" value="{{ selected_extra_buddha_date }}">
+                        <input type="hidden" name="return_panel" value="extra-buddha">
+                        <input type="hidden" name="return_override_date" value="{{ override_date }}">
+                        <button type="submit" class="btn-tool btn-red">↩ 恢复当天固定佛台名单</button>
+                    </form>
                 {% else %}
-                    ⚪ 今天没有固定整理佛台义工
+                    ⚪ 该日没有固定整理佛台义工
+                    <form method="post" action="/schedule/override/reset" style="margin-top:10px;">
+                        <input type="hidden" name="date" value="{{ selected_extra_buddha_date }}">
+                        <input type="hidden" name="return_panel" value="extra-buddha">
+                        <input type="hidden" name="return_override_date" value="{{ override_date }}">
+                        <button type="submit" class="btn-tool btn-red">↩ 恢复当天固定佛台名单</button>
+                    </form>
                 {% endif %}
             </div>
 
             <form method="post" action="/schedule/save_day_flags">
                 <input type="hidden" name="form_type" value="extra_buddha">
-                <input type="hidden" name="date" value="{{ override_date }}">
+                <input type="hidden" name="date" value="{{ selected_extra_buddha_date }}">
 
                 <p style="font-size:20px;color:#666;">
                     仅初一需要。可增加第 3 位整理佛台义工。
@@ -6190,7 +6385,7 @@ html {
                 <select name="extra_buddha_person" style="width:100%;font-size:22px;">
                     <option value="">不需要增加</option>
                     {% for n in buddha_names %}
-                    <option value="{{ n }}" {% if day_flags.extra_buddha_person == n %}selected{% endif %}>
+                    <option value="{{ n }}" {% if extra_buddha_saved == n %}selected{% endif %}>
                         {{ n }}
                     </option>
                     {% endfor %}
@@ -6200,19 +6395,34 @@ html {
 
                 <button type="submit" class="btn-tool btn-blue">💾 保存初一补人</button>
             </form>
+            {% else %}
+            <p>未来90天内没有可选择的初一日期。</p>
+            {% endif %}
         </div>
 
         <!-- 3. 佛台请假 -->
         <div id="buddha-leave" class="special-box" style="display:none;">
             <h3>🔁 佛台请假 / 换人</h3>
 
-            <p>日期：{{ override_date }}</p>
+            <form method="get" action="/schedule" style="margin-bottom:18px;">
+                <input type="hidden" name="mode" value="special">
+                <input type="hidden" name="override_date" value="{{ override_date }}">
+                <input type="hidden" name="panel" value="buddha-leave">
+                <label for="buddha_leave_date">选择请假 / 换人日期：</label>
+                <input type="date" id="buddha_leave_date" name="buddha_leave_date"
+                       value="{{ selected_buddha_leave_date }}"
+                       min="{{ buddha_leave_dates[0] }}" max="{{ buddha_leave_dates[-1] }}"
+                       onchange="this.form.submit()"
+                       style="width:100%;font-size:22px;box-sizing:border-box;">
+            </form>
 
             <form method="post" action="/schedule/override">
-                <input type="hidden" name="date" id="override_date" value="{{ override_date }}">
+                <input type="hidden" name="date" value="{{ selected_buddha_leave_date }}">
+                <input type="hidden" name="return_panel" value="buddha-leave">
+                <input type="hidden" name="return_override_date" value="{{ override_date }}">
 
-                {% if fixed_buddha_today %}
-                    {% for old_name in fixed_buddha_today %}
+                {% if buddha_leave_names %}
+                    {% for old_name in buddha_leave_names %}
                         <div style="font-size:22px; margin:12px 0;">
                             {{ old_name }}
                             <input type="hidden" name="original_name" value="{{ old_name }}">
@@ -6235,7 +6445,9 @@ html {
                 {% endif %}
             </form>
             <form method="post" action="/schedule/override/reset" style="margin-top:14px;">
-                <input type="hidden" name="date" value="{{ override_date }}">
+                <input type="hidden" name="date" value="{{ selected_buddha_leave_date }}">
+                <input type="hidden" name="return_panel" value="buddha-leave">
+                <input type="hidden" name="return_override_date" value="{{ override_date }}">
                 <button type="submit" class="btn-tool btn-red">↩ 恢复当天固定佛台名单</button>
             </form>
         </div>

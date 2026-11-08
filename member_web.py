@@ -22,6 +22,16 @@ cc = OpenCC('t2s')  # 繁 → 简
 
 member_bp = Blueprint("member", __name__, url_prefix="/member")
 
+@member_bp.app_template_filter("member_phone_display")
+def member_phone_display(value):
+    """只格式化网页显示；不修改数据库、查询、PIN 或 WhatsApp 电话号码。"""
+    raw = str(value or "").strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if digits.startswith("0") and 9 <= len(digits) <= 11:
+        return digits[:3] + "-" + digits[3:]
+    return raw or "-"
+
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 MEMBER_ADMIN_PIN = os.environ.get("MEMBER_ADMIN_PIN", "123789")
@@ -1310,7 +1320,7 @@ def admin_late_members():
                     ">
                         <td>{{ r.member_id }}</td>
                         <td>{{ r.name }}</td>
-                        <td>{{ r.phone or "-" }}</td>
+                        <td>{{ r.phone | member_phone_display }}</td>
                         <td>
                             {% if r.wa_link %}
                                 <a class="btn-tool btn-success mini-btn"
@@ -1969,7 +1979,7 @@ th{
                 <td>{{ r.member_id }}</td>
                 <td>{{ r.name }}</td>
                 <td>{{ r.english_name or "-" }}</td>
-                <td>{{ r.phone or "-" }}</td>
+                <td>{{ r.phone | member_phone_display }}</td>
                 <td>{{ r.pin or "-" }}</td>
                 <td>{{ r.branch or "-" }}</td>
                 <td>{{ r.member_status or r.status or "-" }}</td>
@@ -4121,7 +4131,7 @@ MEMBER_HTML = """
                     {% if m.english_name %}
                     英文名：{{ m.english_name }}<br>
                     {% endif %}
-                    电话：{{ m.phone or "-" }}
+                    电话：{{ m.phone | member_phone_display }}
                 </div>
 
                 <button
@@ -4152,7 +4162,7 @@ MEMBER_HTML = """
             {% if member.english_name %}
             英文名：{{ member.english_name }}<br>
             {% endif %}
-            电话：{{ member.phone or "-" }}
+            电话：{{ member.phone | member_phone_display }}
         </div>
 
         {% if summary %}
@@ -4522,7 +4532,7 @@ MEMBER_ADMIN_HTML = """
             {% if member.english_name %}
             英文名：{{ member.english_name }}<br>
             {% endif %}
-            电话：{{ member.phone or "-" }}
+            电话：{{ member.phone | member_phone_display }}
         </div>
     </div>
 
