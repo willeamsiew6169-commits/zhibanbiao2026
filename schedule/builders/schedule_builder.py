@@ -3387,7 +3387,7 @@ def publish_full_schedule_2200_atomic(target_date):
         place = row.get('assigned_place')
         if not name or not role or not place:
             raise RuntimeError('22:00 排班有缺少姓名、岗位或地点的记录；停止发布')
-        if not row.get('start_time') or not row.get('end_time'):
+        if role != '整理佛台' and (not row.get('start_time') or not row.get('end_time')):
             raise RuntimeError(f'22:00 排班 {name} ({role}) 缺少时间；停止发布')
         rows.append(row)
     if not rows:
@@ -3413,7 +3413,7 @@ def publish_full_schedule_2200_atomic(target_date):
             for row in rows:
                 sid = row.get('signup_id') or row.get('id')
                 if sid is not None:
-                    by_signup.setdefault(str(sid), []).append(row)
+                    by_signup.setdefault(str(int(sid)), []).append(row)
             for signup in signups:
                 if signup['role'] not in ('值班', '卫生'):
                     continue
@@ -3443,7 +3443,7 @@ def publish_full_schedule_2200_atomic(target_date):
                      row.get('remarks') or row.get('备注')))
             cur.execute('''UPDATE volunteer_schedule_signups SET status='assigned'
                 WHERE signup_date=%s AND coalesce(status,'pending') <> 'cancelled'
-                AND id=ANY(%s)''', (target, [int(s['id']) for s in signups if str(s['id']) in by_signup]))
+                AND id=ANY(%s)''', (target, [int(s['id']) for s in signups if str(int(s['id'])) in by_signup]))
             cur.execute('''UPDATE schedule_day_flags SET is_published=true,
                 published_at=now(),published_by='AUTO_2200',need_republish=false
                 WHERE flag_date=%s AND coalesce(is_published,false)=false''', (target,))

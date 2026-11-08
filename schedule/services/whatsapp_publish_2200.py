@@ -260,7 +260,7 @@ def dry_run_2200(target_date=None):
     theoretical = {}
     for row in calculated:
         if row.get('signup_id') is not None and row.get('role') == '值班':
-            theoretical.setdefault(str(row['signup_id']), []).append(row)
+            theoretical.setdefault(str(int(row['signup_id'])), []).append(row)
 
     checks = []
     for signup in signups:
