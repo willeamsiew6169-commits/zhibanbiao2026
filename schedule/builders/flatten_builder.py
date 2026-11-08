@@ -73,8 +73,7 @@ def flatten_arranged_for_db(arranged):
                 role = "卫生"
                 assigned_place = group_name
 
-                start_time = None
-                end_time = None
+                # 保留排班生成器提供的卫生开始及结束时间
 
             # ------------------------
             # 供台

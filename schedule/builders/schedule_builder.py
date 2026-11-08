@@ -2421,6 +2421,16 @@ def assign_jobs(fixed_people, signup_df, special_info, patch_mode=False,):
 
         item["role"] = "卫生"
         item["岗位"] = "卫生"
+        # 卫生是固定时段；仅在报名没有有效时间时补默认时间。
+        cleaning_time = (SPECIAL_DEFAULT_TIME if special_info.get("template_type") != "normal"
+                         else DEFAULT_TIME)["佛堂卫生"]
+        for field, alias, default in (("start_time", "开始时间", cleaning_time[0]),
+                                      ("end_time", "结束时间", cleaning_time[1])):
+            value = item.get(field) or item.get(alias)
+            if value is None or pd.isna(value) or not str(value).strip():
+                value = default
+            item[field] = value
+            item[alias] = value
         unique_cleaners.append(item)
 
     # ✅ 重新分配卫生
