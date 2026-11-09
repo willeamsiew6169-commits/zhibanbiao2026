@@ -772,6 +772,10 @@ PAGE = """
 
     </div>
 
+      <div class="form-group" id="signoutRoleGroup" style="display:none;margin:12px 0;">
+        <label class="form-label">{{ '选择签退岗位' if t.html_lang.startswith('zh') else 'Select role to check out' }}</label>
+        <select id="signoutRole" class="form-input" onchange="refreshRoleAction()"></select>
+      </div>
       <div class="btn-row">
         <button id="signInBtn"
                 class="btn-tool btn-success"
@@ -797,6 +801,7 @@ PAGE = """
       <input type="hidden" id="signout_volunteer_id" name="volunteer_id">
       <input type="hidden" id="signout_pin" name="pin">
       <input type="hidden" id="signout_assignment_id" name="assignment_id">
+      <input type="hidden" id="signout_role" name="role">
     </form>
 
     <div class="small-note" id="signinOnlyTip">
@@ -942,6 +947,7 @@ function invalidateLookup() {
   window.lastAttendanceLookup = null;
   document.getElementById('signInBtn').style.display = 'none';
   document.getElementById('signOutBtn').style.display = 'none';
+  document.getElementById('signoutRoleGroup').style.display = 'none';
   document.getElementById('assignment_id').value = '';
   document.getElementById('personBox').style.display = 'none';
   const roleSelect = document.getElementById('role');
@@ -1055,7 +1061,12 @@ async function lookupVolunteer() {
     toggleCardNo();
     // 空 PIN 仅查看排班；填写 PIN 时必须验证正确才能操作。
     verifiedLookupKey = (pin && data.volunteer.pin_ok) ? lookupKey : null;
-    updateSigninOnlyVisibility(data.attendance_action === 'signout');
+     const openRoles = data.open_roles || [];
+     const outSelect = document.getElementById('signoutRole');
+     outSelect.innerHTML = '';
+     openRoles.forEach(r => outSelect.add(new Option(ROLE_LABELS[r] || r, r)));
+     document.getElementById('signoutRoleGroup').style.display = openRoles.length ? '' : 'none';
+     updateSigninOnlyVisibility(false);
     if (data.attendance_action === 'signout') {
       signOutBtn.style.display = '';
       assignmentInput.value = data.current_assignment_id || '';
@@ -1154,15 +1165,14 @@ function refreshRoleAction() {
   signin.style.display = 'none';
   signout.style.display = 'none';
   assignmentInput.value = '';
-  // 当前有未签退记录：只能先签退，不能换岗位再次签到。
   if (!pinValid || !pinEntered) return;
-  if (data.attendance_action === 'signout') {
-    signout.style.display = '';
-    assignmentInput.value = data.current_assignment_id || '';
-    return;
-  }
-  // 没有当天符合资格的岗位时，不允许提交空岗位。
+  const openRoles = data.open_roles || [];
+  if (openRoles.length) signout.style.display = '';
+  // 值班与供台可并行，其余岗位仍须先签退。
   if (!role || !(data.eligible_roles || []).some(item => item.role === role)) return;
+  if (openRoles.includes(role)) return;
+  if (openRoles.length && !(('值班' === role || '供台' === role) &&
+      openRoles.every(r => (r === '值班' || r === '供台') && r !== role))) return;
   // 已完成某一轮值班，不影响同一天其他岗位签到。
   const pending = (data.today_assignments || []).find(a => a.role === role && a.state === 'pending');
   if (pending && pending.id && !pending.display_only) assignmentInput.value = pending.id;
@@ -1246,8 +1256,8 @@ function submitQuickSignOut() {
   // 查询时已验证 PIN；直接提交，后台 sign_out() 仍会再次验证。
   document.getElementById('signout_volunteer_id').value = pendingSignOutId;
   document.getElementById('signout_pin').value = pin;
-  document.getElementById('signout_assignment_id').value =
-      document.getElementById('assignment_id').value || '';
+  document.getElementById('signout_assignment_id').value = '';
+  document.getElementById('signout_role').value = document.getElementById('signoutRole').value || '';
   document.getElementById('quickSignOutForm').submit();
 }
 
@@ -1758,7 +1768,8 @@ def do_sign_out():
     ok, msg = sign_out(
         volunteer_id,
         pin,
-        request.form.get("assignment_id", "")
+        request.form.get("assignment_id", ""),
+        role=request.form.get("role", "").strip() or (str(row.get("role") or "") if row_number_raw and row else None)
     )
 
     if ok:
@@ -1966,6 +1977,13 @@ def api_volunteer(volunteer_id):
                     order by start_time, assigned_place
                 """, (v.get("编号"), today))
                 today_assignments = cur.fetchall()
+                # 负责人指定的设师父供台人员保存在每日标记中，仅用于页面显示。
+                cur.execute("""
+                    SELECT setup_people FROM schedule_day_flags
+                    WHERE flag_date = %s
+                """, (today,))
+                setup_flag = cur.fetchone()
+                setup_people = (setup_flag.get('setup_people') or '') if setup_flag else ''
                 # 膳食组报名独立于正式排班；只补显示，不能伪造 assignment_id。
                 cur.execute("""
                     SELECT id, meal_role, start_time, end_time
@@ -1996,12 +2014,13 @@ def api_volunteer(volunteer_id):
                 """, (v.get("编号"), today))
                 completed_rows = cur.fetchall() or []
                 cur.execute("""
-                    select id from attendance
+                    select id, role from attendance
                     where volunteer_id = %s and date = %s
                       and (end_time is null or end_time = '')
-                    order by id desc limit 1
+                    order by id desc
                 """, (v.get("编号"), now_date_str()))
-                actual_open = cur.fetchone()
+                actual_open_rows = cur.fetchall() or []
+                actual_open = actual_open_rows[0] if actual_open_rows else None
                 paid_until = None
                 if pin_ok:
                     cur.execute("""
@@ -2035,6 +2054,17 @@ def api_volunteer(volunteer_id):
                 'start_time': '8:00am', 'end_time': '完成佛台工作',
                 'shift_label': '', 'state': _extra_state('佛台'),
                 'display_only': True,
+            })
+        # 设师父供台名单以姓名换行保存；与固定佛台一样只补显示，不伪造排班 ID。
+        setup_names = {_normalize_name(name) for name in setup_people.splitlines() if name.strip()}
+        if _normalize_name(v.get('姓名')) in setup_names and not any(
+            a.get('role') == '供台' and a.get('assigned_place') == '设师父供台'
+            for a in today_assignments
+        ):
+            today_assignments.append({
+                'id': None, 'role': '供台', 'assigned_place': '设师父供台',
+                'start_time': '', 'end_time': '', 'shift_label': '',
+                'state': _extra_state('供台'), 'display_only': True,
             })
         if meal_signups and not any(a.get('role') == '膳食' for a in today_assignments):
             meal = meal_signups[0]
@@ -2118,7 +2148,8 @@ def api_volunteer(volunteer_id):
             "today_assignments": today_assignments,
             "attendance_action": attendance_action,
             "current_assignment_id": current_assignment_id,
-            "current_assignment_text": current_assignment_text
+            "current_assignment_text": current_assignment_text,
+            "open_roles": [r["role"] for r in actual_open_rows]
         })
 
     except Exception as e:

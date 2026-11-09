@@ -66,7 +66,7 @@ def _time(value):
 
 
 def _message(target, rows):
-    parts = [f'📋 {target} 新增义工安排', '（昨晚22:00正式值班表后新增）', '']
+    parts = [f'📋 {target} 新增义工安排', '']
     for role in ROLES:
         selected = [r for r in rows if r['role'] == role]
         if not selected:

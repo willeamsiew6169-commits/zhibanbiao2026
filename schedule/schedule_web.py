@@ -335,7 +335,28 @@ def load_buddha_name_options():
         print("load_buddha_name_options error:", e)
         return []
 
+def load_weekly_buddha_names(weekday):
+    """Supabase 星期固定佛台名单；空名单也是有效设置，不回退 Excel。"""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT v.name
+                FROM schedule_fixed_buddha_weekly f
+                JOIN volunteers v ON v.id::text = f.volunteer_id::text
+                WHERE f.weekday = %s
+                ORDER BY f.position
+            """, (weekday,))
+            return [str(row['name']).strip() for row in cur.fetchall()]
+
+
 def get_base_fixed_buddha_for_date(date_str):
+    # 云端轮值优先；仅数据库异常时使用旧 Excel 作为临时备用。
+    try:
+        weekday_number = pd.to_datetime(date_str).weekday()
+        return load_weekly_buddha_names(weekday_number)
+    except Exception as e:
+        print("⚠️ Supabase 佛台固定名单读取失败，暂用 Excel：", repr(e))
+
     file = os.path.join(BASE_DIR, "data", "fixed_schedule.xlsx")
 
     if not os.path.exists(file):
@@ -1053,7 +1074,7 @@ def build_signup_notice_whatsapp(date_str):
             assigned_rows = cur.fetchall()
             # 供台可能由负责人直接指定（schedule_day_flags），不一定有报名。
             cur.execute("""
-                SELECT setup_people FROM schedule_day_flags WHERE flag_date = %s
+                SELECT setup_people, remove_people FROM schedule_day_flags WHERE flag_date = %s
             """, (date_str,))
             setup_row = cur.fetchone()
             cur.execute("""
@@ -1082,6 +1103,10 @@ def build_signup_notice_whatsapp(date_str):
 
     setup_people = [name.strip() for name in str((setup_row or {}).get('setup_people') or '').splitlines() if name.strip()]
     supply_people = list(dict.fromkeys(setup_people + [str(r.get('name') or '').strip() for r in supply_signup_rows if r.get('name')]))
+    remove_people = [name.strip() for name in str((setup_row or {}).get('remove_people') or '').splitlines() if name.strip()]
+    # 普通日如有实际供台安排也应显示；无收供台安排则不显示空栏目。
+    setup_notice = ('设师父供台：\n' + ('　'.join(supply_people) if supply_people else '尚未安排') + '\n\n') if (big_day or supply_people) else ''
+    remove_notice = ('12:00pm~2:00pm\n师父供台:\n' + '　'.join(remove_people) + '\n\n12pm的香结束之后，请下供桌。\n\n') if remove_people else ''
 
     # 卫生：已发布排班可能给同一人多条地点记录，通知必须逐条对应，
     # 不可用单一字典值覆盖前面的地点（例如佛堂+楼梯被误写成只有楼梯）。
@@ -1227,7 +1252,7 @@ def build_signup_notice_whatsapp(date_str):
 整理佛台: 
 {buddha_text}
 
-{('设师父供台：' + chr(10) + ('　'.join(supply_people) if supply_people else '尚未安排') + chr(10) + chr(10)) if big_day else ''}
+{setup_notice}{remove_notice}
 {cleaning_start}~{cleaning_end} 或 
 {cleaning_start}~完成卫生工作 
 佛堂卫生: {"　".join(str(r.get("name") or "").strip() for r in groups["佛堂卫生"] if str(r.get("name") or "").strip())}
@@ -1526,9 +1551,9 @@ def schedule_admin():
     try:
         remove_day = date.fromisoformat(remove_date_arg)
     except ValueError:
-        remove_day = malaysia_today()
+        remove_day = date.fromisoformat(default_schedule_date)
     if not malaysia_today() <= remove_day <= malaysia_today() + timedelta(days=90):
-        remove_day = malaysia_today()
+        remove_day = date.fromisoformat(default_schedule_date)
     selected_remove_date = remove_day.isoformat()
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -4597,6 +4622,58 @@ def schedule_attendance_status():
     )
 
 
+# 负责人首页合并入口：仅提供导航，不修改原有功能或保存逻辑。
+_MANAGEMENT_MENU_HTML = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ title }}</title>
+<style>
+body{font-family:"Microsoft YaHei",Arial,sans-serif;background:#f2f5f9;margin:0;padding:24px;color:#172b4d}
+main{max-width:780px;margin:35px auto;background:white;padding:30px;border-radius:18px;box-shadow:0 5px 22px #172b4d12}
+h1{font-size:30px;margin:0 0 26px}.links{display:grid;gap:16px}
+.links a{display:block;text-align:center;padding:19px 14px;border-radius:13px;color:white;text-decoration:none;font-size:23px;font-weight:bold;background:#237d76}
+.links a:nth-child(2){background:#596879}.links a:nth-child(3){background:#146e86}
+.back{display:inline-block;margin-top:25px;color:#275de4;font-size:19px;text-decoration:none}
+</style></head><body><main><h1>{{ title }}</h1><div class="links">
+{% for item in links %}<a href="{{ item.url }}">{{ item.label }}</a>{% endfor %}
+</div><a class="back" href="/schedule#management-functions">⬅ 返回负责人首页</a>
+</main></body></html>"""
+
+
+@schedule_bp.route("/schedule/management/fixed", methods=["GET"])
+def schedule_management_fixed():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+    selected_date = request.args.get("date", "").strip()
+    try:
+        selected_date = date.fromisoformat(selected_date).isoformat()
+    except ValueError:
+        selected_date = malaysia_today().isoformat()
+    return render_template_string(_MANAGEMENT_MENU_HTML,
+        title="🪷 佛台及固定岗位管理",
+        links=[
+            {"label": "🌸 供台及佛台特别安排", "url": f"/schedule?mode=special&override_date={selected_date}"},
+            {"label": "👥 固定岗位人员管理", "url": "/schedule/fixed-roles"},
+        ])
+
+
+@schedule_bp.route("/schedule/management/settings", methods=["GET"])
+def schedule_management_settings():
+    if not session.get("schedule_login"):
+        return redirect(url_for("schedule.schedule_admin"))
+    selected_date = request.args.get("date", "").strip()
+    try:
+        selected_date = date.fromisoformat(selected_date).isoformat()
+    except ValueError:
+        selected_date = malaysia_today().isoformat()
+    return render_template_string(_MANAGEMENT_MENU_HTML,
+        title="⚙️ 系统设置",
+        links=[
+            {"label": "🔧 报名开放控制", "url": f"/schedule?mode=controls&override_date={selected_date}"},
+            {"label": "⚙️ 排班设置", "url": "/schedule/settings"},
+            {"label": "📲 WhatsApp 自动通知", "url": "/schedule/whatsapp-automation"},
+        ])
+
+
 @schedule_bp.route("/schedule/settings", methods=["GET", "POST"])
 def schedule_settings():
 
@@ -4781,8 +4858,8 @@ def schedule_settings():
 
                     <a
                         class="btn-tool btn-gray btn-full"
-                        href="{{ url_for('schedule.schedule_admin') }}">
-                        返回负责人首页
+                        href="/schedule/management/settings">
+                        返回系统设置
                     </a>
 
                 </div>
@@ -5035,10 +5112,19 @@ def schedule_signups_manage():
 
     .floating-back{
         position:fixed;
-        right:25px;
-        bottom:25px;
+        right:18px;
+        bottom:18px;
         z-index:9999;
-        min-width:170px;
+        display:inline-flex;
+        align-items:center;
+        justify-content:center;
+        width:auto !important;
+        min-width:0 !important;
+        padding:10px 15px !important;
+        font-size:15px !important;
+        border-radius:999px;
+        box-shadow:0 4px 12px rgba(0,0,0,.2);
+        text-decoration:none;
     }
 
     .history-check{
@@ -5070,9 +5156,10 @@ def schedule_signups_manage():
         }
 
         .floating-back{
-            position:static;
-            margin:20px auto;
-            width:100%;
+            right:12px;
+            bottom:12px;
+            width:auto !important;
+            margin:0;
         }
     }
     </style>
@@ -5345,9 +5432,9 @@ def schedule_signups_manage():
 
         </div>
 
-        <a href="/schedule/admin"
+        <a href="/schedule#management-functions"
         class="btn-tool btn-blue floating-back">
-            ⬅ 返回首页
+            ⬅ 返回
         </a>
 
     </div>
@@ -5527,9 +5614,9 @@ button{background:#187c71;color:white;border:0;cursor:pointer}.danger{background
 .row{display:flex;flex-wrap:wrap;gap:12px;align-items:center}table{width:100%;border-collapse:collapse}td,th{padding:11px;border-bottom:1px solid #e5e9ef;text-align:left}
 .notice{padding:12px;background:#e6f4ed;border-radius:8px}.error{background:#ffe7e7}a{color:#187c71}
 </style></head><body><div class="wrap">
-<a href="/schedule/admin">← 返回负责人首页</a>
+<a href="/schedule/management/fixed">← 返回佛台及固定岗位管理</a>
 <h1>👥 固定岗位人员管理</h1>
-<p>只管理供花、供果及佛学班固定成员；不会修改排班或签到记录。</p>
+<p>管理供花、供果、佛学班及整理佛台每星期固定轮值；此页面不会直接修改已发布排班或签到记录。</p>
 {% with messages = get_flashed_messages(with_categories=true) %}{% for category,msg in messages %}
 <div class="notice {{ 'error' if category == 'error' else '' }}">{{ msg }}</div>
 {% endfor %}{% endwith %}
@@ -5547,7 +5634,24 @@ button{background:#187c71;color:white;border:0;cursor:pointer}.danger{background
 <input type="hidden" name="action" value="remove"><input type="hidden" name="role" value="{{ role }}">
 <input type="hidden" name="volunteer_id" value="{{ member.volunteer_id }}"><button class="danger">移除</button></form></td></tr>{% endfor %}
 </tbody></table>{% else %}<p>尚无固定成员。</p>{% endif %}</div>
-{% endfor %}</div></body></html>
+{% endfor %}
+<div class="card"><h2>🪷 整理佛台 · 每星期固定轮值</h2>
+<p>名单保存在 Supabase；本阶段仅管理名单，实际自动排班仍按原有 Excel 读取。</p>
+<form method="post" class="row">
+<input type="hidden" name="action" value="buddha_add">
+<label>星期 <select name="weekday" required>{% for i in range(7) %}<option value="{{ i }}">星期{{ '一二三四五六日'[i] }}</option>{% endfor %}</select></label>
+<label>义工编号 <input name="volunteer_id" placeholder="CHE-208 / STW-xxx / 8xx" required autocomplete="off"></label>
+<button type="submit">加入佛台固定轮值</button></form>
+{% for i in range(7) %}
+<h3>星期{{ '一二三四五六日'[i] }}（{{ buddha_members[i]|length }} 人）</h3>
+{% if buddha_members[i] %}<table><thead><tr><th>顺序</th><th>编号</th><th>姓名</th><th>操作</th></tr></thead><tbody>
+{% for member in buddha_members[i] %}<tr><td>{{ member.position }}</td><td>{{ member.volunteer_id }}</td><td>{{ member.name }}</td><td>
+<form method="post" onsubmit="return confirm('确定从星期{{ '一二三四五六日'[i] }}移除 {{ member.name }}？');">
+<input type="hidden" name="action" value="buddha_remove"><input type="hidden" name="weekday" value="{{ i }}">
+<input type="hidden" name="volunteer_id" value="{{ member.volunteer_id }}"><button class="danger" type="submit">移除</button>
+</form></td></tr>{% endfor %}</tbody></table>{% else %}<p>尚无固定人员。</p>{% endif %}
+{% endfor %}
+</div></div></body></html>
 """
 
 
@@ -5560,6 +5664,59 @@ def schedule_fixed_roles():
         action = request.form.get("action", "").strip()
         role = request.form.get("role", "").strip()
         raw_id = request.form.get("volunteer_id", "").strip().upper()
+        # 佛台每星期固定轮值：独立数据表，不影响原有三种固定岗位。
+        if action in ("buddha_add", "buddha_remove"):
+            weekday_text = request.form.get("weekday", "").strip()
+            if weekday_text not in tuple(str(i) for i in range(7)) or not raw_id:
+                flash("星期或义工编号不正确。", "error")
+                return redirect(url_for("schedule.schedule_fixed_roles"))
+            weekday = int(weekday_text)
+            try:
+                with get_conn() as conn:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        if action == "buddha_add":
+                            candidates = [raw_id]
+                            if raw_id.isdigit() and not raw_id.startswith("8"):
+                                candidates.append("CHE-" + raw_id)
+                            cur.execute("""
+                                SELECT id, name FROM volunteers
+                                WHERE id = ANY(%s) AND status = '在册'
+                                ORDER BY CASE WHEN id=%s THEN 0 ELSE 1 END LIMIT 1
+                            """, (candidates, raw_id))
+                            volunteer = cur.fetchone()
+                            if not volunteer:
+                                flash("找不到在册义工编号，请检查后重试。", "error")
+                                return redirect(url_for("schedule.schedule_fixed_roles"))
+                            # 同一星期锁定写入，避免并发加入导致 position 重复。
+                            cur.execute("SELECT pg_advisory_xact_lock(382716, %s)", (weekday,))
+                            cur.execute("""
+                                SELECT volunteer_id, position FROM schedule_fixed_buddha_weekly
+                                WHERE weekday=%s ORDER BY position
+                            """, (weekday,))
+                            existing = cur.fetchall()
+                            if any(str(row["volunteer_id"]) == str(volunteer["id"]) for row in existing):
+                                flash("这位义工已在该星期的佛台固定名单中。", "ok")
+                            elif len(existing) >= 3:
+                                flash("每个星期最多安排 3 位固定佛台义工。", "error")
+                            else:
+                                used = {int(row["position"]) for row in existing}
+                                position = next(n for n in range(1, 4) if n not in used)
+                                cur.execute("""
+                                    INSERT INTO schedule_fixed_buddha_weekly
+                                    (weekday, volunteer_id, position) VALUES (%s, %s, %s)
+                                """, (weekday, volunteer["id"], position))
+                                flash(f"已加入星期{'一二三四五六日'[weekday]}：{volunteer['name']}", "ok")
+                        else:
+                            cur.execute("""
+                                DELETE FROM schedule_fixed_buddha_weekly
+                                WHERE weekday=%s AND volunteer_id=%s
+                            """, (weekday, raw_id))
+                            flash("已移除该星期的佛台固定人员。" if cur.rowcount else "该星期没有找到对应人员。", "ok")
+                    conn.commit()
+            except Exception:
+                flash("佛台固定轮值保存失败，请检查数据库表及字段。", "error")
+            return redirect(url_for("schedule.schedule_fixed_roles"))
+
         if action not in ("add", "remove") or role not in _FIXED_ROLE_OPTIONS or not raw_id:
             flash("操作资料不正确。", "error")
             return redirect(url_for("schedule.schedule_fixed_roles"))
@@ -5609,7 +5766,21 @@ def schedule_fixed_roles():
     members = {role: [] for role in _FIXED_ROLE_OPTIONS}
     for row in rows:
         members[row["role"]].append(row)
-    return render_template_string(_FIXED_ROLES_HTML, roles=_FIXED_ROLE_OPTIONS, members=members)
+    buddha_members = {i: [] for i in range(7)}
+    try:
+        buddha_rows = db_query("""
+            SELECT f.weekday, f.position, f.volunteer_id,
+                   COALESCE(v.name, '义工资料已不存在') AS name
+            FROM schedule_fixed_buddha_weekly f
+            LEFT JOIN volunteers v ON v.id=f.volunteer_id
+            ORDER BY f.weekday, f.position
+        """, fetchall=True) or []
+        for row in buddha_rows:
+            buddha_members[int(row["weekday"])].append(row)
+    except Exception:
+        flash("读取佛台固定轮值失败，请检查 Supabase 数据表。", "error")
+    return render_template_string(_FIXED_ROLES_HTML, roles=_FIXED_ROLE_OPTIONS,
+                                  members=members, buddha_members=buddha_members)
 
 SCHEDULE_HTML = """
 <!doctype html>
@@ -5785,13 +5956,13 @@ html {
 </head>
 
 <body>
-{% if mode in ("day", "signup", "special", "controls") %}<a class="floating-home" href="/schedule" aria-label="返回负责人首页">🏠 返回首页</a>{% endif %}
+{% if mode in ("day", "signup", "special", "controls") %}<a class="floating-home" href="{{ '/schedule/management/fixed?date=' ~ override_date if mode == 'special' else ('/schedule/management/settings?date=' ~ override_date if mode == 'controls' else '/schedule') }}" aria-label="返回上一级">⬅ 返回</a>{% endif %}
 <div class="box">
 
 <div class="top-bar">
     <h1>📅 负责人排班系统</h1>
     {% if mode in ("day", "signup", "special", "controls") %}
-    <a class="btn-tool btn-blue" style="width:auto" href="/schedule">🏠 负责人首页</a>
+    <a class="btn-tool btn-blue" style="width:auto" href="{{ '/schedule/management/fixed?date=' ~ override_date if mode == 'special' else ('/schedule/management/settings?date=' ~ override_date if mode == 'controls' else '/schedule') }}">⬅ 返回上一级</a>
     {% endif %}
 
     <a class="btn-tool btn-gray" style="width:auto;min-width:160px;" href="/schedule/logout">
@@ -5814,15 +5985,11 @@ html {
 <div class="card" id="management-functions">
     <h2 class="section-title">🌸 管理功能</h2>
     <div class="main-menu">
-      <a class="btn-tool btn-green" style="background:#159947;border-color:#159947;color:#fff" href="/schedule?mode=signup&override_date={{ override_date }}">👥 报名管理（代报名 / WhatsApp 解析）</a>
       <a class="btn-tool btn-orange" style="background:#ef7118;border-color:#ef7118;color:#fff" href="/schedule/notice_center?date={{ override_date }}&amp;return_section=management">📢 通知中心</a>
       <a class="btn-tool btn-purple" style="background:#8039e8;border-color:#8039e8;color:#fff" href="/schedule/signups">📋 报名记录</a>
-      <a class="btn-tool btn-gray" style="background:#d64a84;border-color:#d64a84;color:#fff" href="/schedule?mode=special&override_date={{ override_date }}">🌸 供台及佛台特别安排</a>
-      <a class="btn-tool btn-gray" style="background:#078b9b;border-color:#078b9b;color:#fff" href="/schedule?mode=controls&override_date={{ override_date }}">🔧 报名开放控制</a>
+      <a class="btn-tool btn-gray" style="background:#d64a84;border-color:#d64a84;color:#fff" href="/schedule/management/fixed?date={{ override_date }}">🪷 佛台及固定岗位管理</a>
+      <a class="btn-tool btn-gray" style="background:#596879;border-color:#596879;color:#fff" href="/schedule/management/settings?date={{ override_date }}">⚙️ 系统设置</a>
       <a class="btn-tool btn-green" style="background:#b47a17;border-color:#b47a17;color:#fff" href="/reports">📚 资料中心</a>
-      <a class="btn-tool btn-green" style="background:#237d76;border-color:#237d76;color:#fff" href="/schedule/fixed-roles">👥 固定岗位人员管理</a>
-      <a class="btn-tool btn-gray" style="background:#596879;border-color:#596879;color:#fff" href="/schedule/settings">⚙️ 排班设置</a>
-      <a class="btn-tool btn-gray" style="background:#146e86;border-color:#146e86;color:#fff" href="/schedule/whatsapp-automation">📲 WhatsApp 自动通知</a>
       <a class="btn-tool btn-blue" style="background:#275de4;border-color:#275de4;color:#fff" href="/volunteer">👥 打开义工报名页面</a>
     </div>
 </div>
@@ -6323,7 +6490,8 @@ html {
                 <input id="remove_day_calendar" type="date" name="date" value="{{ selected_remove_date }}"
                        min="{{ remove_min_date }}" max="{{ remove_max_date }}" required
                        style="width:100%;font-size:19px;padding:9px;margin:10px 0;">
-                <p style="font-size:15px;color:#666;">更换日期会载入该日已保存的收供台人员。</p>
+                <p style="font-size:20px;font-weight:bold;color:#b45309;">📅 当前收供台安排日期：{{ selected_remove_date }}</p>
+                <p style="font-size:15px;color:#666;">默认日期与值班一致（18:00后切换明天）；手动更换日期会载入该日已保存的收供台人员。</p>
                 <p style="color:#666;font-size:20px;">
                     通常 1 至 2 位佛台组人员。若没有安排人员，系统视为继续供奉。
                 </p>
@@ -7101,4 +7269,4 @@ TEST GROUP ONLY. Test messages may be sent when the Windows Agent is running.</p
 {% if queue_error %}<p class="warning">{{ queue_error }}</p>{% endif %}</div>
 <div class="card"><details><summary style="cursor:pointer;font-size:21px;font-weight:700;padding:8px 0;user-select:none">📜 最近记录 / Recent jobs（点击展开 / Click to expand）</summary><div style="overflow:auto;max-height:380px;margin-top:12px"><table><tr><th>ID</th><th>类别 / Type</th><th>状态 / Status</th><th>创建 / Created</th></tr>
 {% for j in jobs %}<tr><td>{{j.id}}</td><td>{{j.message_type}}</td><td>{{j.status}}</td><td>{{j.created_at}}</td></tr>{% else %}<tr><td colspan="4">暂无记录 / No records</td></tr>{% endfor %}</table></div></details></div>
-<a class="btn secondary" href="{{url_for('schedule.schedule_admin')}}">← 返回负责人首页 / Back</a></main></body></html>''',flags=flags,current=current,notice_time=notice_time,jobs=jobs,message=message,queue_error=queue_error)
+<a class="btn secondary" href="/schedule/management/settings">← 返回系统设置 / Back</a></main></body></html>''',flags=flags,current=current,notice_time=notice_time,jobs=jobs,message=message,queue_error=queue_error)

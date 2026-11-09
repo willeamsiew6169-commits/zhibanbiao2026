@@ -3120,6 +3120,20 @@ def calculate_schedule_for_date(date_str, patch_mode=False,):
 
     buddhist_df, cleaning_df = load_fixed_schedule()
     fixed_people = get_fixed_people(date_obj, buddhist_df, cleaning_df)
+    # 仅替换佛台固定轮值；卫生固定名单仍按原 Excel 读取。
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT v.name
+                    FROM schedule_fixed_buddha_weekly f
+                    JOIN volunteers v ON v.id::text = f.volunteer_id::text
+                    WHERE f.weekday = %s
+                    ORDER BY f.position
+                """, (date_obj.weekday(),))
+                fixed_people["整理佛台"] = [str(r["name"]).strip() for r in cur.fetchall()]
+    except Exception as e:
+        print("⚠️ Supabase 佛台固定名单读取失败，暂用 Excel：", repr(e))
     override_names = load_buddha_override(date_obj)
 
     # 云端保存的是当天的完整最终名单，绝不可用原固定名单补回空位。

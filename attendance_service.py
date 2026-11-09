@@ -263,15 +263,18 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
     if role not in ROLES:
         return False, "请选择正确岗位。"
 
-    # 同一时间只允许一笔进行中的签到。
+    # 仅允许值班和供台两种不同岗位并行；同岗位不可重复签到。
     opened = db_query("""
-        select id from attendance
+        select id, role from attendance
         where date=%s and volunteer_id=%s
           and (end_time is null or end_time='')
-        order by id desc limit 1
-    """, (now_date_str(), volunteer["编号"]), fetchone=True)
-    if opened:
-        return False, f"{volunteer['姓名']} 已经签到，还没签退。请先签退。"
+        order by id desc
+    """, (now_date_str(), volunteer["编号"]), fetchall=True) or []
+    open_roles = {str(r.get("role") or "") for r in opened}
+    if role in open_roles:
+        return False, f"{volunteer['姓名']} 的{role}尚未签退，请勿重复签到。"
+    if open_roles and not (role in ("值班", "供台") and open_roles <= ({"值班", "供台"} - {role})):
+        return False, f"{volunteer['姓名']} 已有其他岗位尚未签退，请先完成该岗位。"
 
     assignments = load_today_assignments_for_volunteer(volunteer, raw_id)
 
@@ -381,7 +384,7 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
     return True, f"{volunteer['姓名']} 已签到\n\n今天没有正式排班记录。\n已登记：{role}\n\n完成后请记得签退。"
 
 
-def sign_out(volunteer_id: str, pin: str, assignment_id=None) -> tuple[bool, str]:
+def sign_out(volunteer_id: str, pin: str, assignment_id=None, role=None) -> tuple[bool, str]:
     raw_id = str(volunteer_id or "").strip()
     if not raw_id:
         return False, "请输入编号。"
@@ -400,12 +403,20 @@ def sign_out(volunteer_id: str, pin: str, assignment_id=None) -> tuple[bool, str
                 select * from attendance
                 where date=%s and volunteer_id=%s
                   and (end_time is null or end_time='')
-                order by id desc limit 1
+                order by id desc
                 for update
             """, (now_date_str(), volunteer["编号"]))
-            row = cur.fetchone()
-            if not row:
+            open_rows = cur.fetchall() or []
+            if not open_rows:
                 return False, f"{volunteer['姓名']} 今天没有未签退记录。"
+            if role:
+                row = next((r for r in open_rows if r.get("role") == role), None)
+                if row is None:
+                    return False, f"今天没有进行中的{role}记录。"
+            elif len(open_rows) == 1:
+                row = open_rows[0]  # 兼容原本单岗位签退页面
+            else:
+                return False, "目前有多个岗位进行中，请选择要签退的岗位。"
 
             end_time = now_time_str()
             try:
@@ -458,11 +469,12 @@ def sign_out(volunteer_id: str, pin: str, assignment_id=None) -> tuple[bool, str
                         select id from volunteer_attendance_logs
                         where volunteer_id=%s and attendance_date=%s
                           and check_out_time is null and assignment_id is null
+                          and actual_role=%s
                         order by id desc limit 1
                     )
-                """, (volunteer["编号"], now_date_str()))
+                """, (volunteer["编号"], now_date_str(), row["role"]))
 
-    return True, f"{volunteer['姓名']} 已签退。"
+    return True, f"{volunteer['姓名']} 的{row['role']}已签退。"
 
 def find_volunteer(volunteer_id: str):
     raw_id = str(volunteer_id or "").strip()
