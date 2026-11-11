@@ -141,8 +141,8 @@ def calculate_best_place(
     1. 财政 STW-152 固定活动中心
     2. 负责人/系统指定地点
     3. 佛堂卫生者优先活动中心
-    4. 地点轮换
-    5. 人数平衡
+    4. 优先填补当前值班时间的空岗、平衡人数
+    5. 人数相同才考虑历史地点轮换
     """
 
     volunteer_id = str(
@@ -170,14 +170,18 @@ def calculate_best_place(
     if cleaning_place_by_name.get(name) == "佛堂卫生":
         return "活动中心"
 
-    # 4. 地点轮换
+    # 4. 先确保当前时段两个地点都有义工；人数相同才轮换。
+    # 由排班器按此义工的实际起止时间检查覆盖情况。
+    balanced_place = choose_less_place_func(shift, item)
+    if balanced_place:
+        return balanced_place
+
+    # 5. 人数相同，才使用历史轮换
     rotation_place = get_rotation_preferred_place(
         volunteer_id,
         item.get("_place_history_cache", {})
     )
-
     if rotation_place:
         return rotation_place
 
-    # 5. 原本人数平衡
-    return choose_less_place_func(shift)
+    return "观音堂"

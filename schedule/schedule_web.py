@@ -1314,8 +1314,12 @@ def load_admin_signup_details(date_str):
                          start_time NULLS LAST, name, role
             """, (date_str,))
             signups = cur.fetchall()
-            if not signups:
-                return signups
+            # 负责人指定的师父供台人员不一定经过报名表，单独补充到详情显示。
+            cur.execute("""
+                SELECT setup_people, remove_people
+                FROM schedule_day_flags WHERE flag_date = %s
+            """, (date_str,))
+            master_flag = cur.fetchone() or {}
 
             cur.execute("""
                 SELECT signup_id, volunteer_id, role, assigned_place,
@@ -1359,6 +1363,24 @@ def load_admin_signup_details(date_str):
                     seen.add(detail)
             if places:
                 signup['assignment_places'] = places
+    # 仅追加负责人手动指定的供台显示行；不写入报名/排班表，也不影响统计。
+    existing = {(str(row.get('name') or '').strip(), str(row.get('role') or '').strip())
+                for row in signups if row.get('status') != 'cancelled'}
+    for role, field, start, end in (
+        ('设师父供台', 'setup_people', '06:00', '08:00'),
+        ('收师父供台', 'remove_people', '12:00', '14:00'),
+    ):
+        names = [name.strip() for name in str(master_flag.get(field) or '').splitlines()
+                 if name.strip()]
+        for name in dict.fromkeys(names):
+            if (name, role) in existing:
+                continue
+            signups.append({
+                'volunteer_id': None, 'name': name, 'role': role,
+                'start_time': start, 'end_time': end,
+                'status': 'assigned', 'assigned_place': role,
+                'assignment_places': [role],
+            })
     return signups
 
 

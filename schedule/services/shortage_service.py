@@ -82,7 +82,7 @@ def build_shortage_notice_from_assignments(date_str, conn=None):
                       for place in places)
         return max(0, missing - len(pending[shift]))
 
-    early_need = _need("绿", ("观音堂", "活动中心"))
+    early_need = _need("绿", ("观音堂", "活动中心")) if template_type != "normal" else 0
     morning_need = _need("橙", ("观音堂", "活动中心"))
     afternoon_need = _need("黄", ("观音堂", "活动中心"))
     cleaning_need = max(0, targets["卫生"] - len(counts["卫生"]) - len(pending["卫生"]))

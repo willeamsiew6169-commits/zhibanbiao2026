@@ -2979,7 +2979,7 @@ def finance_upload():
                             raise ValueError(f"无效会员编号 {number}")
                         receipt = raw_item.get('receipt')
                         receipt = None if pd.isna(receipt) else str(receipt).strip().replace(' ', '').upper()
-                        if receipt in ('', 'NAN', 'NONE'): receipt = None
+                        if receipt in ('', 'NAN', 'NONE', 'CHE', 'STW'): receipt = None  # 分会占位文字不是正式收据号码
                         if pd.isna(raw_item['payment_date']): raise ValueError('付款日期为空')
                         payment_date = pd.to_datetime(raw_item['payment_date']).date()
                         if 'period' in raw_item:
@@ -3094,8 +3094,14 @@ def finance_upload():
                                 if len(exact) == 1 and exact[0]['id'] not in used_ids:
                                     old = exact[0]
                                     used_ids.add(old['id'])
-                                    summary['一致'] += 1
-                                    report_line(item, '一致', '按编号、日期、月份、月数、金额匹配（收据可能为空或不同）；不改动收据', old, name)
+                                    if receipt and not old['receipt_no']:
+                                        # 只补唯一确定的原付款收据，不新增第二笔付款。
+                                        summary['更新'] += 1
+                                        changes.append(('receipt_update', item, old))
+                                        report_line(item, '更新', '付款内容完全相同，补上正式收据号码', old, name)
+                                    else:
+                                        summary['一致'] += 1
+                                        report_line(item, '一致', '按编号、日期、月份、月数、金额匹配；不改动收据', old, name)
                                     continue
                                 if len(exact) > 1:
                                     summary['冲突'] += 1
@@ -3137,9 +3143,14 @@ def finance_upload():
                                         errors.append(f"{item['source']}：修改后月份会与其他付款重叠")
                                         report_line(item, '修改月份冲突', '修改后月份与其他数据库或待写付款重叠', other_overlaps[0] if other_overlaps else None, name)
                                     elif same_core(old, item):
-                                        summary['日期待更新'] += 1
-                                        changes.append(('date_update', item, old))
-                                        report_line(item, '日期待更新', '同收据、月份、月数、金额相同，仅日期不同；确认后以财政 Excel 日期更新', old, name)
+                                        if mid.startswith('STW-'):
+                                            # STW Excel 日期为开收据日期，不覆盖数据库原有收款日期。
+                                            summary['一致'] += 1
+                                            report_line(item, '一致', 'STW 收据日期与数据库收款日期不同；保留数据库原日期', old, name)
+                                        else:
+                                            summary['日期待更新'] += 1
+                                            changes.append(('date_update', item, old))
+                                            report_line(item, '日期待更新', '同收据、月份、月数、金额相同，仅日期不同；确认后以财政 Excel 日期更新', old, name)
                                     else:
                                         summary['更新'] += 1
                                         changes.append(('update', item, old))
@@ -3174,7 +3185,13 @@ def finance_upload():
                             for action, item, old in selected_changes:
                                 values = (item['receipt_no'], item['member_id'], item['name'], item['payment_date'],
                                     item['start_month'], item['end_month'], item['month_count'], item['amount'])
-                                if action == 'date_update':
+                                if action == 'receipt_update':
+                                    payment_id = old['id']
+                                    cur.execute("UPDATE member_payments SET receipt_no=%s WHERE id=%s AND (receipt_no IS NULL OR trim(receipt_no)='')",
+                                        (item['receipt_no'], payment_id))
+                                    if cur.rowcount != 1:
+                                        raise ValueError(f"{item['source']}：原付款收据已改变，停止写入")
+                                elif action == 'date_update':
                                     payment_id = old['id']
                                     cur.execute('UPDATE member_payments SET payment_date=%s WHERE id=%s',
                                         (item['payment_date'], payment_id))

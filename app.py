@@ -28,6 +28,7 @@ from db import db_query, get_conn
 from library_web import library_bp
 from reading_web import reading_bp
 from xfz_web import xfz_bp
+from donation_web import donation_bp
 
 from finance_v7 import finance_v7_bp
 from finance_web import finance_bp
@@ -107,7 +108,7 @@ ATTENDANCE_HEADERS = [
 
 
 app = Flask(__name__)
-app.secret_key = "change-this-simple-secret"
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or "change-this-simple-secret"
 app.permanent_session_lifetime = timedelta(hours=2)
 app.register_blueprint(finance_engine_api_bp)
 app.register_blueprint(finance_month_end_bp)
@@ -124,6 +125,7 @@ app.register_blueprint(member_bp)
 app.register_blueprint(people_bp)
 app.register_blueprint(admin_bp)
 app.register_blueprint(xfz_bp)
+app.register_blueprint(donation_bp)
 
 
 def get_today_stats():
@@ -1979,11 +1981,12 @@ def api_volunteer(volunteer_id):
                 today_assignments = cur.fetchall()
                 # 负责人指定的设师父供台人员保存在每日标记中，仅用于页面显示。
                 cur.execute("""
-                    SELECT setup_people FROM schedule_day_flags
+                    SELECT setup_people, remove_people FROM schedule_day_flags
                     WHERE flag_date = %s
                 """, (today,))
                 setup_flag = cur.fetchone()
                 setup_people = (setup_flag.get('setup_people') or '') if setup_flag else ''
+                remove_people = (setup_flag.get('remove_people') or '') if setup_flag else ''
                 # 膳食组报名独立于正式排班；只补显示，不能伪造 assignment_id。
                 cur.execute("""
                     SELECT id, meal_role, start_time, end_time
@@ -2064,6 +2067,17 @@ def api_volunteer(volunteer_id):
             today_assignments.append({
                 'id': None, 'role': '供台', 'assigned_place': '设师父供台',
                 'start_time': '', 'end_time': '', 'shift_label': '',
+                'state': _extra_state('供台'), 'display_only': True,
+            })
+        # 收师父供台同样只补显示，不建立正式排班记录。
+        remove_names = {_normalize_name(name) for name in remove_people.splitlines() if name.strip()}
+        if _normalize_name(v.get('姓名')) in remove_names and not any(
+            a.get('role') == '供台' and a.get('assigned_place') == '收师父供台'
+            for a in today_assignments
+        ):
+            today_assignments.append({
+                'id': None, 'role': '供台', 'assigned_place': '收师父供台',
+                'start_time': '12:00pm', 'end_time': '2:00pm', 'shift_label': '',
                 'state': _extra_state('供台'), 'display_only': True,
             })
         if meal_signups and not any(a.get('role') == '膳食' for a in today_assignments):
