@@ -799,10 +799,10 @@ def admin_report():
 
     <div class="card">
         <div class="section-title">🔐 报名签到限制管理 / Check-in Rules</div>
-        <p class="admin-desc">三个岗位独立设置，默认关闭。卫生只需当天有效报名，不必正式排班。<br>
-        Independent controls. Cleaning only requires a valid signup for today.</p>
+        <p class="admin-desc">三个开关独立设置；值班开关同时控制佛台名单限制。卫生只需当天有效报名，不必正式排班。<br>
+        Three controls; Duty also controls Altar roster eligibility. Cleaning only requires a valid signup for today.</p>
         {% for code, label, detail in [
-          ('duty', '📋 值班 / Duty', '当天正式排班 / Published assignment'),
+          ('duty', '📋 值班＋佛台 / Duty + Altar', '值班：当天正式排班；佛台：当天有效固定名单 / Duty: published assignment; Altar: effective roster'),
           ('cleaning', '🧹 卫生 / Cleaning', '当天有效报名 / Valid signup'),
           ('meal', '🥗 膳食组 / Meal Team', '当天有效报名 / Valid signup')
         ] %}

@@ -82,6 +82,7 @@ def _message(target, rows):
                 parts.append(f"  {_time(r['start_time'])}–{_time(r['end_time'])}  {r.get('assigned_place') or role}")
         parts.append('')
     parts.append('🙏 感恩各位义工发心护持。')
+    parts.extend(['', '📝 义工报名请点击以下链接：', 'https://gyt-checkin-sg.onrender.com/volunteer'])
     return '\n'.join(parts)
 
 

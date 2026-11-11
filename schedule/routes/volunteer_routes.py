@@ -1,6 +1,8 @@
 # volunteer_routes.py
 
 import calendar
+import os
+import time
 
 from db import get_conn
 from utils import apply_branch_prefix
@@ -368,6 +370,12 @@ def volunteer_home():
 @schedule_bp.route("/volunteer/signup", methods=["POST"])
 def volunteer_signup():
 
+    _signup_timing = os.environ.get("SCHEDULE_SIGNUP_TIMING") == "1"
+    _signup_t0 = time.perf_counter()
+    def _signup_mark(stage):
+        if _signup_timing:
+            print(f"[signup-timing] {stage}: {time.perf_counter() - _signup_t0:.3f}s", flush=True)
+
     keyword = request.form.get("keyword", "").strip()
     signup_date = request.form.get("signup_date", "").strip()
     role = request.form.get("role", "").strip()
@@ -400,6 +408,7 @@ def volunteer_signup():
         keyword = f"STW-{keyword}"
 
     matches = find_volunteer_by_keyword(keyword)
+    _signup_mark("volunteer_lookup_done")
 
     if not matches:
         return "❌ 找不到义工，请检查编号 / 姓名<br><a href='/volunteer'>返回</a>"
@@ -584,6 +593,7 @@ def volunteer_signup():
     if role != "素食结缘":
         food_offering_task = None
 
+    _signup_mark("before_signup_db")
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
@@ -788,6 +798,7 @@ def volunteer_signup():
                 result_title = "🎉 报名成功"
 
             conn.commit()
+    _signup_mark("signup_db_committed")
     
     # =========================
     # V2 同步：只走统一函数
@@ -798,12 +809,14 @@ def volunteer_signup():
         action="upsert",
         changed_by="volunteer"
     )
+    _signup_mark("schedule_sync_done")
 
     # =========================
     # 判断发布状态与安排结果
     # =========================
 
     published = is_schedule_published(signup_date)
+    _signup_mark("publish_status_done")
     
     assignment_rows = []
 
@@ -825,6 +838,7 @@ def volunteer_signup():
                 """, (signup_id,))
 
                 assignment_rows = cur.fetchall()
+    _signup_mark("assignment_lookup_done")
     if assignment_rows:
 
         assignment_lines = ""

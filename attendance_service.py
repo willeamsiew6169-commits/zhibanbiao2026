@@ -211,7 +211,11 @@ def get_eligible_signin_roles(volunteer, raw_id, assignments=None):
         return "".join(converter.convert(str(value or "")).split()).casefold()
 
     name = norm(volunteer.get("姓名"))
-    if name and any(norm(n) == name for n in get_fixed_buddha_for_date(today.isoformat())):
+    # 佛台与值班共用负责人「值班」限制开关；关闭时供测试签到。
+    # 开启时仍须当天有效佛台名单（包含请假及换人）。
+    if not get_signin_policies().get("duty", False) or (
+        name and any(norm(n) == name for n in get_fixed_buddha_for_date(today.isoformat()))
+    ):
         roles.add("佛台")
 
     # Supply: manager-assigned setup/removal people OR an active supply signup.
@@ -240,6 +244,30 @@ def get_eligible_signin_roles(volunteer, raw_id, assignments=None):
             roles.update(fixed_roles.intersection(("供花", "供果")))
 
     return [role for role in ROLES if role in roles]
+
+
+def _altar_cutoff_minutes(duty_date):
+    """Use the same Buddhist-day classification as the scheduling system."""
+    from lunar_rules import get_special_day_info
+    day = duty_date if isinstance(duty_date, datetime.date) else datetime.date.fromisoformat(str(duty_date))
+    info = get_special_day_info(day) or {}
+    return 8 * 60 if info.get("template_type") in ("lunar_1_15", "buddhist_festival") else 10 * 60
+
+
+def _duty_group_signin_allowed(assignments, selected, now=None):
+    """Require at least 30 minutes remaining in the final contiguous duty segment."""
+    now = now or malaysia_now()
+    group = same_role_contiguous_group(assignments, selected)
+    ends = [time_to_minutes(a.get("end_time")) for a in group]
+    if not ends or any(end is None for end in ends):
+        return False
+    return now.hour * 60 + now.minute < max(ends) - 30
+
+
+def eligible_duty_assignment_ids(assignments):
+    """IDs of duty segments that still have at least 30 minutes remaining."""
+    duty = [a for a in assignments if a.get("role") == "值班"]
+    return [int(a["id"]) for a in duty if _duty_group_signin_allowed(duty, a)]
 
 
 def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignment_id=None) -> tuple[bool, str]:
@@ -282,6 +310,13 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
     if role not in get_eligible_signin_roles(volunteer, raw_id, assignments):
         return False, f"今天没有有效的{role}报名、排班或固定岗位资格，不能签到。"
 
+    # 佛台不限制最早签到时间，但大日子 08:00、普通日 10:00 起禁止新签到。
+    if role == "佛台":
+        now = malaysia_now()
+        cutoff = _altar_cutoff_minutes(now.date())
+        if now.hour * 60 + now.minute >= cutoff:
+            return False, f"佛台签到已截止（{cutoff // 60:02d}:00），不能再签到。"
+
     # 即使限制关闭，也不允许把其他岗位的 assignment_id 当作本岗位。
     assignments = [a for a in assignments if a.get("role") == role]
 
@@ -305,10 +340,14 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
                   and attendance_date=%s and check_out_time is not null
             """, (assignment_ids, volunteer["编号"], now_date_str()), fetchall=True) or []
             done_ids = {int(r["assignment_id"]) for r in done_rows if r.get("assignment_id") is not None}
-            selected = next((a for a in assignments if int(a["id"]) not in done_ids), None)
+            selected = next((a for a in assignments if int(a["id"]) not in done_ids
+                             and (role != "值班" or _duty_group_signin_allowed(assignments, a))), None)
 
         if not selected:
             return False, f"{volunteer['姓名']} 今天的正式排班已经全部完成。"
+
+        if role == "值班" and not _duty_group_signin_allowed(assignments, selected):
+            return False, "距离本轮值班结束不足30分钟，不能再签到。"
 
         group = same_role_contiguous_group(assignments, selected)
         group_ids = [int(a["id"]) for a in group]
@@ -752,12 +791,14 @@ def auto_signout_unfinished_today():
             """, (today,))
             for row in cur.fetchall() or []:
                 cutoff, ids = _scheduled_end_minutes(cur, row)
-                # 固定佛台不一定写入正式排班表；现场签到亦按 10:00 结束。
-                # 10:30 后由正常网页请求触发自动签退，避免误处理其他岗位。
+                # 佛台：普通日 11:00、大日子 09:00 自动签退；不影响其他岗位。
                 altar_fallback = cutoff is None and str(row.get("role") or "").strip() == "佛台"
                 if altar_fallback:
-                    cutoff = 10 * 60
-                if cutoff is None or now_minutes < cutoff + 30:
+                    cutoff = _altar_cutoff_minutes(today)
+                    auto_at = cutoff + 60
+                else:
+                    auto_at = cutoff + 30 if cutoff is not None else None
+                if auto_at is None or now_minutes < auto_at:
                     continue
                 credited_end = f"{cutoff // 60:02d}:{cutoff % 60:02d}"
                 start_min = time_to_minutes(row.get("start_time"))
@@ -772,7 +813,7 @@ def auto_signout_unfinished_today():
                     cur.execute("""
                         update volunteer_attendance_logs
                         set check_out_time=now(),
-                            remarks=concat_ws('｜', nullif(remarks, ''), '系统自动签退；佛台服务计至10:00')
+                            remarks=concat_ws('｜', nullif(remarks, ''), '系统自动签退；佛台服务计至' || %s)
                         where id = (
                             select id from volunteer_attendance_logs
                             where volunteer_id=%s and attendance_date=%s
@@ -780,7 +821,7 @@ def auto_signout_unfinished_today():
                               and check_out_time is null
                             order by id desc limit 1
                         )
-                    """, (row["volunteer_id"], today))
+                    """, (credited_end, row["volunteer_id"], today))
                 else:
                     cur.execute("""
                         update volunteer_attendance_logs

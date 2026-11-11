@@ -1176,7 +1176,8 @@ function refreshRoleAction() {
   if (openRoles.length && !(('值班' === role || '供台' === role) &&
       openRoles.every(r => (r === '值班' || r === '供台') && r !== role))) return;
   // 已完成某一轮值班，不影响同一天其他岗位签到。
-  const pending = (data.today_assignments || []).find(a => a.role === role && a.state === 'pending');
+  const pending = (data.today_assignments || []).find(a => a.role === role && a.state === 'pending' &&
+       (role !== '值班' || (data.eligible_duty_assignment_ids || []).includes(Number(a.id))));
   if (pending && pending.id && !pending.display_only) assignmentInput.value = pending.id;
   signin.style.display = '';
 }
@@ -2151,13 +2152,25 @@ def api_volunteer(volunteer_id):
 
             safe_v["月费已缴费至"] = paid_until
 
+        from attendance_service import eligible_duty_assignment_ids
+        valid_duty_ids = eligible_duty_assignment_ids(today_assignments)
+
         eligible_roles = ([{"role": role, "label": role_label(role)}
                            for role in get_eligible_signin_roles(v, volunteer_id)]
                           if pin_ok else [])
+        if not valid_duty_ids:
+            eligible_roles = [item for item in eligible_roles if item["role"] != "值班"]
+        # 佛台超过截止时间不再提供新签到；其他岗位及签退不变。
+        if eligible_roles:
+            from attendance_service import _altar_cutoff_minutes
+            now_my = datetime.now(ZoneInfo("Asia/Kuala_Lumpur"))
+            if now_my.hour * 60 + now_my.minute >= _altar_cutoff_minutes(now_my.date()):
+                eligible_roles = [item for item in eligible_roles if item["role"] != "佛台"]
 
         return jsonify({
             "ok": True,
             "volunteer": safe_v,
+            "eligible_duty_assignment_ids": valid_duty_ids,
             "eligible_roles": eligible_roles,
             "today_assignments": today_assignments,
             "attendance_action": attendance_action,
