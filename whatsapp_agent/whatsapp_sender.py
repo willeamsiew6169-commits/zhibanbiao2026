@@ -373,9 +373,15 @@ def main():
                 last_2200_attempt_date = run_2200_trigger_if_due(last_2200_attempt_date)
                 try:
                     page = ready_page(context)
-                except (PlaywrightError, RuntimeError) as exc:
-                    LOG.error('浏览器检查失败，暂停领取：%s', exc)
+                except PlaywrightError as exc:
+                    LOG.error('浏览器连接异常，停止发送端以避免错误恢复：%s', exc)
                     break
+                except RuntimeError as exc:
+                    # WhatsApp Web 刷新、掉线或等待重新登录时，暂停领取并定时重查。
+                    # 发送和 ACK 异常仍沿用原有停止机制，避免重复发送。
+                    LOG.warning('WhatsApp Web 暂未就绪，暂停领取；%s 秒后重查：%s', POLL, exc)
+                    time.sleep(POLL)
+                    continue
                 # Fetch the webpage switch before claiming each job. Fail closed if unreachable.
                 global AUTO
                 try:
