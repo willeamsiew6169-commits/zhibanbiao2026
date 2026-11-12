@@ -394,6 +394,88 @@ def patch_schedule_for_date(date_str, only_signup_id=None):
         traceback.print_exc()
         return 0
 
+# 卫生统一公平轮排：自动排班、发布后补排共用同一算法。
+_CLEAN_NO_HALL = {'葉荔銖', '葉茘銖', '叶荔铢'}
+
+
+def _clean_hall_restricted(target_date):
+    """仅大日子限制指定义工负责佛堂卫生；普通日正常公平轮排。"""
+    from datetime import date
+    day = date.fromisoformat(str(target_date)[:10])
+    info = get_special_day_info(day) or {}
+    return info.get('template_type') in ('lunar_1_15', 'buddhist_festival') or bool(info.get('special_names'))
+
+
+_CLEAN_PLACES = ('佛堂', '二楼', '楼梯')
+
+
+def _clean_identity(person):
+    return str(person.get('volunteer_id') or person.get('name') or person.get('姓名') or '').strip()
+
+
+def _choose_fair_cleaning(people, target_date, cursor=None, reserved=None):
+    """返回每人唯一的主要卫生地点；两人共同清洁楼梯仅在展示层补充。"""
+    from itertools import permutations
+    from datetime import date, timedelta
+
+    reserved = reserved or {}
+    occupied = set(reserved)
+    people = list(people)[:max(0, 3 - len(occupied))]
+    if not people:
+        return []
+
+    # 一人只存一个主要岗位，避免数据库重复计算签到及历史次数。
+    # 两人负责佛堂、二楼；三人分别负责三个地点。
+    total = len(people) + len(occupied)
+    required = _CLEAN_PLACES[:min(total, 3)]
+    places = [place for place in required if place not in occupied]
+    if len(places) != len(people):
+        return []
+
+    history = {}
+    def fetch(cur):
+        cur.execute("""
+            SELECT volunteer_id, name, assigned_place, assignment_date
+            FROM volunteer_schedule_assignments
+            WHERE role='卫生' AND assignment_date < %s
+              AND assigned_place IN ('佛堂卫生','二楼卫生','楼梯卫生')
+              AND COALESCE(status,'assigned') <> 'cancelled'
+        """, (str(target_date)[:10],))
+        for row in cur.fetchall():
+            identity = str(row.get('volunteer_id') or row.get('name') or '').strip()
+            place = str(row['assigned_place']).replace('卫生', '')
+            history.setdefault(identity, {}).setdefault(place, set()).add(str(row['assignment_date'])[:10])
+
+    if cursor is not None:
+        fetch(cursor)
+    else:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                fetch(cur)
+
+    yesterday = (date.fromisoformat(str(target_date)[:10]) - timedelta(days=1)).isoformat()
+    best = None
+    best_score = None
+    for perm in permutations(people, len(places)):
+        pairs = list(zip(perm, places))
+        if any(place == '佛堂' and str(person.get('name') or person.get('姓名') or '').strip() in _CLEAN_NO_HALL
+               for person, place in pairs) and _clean_hall_restricted(target_date):
+            continue
+        repeat, counts, recent = 0, [], []
+        for person, place in pairs:
+            dates = history.get(_clean_identity(person), {}).get(place, set())
+            repeat += yesterday in dates
+            counts.append(len(dates))
+            recent.append(max(dates) if dates else '')
+        # 昨日不重复优先；其次照顾轮值最多者，再考虑最近一次日期。
+        score = (repeat, sum(counts), max(counts), tuple(sorted(recent, reverse=True)))
+        if best_score is None or score < best_score:
+            best, best_score = pairs, score
+    if best is None:
+        raise ValueError('卫生排班没有符合人员限制的可行组合')
+    return best
+
+
 def rebuild_published_cleaning_assignments(date_str):
     """发布后仅重新分配卫生（最多三处），保留其他岗位和管理员锁定项。"""
     with get_conn() as conn:
@@ -431,30 +513,41 @@ def rebuild_published_cleaning_assignments(date_str):
                     continue
                 seen.add(identity)
                 unique.append(x)
-            slots = ['佛堂', '二楼', '楼梯'][:min(3, len(unique) + len(locked_places))]
-            available = [x for x in slots if x not in locked_places]
-            restricted = ('葉荔銖', '葉茘銖', '叶荔铢')
-            # 佛堂优先分配给可以做佛堂的义工，避免受限义工抢占位置。
-            chosen = []
-            remaining = list(unique)
-            if '佛堂' in available:
-                candidate = next((x for x in remaining if str(x.get('name') or '').strip() not in restricted), None)
-                if candidate:
-                    chosen.append((candidate, '佛堂'))
-                    remaining.remove(candidate)
-                    available.remove('佛堂')
-            for place in available:
-                if not remaining:
-                    break
-                if place == '佛堂':
-                    continue
-                chosen.append((remaining.pop(0), place))
+            # 发布后已有的安排保持稳定；只有缺位或人员退出时才补位。
+            cur.execute("""
+                SELECT signup_id, volunteer_id, name, assigned_place
+                FROM volunteer_schedule_assignments
+                WHERE assignment_date=%s AND role='卫生'
+                  AND COALESCE(status,'assigned') <> 'cancelled'
+                  AND COALESCE(locked_by_admin,false)=false
+            """, (date_str,))
+            existing = cur.fetchall()
+            active = {_clean_identity(person) for person in unique}
+            preserved = []
+            used_places = set(locked_places)
+            used_people = set()
+            needed = set(_CLEAN_PLACES[:min(3, len(unique) + len(locked_people))])
+            for row in existing:
+                place = place_of(row.get('assigned_place'))
+                identity = _clean_identity(row)
+                if (identity in active and identity not in used_people
+                        and place in needed and place not in used_places
+                        and not (place == '佛堂' and _clean_hall_restricted(date_str)
+                                 and str(row.get('name') or '').strip() in _CLEAN_NO_HALL)):
+                    preserved.append(row)
+                    used_people.add(identity)
+                    used_places.add(place)
+            remaining = [person for person in unique if _clean_identity(person) not in used_people]
+            chosen = _choose_fair_cleaning(remaining, date_str, cursor=cur,
+                                           reserved={place: True for place in used_places})
             # 所有新安排先算好，再在同一事务内删除旧的非锁定卫生记录。
+            preserved_signup_ids = [int(row['signup_id']) for row in preserved if row.get('signup_id') is not None]
             cur.execute("""
                 DELETE FROM volunteer_schedule_assignments
                 WHERE assignment_date=%s AND role='卫生'
                   AND COALESCE(locked_by_admin, false)=false
-            """, (date_str,))
+                  AND NOT (signup_id = ANY(%s))
+            """, (date_str, preserved_signup_ids))
             for x, place in chosen:
                 cur.execute("""
                     INSERT INTO volunteer_schedule_assignments
@@ -482,7 +575,7 @@ def rebuild_published_cleaning_assignments(date_str):
                   AND COALESCE(s.status,'pending') <> 'cancelled'
             """, (date_str, date_str))
         conn.commit()
-    return len(chosen)
+    return len(chosen) + len(preserved) + len(locked)
 
 
 def sync_schedule_after_signup_change(signup_id, action="upsert", changed_by="system"):
@@ -1698,7 +1791,7 @@ def load_yesterday_hygiene_assignment(date_obj):
 
 def assign_hygiene_no_same_as_yesterday(hygiene_names, date_obj):
     jobs = ["佛堂卫生", "二楼卫生", "楼梯卫生"]
-    no_fotang_names = {"葉荔銖", "葉茘銖"}
+    no_fotang_names = _CLEAN_NO_HALL if _clean_hall_restricted(date_obj) else set()
 
     yesterday_map = load_yesterday_hygiene_assignment(date_obj)
 
@@ -2164,81 +2257,38 @@ def parse_signup_line(text):
         "备注": "",
     }
 
-def auto_assign_cleaning_roles(result, signup_df):
-    cleaning_people = []
-
-    for _, r in signup_df.iterrows():
-        if str(r.get("岗位", "")).strip() == "卫生":
-            name = str(r.get("姓名", "")).strip()
-            if name and name not in cleaning_people:
-                cleaning_people.append(name)
-
-    result["佛堂卫生"] = []
-    result["二楼卫生"] = []
-    result["楼梯卫生"] = []
-
-    if not cleaning_people:
+def auto_assign_cleaning_roles(result, signup_df, target_date=None):
+    """兼容旧入口；与正式排班使用同一公平轮排算法。"""
+    people, seen = [], set()
+    for _, row in signup_df.iterrows():
+        if str(row.get('岗位', '')).strip() != '卫生':
+            continue
+        person = row.to_dict()
+        person['name'] = str(row.get('姓名', '')).strip()
+        identity = _clean_identity(person)
+        if identity and identity not in seen:
+            people.append(person)
+            seen.add(identity)
+    for place in _CLEAN_PLACES:
+        result[place + '卫生'] = []
+    if not people:
         return result
-
-    # 叶荔铢不排佛堂卫生
-    special_name = "葉荔銖"
-
-    # ===== 1人：三处同一人 =====
-    if len(cleaning_people) == 1:
-        name = cleaning_people[0]
-
-        if name == special_name:
-            result["二楼卫生"] = [name]
-            result["楼梯卫生"] = [name]
-        else:
-            result["佛堂卫生"] = [name]
-            result["二楼卫生"] = [name]
-            result["楼梯卫生"] = [name]
-
-        return result
-
-    # ===== 2人：佛堂1人，二楼1人，楼梯两人共同 =====
-    if len(cleaning_people) == 2:
-        p1, p2 = cleaning_people
-
-        if special_name in cleaning_people:
-            other = p2 if p1 == special_name else p1
-
-            result["佛堂卫生"] = [other]
-            result["二楼卫生"] = [special_name]
-            result["楼梯卫生"] = [other, special_name]
-
-        else:
-            result["佛堂卫生"] = [p1]
-            result["二楼卫生"] = [p2]
-            result["楼梯卫生"] = [p1, p2]
-
-        return result
-
-    # ===== 3人以上：最多取前3人分配 =====
-    people = cleaning_people[:3]
-
-    if special_name in people:
-        others = [p for p in people if p != special_name]
-
-        result["二楼卫生"] = [special_name]
-
-        if others:
-            result["佛堂卫生"] = [others[0]]
-
-        if len(others) >= 2:
-            result["楼梯卫生"] = [others[1]]
-        elif others:
-            result["楼梯卫生"] = [others[0]]
-        else:
-            result["楼梯卫生"] = [special_name]
-
-    else:
-        result["佛堂卫生"] = [people[0]]
-        result["二楼卫生"] = [people[1]]
-        result["楼梯卫生"] = [people[2]]
-
+    if target_date is None and not signup_df.empty and '日期' in signup_df.columns:
+        target_date = str(signup_df.iloc[0]['日期'])[:10]
+    target_date = target_date or malaysia_today().isoformat()
+    pairs = _choose_fair_cleaning(people[:3], target_date)
+    for person, place in pairs:
+        result[place + '卫生'].append(person['name'])
+    if len(people) == 2:
+        result['楼梯卫生'] = [person['name'] for person in people[:2]]
+    elif len(people) == 1:
+        # 单人三处仅作显示；正式数据库只存一个主要岗位。
+        person = people[0]['name']
+        for place in _CLEAN_PLACES:
+            if place != '佛堂' or not _clean_hall_restricted(target_date) or person not in _CLEAN_NO_HALL:
+                result[place + '卫生'] = [person]
     return result
+
 
 def normalize_signup(df, is_special_day=False):
     rows = []
@@ -2323,7 +2373,7 @@ def get_person_name(p):
     return p
 
 
-def assign_jobs(fixed_people, signup_df, special_info, patch_mode=False,):
+def assign_jobs(fixed_people, signup_df, special_info, patch_mode=False, cleaning_date=None):
     result = {
         "整理佛台": fixed_people["整理佛台"][:],
         "佛堂卫生": fixed_people["佛堂卫生"][:],
@@ -2447,33 +2497,18 @@ def assign_jobs(fixed_people, signup_df, special_info, patch_mode=False,):
 
     cleaning_count = len(unique_cleaners)
 
-    if cleaning_count == 1:
-        p1 = dict(unique_cleaners[0])
-        if get_person_name(p1) in ("葉荔銖", "葉茘銖", "叶荔铢"):
-            result["二楼卫生"].append(p1)
-        else:
-            result["佛堂卫生"].append(p1)
-
-    elif cleaning_count == 2:
-        p1 = dict(unique_cleaners[0])
-        p2 = dict(unique_cleaners[1])
-        if get_person_name(p1) in ("葉荔銖", "葉茘銖", "叶荔铢"):
-            p1, p2 = p2, p1
-        result["佛堂卫生"].append(p1)
-        result["二楼卫生"].append(p2)
-        # 两人共同负责楼梯；仅作为共同工作显示，义工人数仍为两人。
-        result["楼梯卫生"].extend([dict(p1), dict(p2)])
-
-    elif cleaning_count >= 3:
-        p1 = dict(unique_cleaners[0])
-        p2 = dict(unique_cleaners[1])
-        p3 = dict(unique_cleaners[2])
-
-        if get_person_name(p1) in ("葉荔銖", "葉茘銖", "叶荔铢"):
-            p1, p2 = p2, p1
-        result["佛堂卫生"].append(dict(p1))
-        result["二楼卫生"].append(dict(p2))
-        result["楼梯卫生"].append(dict(p3))
+    # 使用与发布后补排相同的公平轮排算法；不改变其他岗位。
+    target_date = cleaning_date or (special_info.get('date') if isinstance(special_info, dict) else None)
+    if not target_date and not signup_df.empty and '日期' in signup_df.columns:
+        target_date = str(signup_df.iloc[0]['日期'])[:10]
+    if not target_date:
+        target_date = malaysia_today().isoformat()
+    if cleaning_count:
+        pairs = _choose_fair_cleaning(unique_cleaners[:3], target_date)
+        for person, place in pairs:
+            result[place + '卫生'].append(dict(person))
+        # 两人共同负责楼梯、一人兼顾其他地点由名单显示层补充；
+        # assignments 只保存每人一条，防止重复签到和历史统计失真。
 
     if patch_mode:
         result = auto_assign_new_duty(result)
@@ -3192,7 +3227,7 @@ def calculate_schedule_for_date(date_str, patch_mode=False,):
             ignore_index=True
         )
 
-    arranged = assign_jobs(fixed_people, signup_df, special_info, patch_mode=patch_mode,)
+    arranged = assign_jobs(fixed_people, signup_df, special_info, patch_mode=patch_mode, cleaning_date=date_str)
     assigned_rows = flatten_arranged_for_db(arranged)
 
     return date_obj, arranged, assigned_rows, special_info, remove_info

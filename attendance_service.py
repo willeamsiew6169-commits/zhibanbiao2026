@@ -211,11 +211,9 @@ def get_eligible_signin_roles(volunteer, raw_id, assignments=None):
         return "".join(converter.convert(str(value or "")).split()).casefold()
 
     name = norm(volunteer.get("姓名"))
-    # 佛台与值班共用负责人「值班」限制开关；关闭时供测试签到。
-    # 开启时仍须当天有效佛台名单（包含请假及换人）。
-    if not get_signin_policies().get("duty", False) or (
-        name and any(norm(n) == name for n in get_fixed_buddha_for_date(today.isoformat()))
-    ):
+    # 佛台只对当天有效固定名单（包含请假及换人）中的义工开放；
+    # 不受值班签到限制开关影响。
+    if name and any(norm(n) == name for n in get_fixed_buddha_for_date(today.isoformat())):
         roles.add("佛台")
 
     # Supply: manager-assigned setup/removal people OR an active supply signup.

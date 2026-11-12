@@ -1,6 +1,7 @@
 # whatsapp_service.py
 
-from datetime import datetime
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 from lunar_rules import (
     get_special_day_info,
@@ -115,6 +116,24 @@ def build_whatsapp_from_assigned(date_str):
             if shift_key in ["绿", "橙", "黄"] and place in ["观音堂", "活动中心"]:
                 key = f"{shift_key}{place}"
                 arranged[key].append((name, start, end))
+
+    # 卫生名单仅在显示时补齐；不改动数据库排班及 WhatsApp 自动发送。
+    cleaning_places = ("佛堂卫生", "二楼卫生", "楼梯卫生")
+    cleaners = list(dict.fromkeys(
+        name for place in cleaning_places for name in arranged[place]
+    ))
+    if len(cleaners) == 1:
+        malaysia_now = datetime.now(ZoneInfo("Asia/Kuala_Lumpur"))
+        # 目标日当天上午10点起仍只有一人，才显示由同一人负责三处。
+        if date_obj < malaysia_now.date() or (
+            date_obj == malaysia_now.date() and malaysia_now.time() >= time(10, 0)
+        ):
+            for place in cleaning_places:
+                if not arranged[place]:
+                    arranged[place] = cleaners[:]
+    elif len(cleaners) == 2 and not arranged["楼梯卫生"]:
+        # 两位卫生义工时，楼梯由两人共同负责。
+        arranged["楼梯卫生"] = cleaners[:]
 
     if template_type == "normal":
         return build_normal_message(
