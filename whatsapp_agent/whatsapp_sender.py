@@ -374,8 +374,14 @@ def main():
                 try:
                     page = ready_page(context)
                 except PlaywrightError as exc:
-                    LOG.error('浏览器连接异常，停止发送端以避免错误恢复：%s', exc)
-                    break
+                    # 仅在领取任务之前的就绪检查中，容忍 WhatsApp Web 临时卡顿。
+                    # 不重启浏览器、不重新领取已领取任务、不重试发送或 ACK。
+                    if 'Timeout' in type(exc).__name__ or 'Timeout' in str(exc):
+                        LOG.warning('WhatsApp Web 就绪检查超时，暂停领取；%s 秒后自动重查：%s', POLL, exc)
+                        time.sleep(POLL)
+                        continue
+                    LOG.error('浏览器连接异常（非超时），退出并交由 Windows 守护程序安全重启：%s', exc)
+                    return 20  # 仅在领取任何新任务之前，允许守护程序重启
                 except RuntimeError as exc:
                     # WhatsApp Web 刷新、掉线或等待重新登录时，暂停领取并定时重查。
                     # 发送和 ACK 异常仍沿用原有停止机制，避免重复发送。
@@ -436,4 +442,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

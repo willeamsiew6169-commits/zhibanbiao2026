@@ -1299,7 +1299,7 @@ def query_volunteer_api():
 
     return jsonify({
         "ok": True,
-        "volunteer_id": v.get("id") or v.get("volunteer_id"),
+        "volunteer_id": v.get("member_id") or v.get("id") or v.get("volunteer_id"),
         "name": v.get("name")
     })
 

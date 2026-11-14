@@ -423,6 +423,48 @@ body{background:#f5f7fb}.people-page{max-width:1280px;margin:0 auto;padding:22px
 .on{background:#e7f7ed;color:#18753e}.off{background:#fbeaea;color:#9b2c2c}
 .alert{padding:12px 14px;border-radius:10px;margin-bottom:12px}.alert-success{background:#e8f7ee}.alert-danger{background:#fdecec}
 @media(max-width:760px){.hero{display:block}.hero-account{justify-content:flex-start;margin-top:16px}.stats{grid-template-columns:1fr 1fr}.filters{grid-template-columns:1fr}.person-head{display:block}}
+
+/* 视觉优化：人员管理首页（仅 CSS，不改变原有功能） */
+.people-page{max-width:1320px;padding:28px 24px 60px}
+.hero{background:linear-gradient(115deg,#4436ad 0%,#6855d9 55%,#8e78ed 100%);
+  box-shadow:0 12px 32px rgba(75,59,164,.18);padding:30px 34px;border-radius:24px}
+.hero h1{font-size:clamp(25px,3vw,34px);letter-spacing:.3px}
+.hero p{font-size:14px;line-height:1.7}
+.stats{gap:14px;margin:22px 0}
+.stat{border:1px solid #e9eaf3;border-radius:18px;padding:20px 15px;
+  box-shadow:0 5px 18px rgba(33,42,74,.045);color:#475467}
+.stat b{font-size:31px;color:#292450;letter-spacing:-.5px}
+.stat small{font-size:12px;line-height:1.6;font-weight:500}
+.toolbar,.person-card{border:1px solid #e9eaf3;box-shadow:0 5px 20px rgba(33,42,74,.045)}
+.toolbar{padding:20px;border-radius:20px;margin-bottom:20px}
+.filters{align-items:center;grid-template-columns:minmax(180px,2fr) minmax(110px,1fr) minmax(160px,1.4fr) auto}
+.input{background:#fff;transition:border-color .15s,box-shadow .15s}
+.input:focus{outline:none;border-color:#7465e8;box-shadow:0 0 0 3px rgba(108,88,232,.12)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;
+  min-height:41px;box-sizing:border-box;transition:transform .15s,box-shadow .15s,filter .15s}
+.btn:hover{transform:translateY(-1px);filter:brightness(.98);box-shadow:0 4px 10px rgba(29,33,60,.09)}
+.btn:focus-visible{outline:3px solid #a49af5;outline-offset:2px}
+.person-card{padding:18px 21px;border-radius:17px;transition:border-color .15s,box-shadow .15s}
+.person-card:hover{border-color:#d7d1fa;box-shadow:0 8px 24px rgba(54,45,112,.08)}
+.person-id{font-size:14px;color:#6758d3;letter-spacing:.3px}
+.person-name{font-size:21px;color:#20243a;margin:5px 0 6px}
+.meta{font-size:14px}
+.badge{font-size:12px;padding:6px 10px}
+.person-head>.actions{align-self:center}
+@media(max-width:760px){
+ .people-page{padding:14px 12px 38px}
+ .hero{padding:23px 20px;border-radius:19px}
+ .stats{gap:9px}
+ .stat{padding:14px 9px}
+ .stat b{font-size:25px}
+ .toolbar{padding:14px}
+ .filters{grid-template-columns:1fr}
+ .person-card{padding:16px}
+ .person-head>.actions{margin-top:14px!important}
+ .person-head>.actions .btn{flex:1}
+ .hero-account .btn{flex:1}
+}
+@media(prefers-reduced-motion:reduce){.btn,.person-card,.input{transition:none}}
 </style>
 </head>
 <body><div class="people-page">
@@ -507,6 +549,25 @@ label{font-weight:800;display:block;margin-bottom:6px}.input{width:100%;padding:
 .btn{padding:11px 16px;border:0;border-radius:10px;text-decoration:none;font-weight:800;cursor:pointer}.primary{background:#6558e8;color:white}.secondary{background:#e9ebf0;color:#333}.danger{background:#fde8e8;color:#a32323}.success{background:#e6f7ed;color:#14733c}
 .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}.note{background:#fff8df;padding:12px;border-radius:10px;margin-bottom:14px}
 @media(max-width:700px){.grid{grid-template-columns:1fr}.full{grid-column:auto}}
+
+/* 视觉优化：编辑个人资料（仅 CSS） */
+.wrap{max-width:920px;padding:28px 20px 50px}
+.card{border:1px solid #e8eaf3;box-shadow:0 8px 26px rgba(35,41,75,.055);padding:27px;border-radius:22px}
+.card h1{color:#2a2552;font-size:27px;margin:0 0 20px}
+.card h2{color:#2a2552;font-size:21px;margin:0 0 14px}
+.grid{gap:17px 19px}
+label{color:#344054;font-size:14px}
+.input{background:#fff;transition:border-color .15s,box-shadow .15s}
+.input:focus{outline:none;border-color:#7465e8;box-shadow:0 0 0 3px rgba(108,88,232,.12)}
+.input:disabled{background:#f5f6fa;color:#667085}
+.note{border:1px solid #f1e3ad;line-height:1.8;color:#71551b}
+.btn{display:inline-flex;align-items:center;justify-content:center;min-height:43px;box-sizing:border-box;
+ transition:transform .15s,box-shadow .15s}
+.btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(30,32,70,.1)}
+.btn:focus-visible{outline:3px solid #a49af5;outline-offset:2px}
+.actions{gap:11px}
+@media(max-width:700px){.wrap{padding:13px 11px 35px}.card{padding:19px 16px}.card h1{font-size:23px}.actions .btn{max-width:100%}}
+@media(prefers-reduced-motion:reduce){.btn,.input{transition:none}}
 </style></head><body><div class="wrap">
 <div class="card"><h1>✏️ 编辑个人资料</h1>
 <div class="note">编号不会在普通资料表单修改。若义工编号是800系列、且已有月费编号，请在下方「身份状态」点击「统一义工与月费编号」执行数据库转换。{% if p.is_volunteer %}<br>当前实际义工编号：<b>{{p.volunteer_id}}</b>{% endif %}{% if p.is_member %}｜月费编号：<b>{{p.member_id}}</b>{% endif %}</div>
@@ -1329,11 +1390,119 @@ def profile_update_photo(update_id):
     return Response(bytes(r['photo_data']),mimetype=r.get('photo_mimetype') or 'image/jpeg',headers={'Cache-Control':'private, no-store'})
 
 
+def load_volunteer_attendance_history(volunteer_id, year, month):
+    """只读个人出席记录；历史与正式签到按切换日分开，避免重复。"""
+    rows = db_query("""
+        SELECT attendance_date AS day, role, start_time, end_time, hours
+        FROM public.volunteer_attendance_history
+        WHERE volunteer_id=%s AND attendance_date >= %s::date
+          AND attendance_date < (%s::date + interval '1 year')
+          AND attendance_date < DATE '2026-12-01'
+        UNION ALL
+        SELECT attendance_date AS day, actual_role AS role,
+               check_in_time::time AS start_time,
+               check_out_time::time AS end_time,
+               CASE WHEN check_in_time IS NOT NULL AND check_out_time IS NOT NULL
+                         AND check_out_time >= check_in_time
+                    THEN EXTRACT(EPOCH FROM (check_out_time-check_in_time))/3600
+                    ELSE NULL END AS hours
+        FROM public.volunteer_attendance_logs
+        WHERE volunteer_id=%s AND attendance_date >= %s::date
+          AND attendance_date < (%s::date + interval '1 year')
+          AND attendance_date >= DATE '2026-12-01'
+          AND check_in_time IS NOT NULL
+        ORDER BY day DESC, start_time DESC NULLS LAST
+    """, (volunteer_id, f'{year}-01-01', f'{year}-01-01',
+          volunteer_id, f'{year}-01-01', f'{year}-01-01'), fetchall=True) or []
+    from collections import defaultdict
+    from decimal import Decimal
+    monthly = defaultdict(lambda: {'days': set(), 'roles': defaultdict(set), 'hours': Decimal('0')})
+    details = []
+    for r in rows:
+        day = r['day']
+        role = clean(r.get('role')) or '未分类'
+        bucket = monthly[day.month]
+        bucket['days'].add(day)
+        bucket['roles'][role].add(day)
+        hours = r.get('hours')
+        if hours is not None:
+            bucket['hours'] += Decimal(str(hours))
+        if day.month == month:
+            details.append({'day': day, 'role': role,
+                            'start': r.get('start_time'), 'end': r.get('end_time'),
+                            'hours': round(float(hours), 2) if hours is not None else None})
+    month_rows = [{'month': m, 'days': len(monthly[m]['days']),
+                   'hours': round(float(monthly[m]['hours']), 2)} for m in range(1, 13)]
+    all_days = set().union(*(v['days'] for v in monthly.values())) if monthly else set()
+    role_days = defaultdict(set)
+    for v in monthly.values():
+        for role, days in v['roles'].items():
+            role_days[role].update(days)
+    return {'days': len(all_days), 'hours': round(sum(x['hours'] for x in month_rows), 2),
+            'roles': sorted(((k, len(v)) for k, v in role_days.items()), key=lambda x: x[0]),
+            'months': month_rows, 'details': details}
+
+
 PROFILE_VIEW_PAGE = r"""
 <!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>义工个人档案</title>
-<style>body{background:#f5f7fb;font-family:Arial,"Microsoft YaHei",sans-serif}.wrap{max-width:1000px;margin:auto;padding:22px}.hero,.card{background:#fff;border-radius:18px;padding:22px;margin-bottom:14px}.head{display:flex;gap:20px;align-items:flex-start}.photo{width:150px;height:190px;object-fit:cover;border-radius:14px;background:#eee}.title{font-size:28px;font-weight:900}.muted{color:#667085}.section{font-size:20px;font-weight:900;margin:0 0 10px}.grid{display:grid;grid-template-columns:190px 1fr;gap:0}.label,.value{padding:9px;border-bottom:1px solid #eee}.label{font-weight:800}.btn{display:inline-block;padding:10px 15px;border-radius:10px;text-decoration:none;font-weight:800;background:#6558e8;color:#fff;margin-right:8px;border:0;cursor:pointer}.btn.green{background:#16834b}.red{background:#c93434}@media(max-width:650px){.head{display:block}.photo{margin-bottom:14px}.grid{grid-template-columns:1fr}.label{padding-bottom:2px;border-bottom:0}.value{padding-top:2px}}</style></head>
+<style>body{background:#f5f7fb;font-family:Arial,"Microsoft YaHei",sans-serif}.wrap{max-width:1000px;margin:auto;padding:22px}.hero,.card{background:#fff;border-radius:18px;padding:22px;margin-bottom:14px}.head{display:flex;gap:20px;align-items:flex-start}.photo{width:150px;height:190px;object-fit:cover;border-radius:14px;background:#eee}.title{font-size:28px;font-weight:900}.muted{color:#667085}.section{font-size:20px;font-weight:900;margin:0 0 10px}.grid{display:grid;grid-template-columns:190px 1fr;gap:0}.label,.value{padding:9px;border-bottom:1px solid #eee}.label{font-weight:800}.btn{display:inline-block;padding:10px 15px;border-radius:10px;text-decoration:none;font-weight:800;background:#6558e8;color:#fff;margin-right:8px;border:0;cursor:pointer}.btn.green{background:#16834b}.red{background:#c93434}@media(max-width:650px){.head{display:block}.photo{margin-bottom:14px}.grid{grid-template-columns:1fr}.label{padding-bottom:2px;border-bottom:0}.value{padding-top:2px}}
+/* 仅美化出席履历区块，不影响其他个人资料 */
+#attendanceHistory{border:1px solid #e8eaf3;box-shadow:0 8px 28px rgba(35,46,90,.055)}
+#attendanceHistory .ah-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+#attendanceHistory .ah-head h2{margin:0 0 5px;font-size:23px;color:#202d4b}
+#attendanceHistory .ah-sub{margin:0;color:#73809a;font-size:13px}
+#attendanceHistory .ah-filter{display:flex;gap:10px;flex-wrap:wrap;align-items:end;background:#f7f8fd;border:1px solid #e9ecf6;border-radius:14px;padding:13px;margin-bottom:18px}
+#attendanceHistory .ah-filter label{font-size:12px;font-weight:800;color:#56627c;display:grid;gap:5px}
+#attendanceHistory .ah-filter select{min-width:104px;background:white;border:1px solid #d9dfed;border-radius:9px;padding:9px 12px;font-size:14px;color:#24324d}
+#attendanceHistory .ah-filter button{margin:0;padding:10px 18px}
+#attendanceHistory .ah-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:22px}
+#attendanceHistory .ah-stat{padding:17px 18px;border:1px solid #e9ecf6;border-radius:15px;background:linear-gradient(145deg,#fff,#f9faff)}
+#attendanceHistory .ah-stat .ah-num{font-size:29px;font-weight:900;color:#4f46cf;line-height:1.35}
+#attendanceHistory .ah-stat .ah-unit{font-size:13px;color:#67738a;font-weight:700;margin-left:4px}
+#attendanceHistory .ah-stat .ah-caption{font-size:13px;color:#68758e;margin-top:4px}
+#attendanceHistory .ah-section-title{font-size:17px;font-weight:900;color:#25324d;margin:22px 0 11px;display:flex;align-items:center;gap:8px}
+#attendanceHistory .ah-roles{display:flex;flex-wrap:wrap;gap:9px}
+#attendanceHistory .ah-role{background:#eef0ff;color:#4540a6;border:1px solid #e0e2ff;border-radius:999px;padding:7px 12px;font-size:13px;font-weight:700}
+#attendanceHistory .ah-role b{font-size:14px}
+#attendanceHistory .ah-table-wrap{overflow-x:auto;border:1px solid #e8ecf4;border-radius:13px}
+#attendanceHistory .ah-table{width:100%;border-collapse:collapse;text-align:left;font-size:14px}
+#attendanceHistory .ah-table th{background:#f5f7fc;color:#56637e;font-size:12px;font-weight:900;padding:12px 14px;white-space:nowrap}
+#attendanceHistory .ah-table td{padding:11px 14px;border-top:1px solid #edf0f6;color:#34415a}
+#attendanceHistory .ah-table tbody tr:hover{background:#f8f9ff}
+#attendanceHistory .ah-table .ah-selected{background:#f0f2ff}
+#attendanceHistory .ah-table .ah-selected td:first-child{font-weight:900;color:#5148ca}
+#attendanceHistory .ah-date{font-weight:750;white-space:nowrap}
+#attendanceHistory .ah-hours{font-variant-numeric:tabular-nums;font-weight:750}
+#attendanceHistory .ah-pill{display:inline-block;padding:4px 9px;border-radius:7px;background:#eaf7ef;color:#177047;font-weight:800;font-size:12px;white-space:nowrap}
+#attendanceHistory .ah-note{font-size:12px;color:#78839a;line-height:1.7;margin:17px 0 0;padding:11px 13px;background:#f8f9fc;border-radius:10px}
+@media(max-width:650px){ #attendanceHistory .ah-stats{grid-template-columns:1fr 1fr}#attendanceHistory .ah-stat{padding:13px}#attendanceHistory .ah-stat .ah-num{font-size:24px}#attendanceHistory .ah-table{font-size:12px}#attendanceHistory .ah-table th,#attendanceHistory .ah-table td{padding:10px 9px}}
+</style></head>
 <body><div class="wrap">
 <div class="hero"><div class="head">{% if has_photo %}<a href="{{ url_for('people.profile_photo', volunteer_id=v.id) }}" target="_blank" rel="noopener"><img class="photo" src="{{ url_for('people.profile_photo', volunteer_id=v.id) }}" title="点击查看原图"></a>{% endif %}<div><div class="title">{{ v.name }}</div><p><b>{{ v.id }}</b> · 义工分会 {{ v.branch }}</p><p class="muted">档案最后更新：{{ profile.updated_at or '-' }}</p><a class="btn" href="{{ url_for('people.index') }}">← 返回人员管理</a>{% if profile %}<button class="btn green" id="copyProfileWhatsAppBtn" type="button" onclick="copyProfileWhatsApp()">📱 复制 WhatsApp 个人资料</button>{% endif %}{% if has_photo %}<a class="btn" href="{{ url_for('people.profile_photo', volunteer_id=v.id) }}" target="_blank" rel="noopener">📷 查看原图</a><a class="btn green" href="{{ url_for('people.profile_photo_download', volunteer_id=v.id) }}">⬇️ 下载照片</a>{% endif %}</div></div></div>
+<div class="card" id="attendanceHistory">
+<div class="ah-head"><div><h2>📊 义工出席履历</h2><p class="ah-sub">年度贡献总览 · 月度统计 · 实际服务明细</p></div></div>
+<form class="ah-filter" method="get">
+<label>选择年份<select name="year">{% for y in years %}<option value="{{ y }}" {% if y==selected_year %}selected{% endif %}>{{ y }}年</option>{% endfor %}</select></label>
+<label>查看月份<select name="month">{% for m in range(1,13) %}<option value="{{ m }}" {% if m==selected_month %}selected{% endif %}>{{ m }}月</option>{% endfor %}</select></label>
+<button class="btn" type="submit">🔍 查询出席</button>
+</form>
+<div class="ah-stats">
+<div class="ah-stat"><div class="ah-num">{{ attendance.days }}<span class="ah-unit">天</span></div><div class="ah-caption">{{ selected_year }}年实际出席</div></div>
+<div class="ah-stat"><div class="ah-num">{{ '%.2f'|format(attendance.hours) }}<span class="ah-unit">小时</span></div><div class="ah-caption">年度累计服务时数</div></div>
+<div class="ah-stat"><div class="ah-num">{{ attendance.roles|length }}<span class="ah-unit">种</span></div><div class="ah-caption">参与服务岗位</div></div>
+</div>
+<div class="ah-section-title">🏷️ 岗位服务统计</div>
+<div class="ah-roles">{% for role, count in attendance.roles %}<span class="ah-role">{{ role }} <b>{{ count }}</b> 次</span>{% else %}<span class="ah-sub">本年度暂无岗位记录</span>{% endfor %}</div>
+<div class="ah-section-title">📅 {{ selected_year }}年月度出席统计</div>
+<div class="ah-table-wrap"><table class="ah-table"><thead><tr><th>月份</th><th>出席天数</th><th>服务时数</th></tr></thead><tbody>
+{% for item in attendance.months %}<tr {% if item.month==selected_month %}class="ah-selected"{% endif %}><td>{{ item.month }}月{% if item.month==selected_month %} · 当前查看{% endif %}</td><td>{{ item.days }} 天</td><td class="ah-hours">{{ '%.2f'|format(item.hours) }} 小时</td></tr>{% endfor %}
+</tbody></table></div>
+<div class="ah-section-title">🗂️ {{ selected_year }}年{{ selected_month }}月每日服务明细</div>
+<div class="ah-table-wrap"><table class="ah-table"><thead><tr><th>日期</th><th>服务岗位</th><th>开始时间</th><th>结束时间</th><th>服务时数</th></tr></thead><tbody>
+{% for item in attendance.details %}<tr><td class="ah-date">{{ item.day }}</td><td><span class="ah-pill">{{ item.role }}</span></td><td>{{ item.start or '-' }}</td><td>{{ item.end or '-' }}</td><td class="ah-hours">{{ '%.2f'|format(item.hours) if item.hours is not none else '-' }}</td></tr>{% else %}<tr><td colspan="5" style="text-align:center;color:#78839a;padding:25px">本月暂无出席记录</td></tr>{% endfor %}
+</tbody></table></div>
+<p class="ah-note">📌 同一天参与多个岗位，只计算一个出席日；同一天同岗位只计一次岗位次数。2026年11月30日前读取历史 Excel 记录；2026年12月1日起读取正式云端签到记录。未签退的服务时数不计入。</p>
+</div>
 {% if not profile %}<div class="card"><h2>尚未建立完整个人档案</h2><p>这位义工还没有通过负责人审核的新版资料。</p></div>{% else %}
 <div id="profileData">{% for title, keys in sections %}<div class="card profile-section"><div class="section">{{ title }}</div><div class="grid">{% for key in keys %}<div class="label">{{ labels[key] }}</div><div class="value">{{ d.get(key) or '-' }}</div>{% endfor %}</div></div>{% endfor %}</div>
 <script>
@@ -1409,7 +1578,16 @@ def profile_view(volunteer_id):
     if profile and profile.get('profile_json'):
         try:d=json.loads(profile['profile_json'])
         except Exception:d={}
-    return render_template_string(PROFILE_VIEW_PAGE,v=v,profile=profile,d=d,has_photo=bool(profile and profile.get('photo_data')),labels=PROFILE_LABELS,sections=PROFILE_SECTIONS)
+    today = datetime.now()
+    try:
+        year = int(request.args.get('year', today.year))
+        month = int(request.args.get('month', today.month))
+    except (TypeError, ValueError):
+        abort(400)
+    if not (2020 <= year <= today.year + 1 and 1 <= month <= 12):
+        abort(400)
+    attendance = load_volunteer_attendance_history(volunteer_id, year, month)
+    return render_template_string(PROFILE_VIEW_PAGE,v=v,profile=profile,d=d,has_photo=bool(profile and profile.get('photo_data')),labels=PROFILE_LABELS,sections=PROFILE_SECTIONS,attendance=attendance,selected_year=year,selected_month=month,years=range(today.year + 1, 2019, -1))
 
 @people_bp.route('/profile-photo/<path:volunteer_id>')
 def profile_photo(volunteer_id):

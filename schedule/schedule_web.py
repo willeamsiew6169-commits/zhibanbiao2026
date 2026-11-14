@@ -204,7 +204,7 @@ def find_name_by_id(vol_id):
         sql = text(f"""
             SELECT id, name, status, branch
             FROM volunteers
-            WHERE id IN ({placeholders})
+            WHERE id IN ({placeholders}) OR member_id IN ({placeholders})
             LIMIT 1
         """)
 

@@ -103,6 +103,7 @@ def load_schedule_admin_dashboard_data(override_date, conn=None):
                 count(*) filter (where signup_date >= %s) as month_count
             from volunteer_schedule_signups
             where coalesce(status, 'pending') = 'pending'
+              and coalesce(role, '') not in ('膳食', '膳食组')
               and signup_date >= %s
         """, (today, tomorrow, month_start, month_start))
         pending_row = cur.fetchone()
@@ -115,8 +116,11 @@ def load_schedule_admin_dashboard_data(override_date, conn=None):
         cur.execute("""
             select
                 count(*) as total,
-                count(*) filter (where coalesce(status, 'pending') = 'pending') as pending,
-                count(*) filter (where coalesce(status, '') = 'assigned') as assigned,
+                count(*) filter (where coalesce(status, 'pending') = 'pending'
+                    and coalesce(role, '') not in ('膳食', '膳食组')) as pending,
+                count(*) filter (where coalesce(status, '') = 'assigned'
+                    or (coalesce(role, '') in ('膳食', '膳食组')
+                        and coalesce(status, 'pending') <> 'cancelled')) as assigned,
                 count(*) filter (where coalesce(status, '') = 'cancelled') as cancelled
             from volunteer_schedule_signups
             where signup_date = %s

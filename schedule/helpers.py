@@ -82,7 +82,8 @@ def find_volunteer_by_keyword(keyword):
                     name,
                     phone,
                     branch,
-                    status
+                    status,
+                    member_id
                 from volunteers
                 where status='在册'
             """)
@@ -103,11 +104,12 @@ def find_volunteer_by_keyword(keyword):
     for v in volunteers:
 
         vid = str(v["id"] or "").strip().upper()
+        member_id = str(v.get("member_id") or "").strip().upper()
 
         phone = clean_phone(v.get("phone"))
 
         # 输入完整编号
-        if vid == keyword_upper:
+        if vid == keyword_upper or member_id == keyword_upper:
             exact_matches.append(v)
             continue
 
@@ -117,6 +119,8 @@ def find_volunteer_by_keyword(keyword):
             if (
                 vid == f"CHE-{keyword_num}"
                 or vid == f"STW-{keyword_num}"
+                or member_id == f"CHE-{keyword_num}"
+                or member_id == f"STW-{keyword_num}"
             ):
                 exact_matches.append(v)
                 continue

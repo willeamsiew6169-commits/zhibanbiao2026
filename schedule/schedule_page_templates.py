@@ -366,6 +366,30 @@ function showSpecial(id) {
 </script>
 
 <style>
+/* 今日提醒：电脑双栏、手机单栏 */
+.reminder-stack {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    align-items: start;
+}
+
+.reminder-stack > .alert {
+    min-width: 0;
+    margin: 0;
+    box-sizing: border-box;
+    overflow-wrap: anywhere;
+}
+
+.reminder-stack > .reminder-full-width {
+    grid-column: 1 / -1;
+}
+
+@media (max-width: 700px) {
+    .reminder-stack {
+        grid-template-columns: 1fr;
+    }
+}
 .login-wrap{
     max-width:620px;
     margin:60px auto;
@@ -601,46 +625,54 @@ html {
 
 <div class="card">
     <h2 class="section-title">🔔 今日提醒</h2>
+
     <div class="reminder-stack">
-<div class="alert alert-error">
-    <h3 style="margin-top:0;">🔴 未安排提醒</h3>
-    今日：<b>{{ pending_counts.today }}</b> 人　
-    明日：<b>{{ pending_counts.tomorrow }}</b> 人　
-    本月：<b>{{ pending_counts.month }}</b> 人
-</div>
 
+        <!-- 未安排提醒 -->
+        <div class="alert alert-error">
+            <h3 style="margin-top:0;">🔴 未安排提醒</h3>
+            今日：<b>{{ pending_counts.today }}</b> 人　
+            明日：<b>{{ pending_counts.tomorrow }}</b> 人　
+            本月：<b>{{ pending_counts.month }}</b> 人
+        </div>
 
-
-        {% if republish_info and republish_info.need_republish %}
+        <!-- 供台报名提醒 -->
         <div class="alert alert-warning">
+            <h2 style="margin-top:0;">🌸 供台报名提醒</h2>
+
+            {% for item in supply_alerts %}
+            <div style="margin-bottom:14px;">
+                <b>
+                    {{ item.date.strftime("%m/%d") }}
+                    {{ item.festival_label }}
+                </b><br>
+
+                {% if item.scheduled_names %}
+                <span style="color:#176b39;">
+                    🟢 已安排设供台：{{ "、".join(item.scheduled_names) }}
+                </span><br>
+                {% endif %}
+
+                {% if item.names %}
+                    义工自行报名：{{ "、".join(item.names) }}
+                {% elif not item.scheduled_names %}
+                    <span style="color:#c0392b;">
+                        尚未安排设供台人员，也没有义工报名
+                    </span>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+
+        <!-- 正式值班表更新提醒 -->
+        {% if republish_info and republish_info.need_republish %}
+        <div class="alert alert-warning reminder-full-width">
             🟠 正式值班表已有更新<br>
             最后更新时间：{{ republish_info.last_schedule_change }}<br>
             请到通知中心复制最新正式值班表 WhatsApp。
         </div>
         {% endif %}
-<div class="alert alert-warning">
-    <h2>🌸 供台报名提醒</h2>
-
-    {% for item in supply_alerts %}
-        <div style="margin-bottom:14px;">
-            <b>
-                {{ item.date.strftime("%m/%d") }}
-                {{ item.festival_label }}
-            </b><br>
-
-            {% if item.scheduled_names %}
-                <span style="color:#176b39;">🟢 已安排设供台：{{ "、".join(item.scheduled_names) }}</span><br>
-            {% endif %}
-            {% if item.names %}
-                义工自行报名：{{ "、".join(item.names) }}
-            {% elif not item.scheduled_names %}
-                <span style="color:#c0392b;">尚未安排设供台人员，也没有义工报名</span>
-            {% endif %}
-        </div>
-    {% endfor %}
-</div>
-
-
+   
     </div>
 </div>
 

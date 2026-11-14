@@ -1444,24 +1444,32 @@ ADMIN_HOME_HTML = """
         </div>
 
         <div class="card">
-            <h2 class="section-title">📖 白话佛法共修</h2>
+            <h2 class="section-title">👥 义工个人档案</h2>
             <div class="admin-card-desc">
-                记录每日共修、查看今日共修记录及统计。
+                查看义工资料、照片及个人出席履历。
             </div>
-            <a class="btn-tool btn-primary"
-               href="/reading">
-                进入共修记录
+            <a class="btn-tool btn-primary" href="/people/">
+                进入义工个人档案
             </a>
         </div>
 
         <div class="card">
-            <h2 class="section-title">📊 数据中心</h2>
+            <h2 class="section-title">🎓 佛学班管理</h2>
             <div class="admin-card-desc">
-                统一下载签到、共修、排班、藏经阁、财政资料。
+                学生管理、课程记录、点名及报表。
             </div>
-            <a class="btn-tool btn-purple"
-               href="{{ url_for('admin.data_center', pin=pin) }}">
-                进入数据中心
+            <a class="btn-tool btn-success" href="/class/admin">
+                进入佛学班管理
+            </a>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">📊 年月报表系统</h2>
+            <div class="admin-card-desc">
+                生成义工月报、年报及白话佛法统计 Excel。
+            </div>
+            <a class="btn-tool btn-primary" href="/reports/">
+                进入年月报表系统
             </a>
         </div>
 
@@ -1476,13 +1484,6 @@ ADMIN_HOME_HTML = """
             </a>
         </div>
 
-    </div>
-
-    <div class="card">
-        <a class="btn-tool btn-secondary"
-           href="/">
-            返回首页
-        </a>
     </div>
 
 </div>

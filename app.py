@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 from admin_web import admin_bp
+from reports_web import reports_bp
 from member_web import member_bp
 from people_web import people_bp
 from pypinyin import lazy_pinyin
@@ -124,6 +125,7 @@ app.register_blueprint(library_bp)
 app.register_blueprint(member_bp)
 app.register_blueprint(people_bp)
 app.register_blueprint(admin_bp)
+app.register_blueprint(reports_bp)
 app.register_blueprint(xfz_bp)
 app.register_blueprint(donation_bp)
 
@@ -1027,7 +1029,7 @@ async function lookupVolunteer() {
             ${mark}<br>
             ${TXT.duty_place}：<b>${a.assigned_place || "-"}</b><br>
             ${TXT.duty_role}：${(window.ROLE_LABELS || {})[a.role] || a.role || "-"}<br>
-            ${TXT.duty_time}：${a.start_time || "-"} ～ ${a.end_time || "-"}
+            ${(a.start_time || a.end_time) ? `<br>${TXT.duty_time}：${a.start_time || "-"} ～ ${a.end_time || "-"}` : ""}
           </div>`;
       });
     } else {
@@ -2054,7 +2056,7 @@ def api_volunteer(volunteer_id):
 
         if is_fixed_buddha and not any(a.get('role') in ('佛台', '整理佛台') for a in today_assignments):
             today_assignments.append({
-                'id': None, 'role': '佛台', 'assigned_place': '整理佛台',
+                'id': None, 'role': '佛台', 'assigned_place': '观音堂',
                 'start_time': '8:00am', 'end_time': '完成佛台工作',
                 'shift_label': '', 'state': _extra_state('佛台'),
                 'display_only': True,
@@ -2081,16 +2083,37 @@ def api_volunteer(volunteer_id):
                 'start_time': '12:00pm', 'end_time': '2:00pm', 'shift_label': '',
                 'state': _extra_state('供台'), 'display_only': True,
             })
+        # 供花、供果与签到资格使用同一来源；仅补充「今天工作安排」显示。
+        # 不建立正式排班记录，也不改变 PIN 或签到截止时间规则。
+        fixed_flower_fruit = db_query("""
+            SELECT role FROM volunteer_fixed_roles
+            WHERE volunteer_id = ANY(%s) AND role IN ('供花', '供果')
+        """, (get_assignment_id_candidates(v, volunteer_id),), fetchall=True) or []
+        if fixed_flower_fruit:
+            flower_fruit_day = db_query("""
+                SELECT 1 FROM flower_fruit_work_days WHERE work_date=%s LIMIT 1
+            """, (today,), fetchone=True)
+            if flower_fruit_day:
+                for fixed_role in ('供花', '供果'):
+                    if any(r.get('role') == fixed_role for r in fixed_flower_fruit) and not any(
+                        a.get('role') == fixed_role for a in today_assignments
+                    ):
+                        today_assignments.append({
+                            'id': None, 'role': fixed_role,
+                            'assigned_place': '观音堂' if fixed_role == '供花' else '活动中心',
+                            'start_time': '', 'end_time': '', 'shift_label': '',
+                            'state': _extra_state(fixed_role), 'display_only': True,
+                        })
         if meal_signups and not any(a.get('role') == '膳食' for a in today_assignments):
             meal = meal_signups[0]
             meal_position = next((i for i, r in enumerate(meal_signups)
                                   if r['id'] == meal['id']), 0)
             meal_role = meal.get('meal_role') or ('派餐义工' if meal_position < 9 else '候补义工')
             today_assignments.append({
-                'id': None, 'role': '膳食', 'assigned_place': meal_role,
+                'id': None, 'role': '膳食', 'assigned_place': '活动中心',
                 'start_time': meal.get('start_time') or '8:00am',
                 'end_time': meal.get('end_time') or '2:00pm',
-                'shift_label': '', 'state': _extra_state('膳食'),
+                'shift_label': meal_role, 'state': _extra_state('膳食'),
                 'display_only': True,
             })
         today_assignments.sort(key=lambda x: str(x.get('start_time') or ''))

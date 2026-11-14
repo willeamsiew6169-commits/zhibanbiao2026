@@ -11,9 +11,12 @@ def get_signup_summary_for_date(date_str):
             count(*) as total,
             count(*) filter (
                 where coalesce(status, 'pending') = 'pending'
+                  and coalesce(role, '') not in ('膳食', '膳食组')
             ) as pending,
             count(*) filter (
                 where status = 'assigned'
+                   or (coalesce(role, '') in ('膳食', '膳食组')
+                       and coalesce(status, 'pending') <> 'cancelled')
             ) as assigned,
             count(*) filter (
                 where status = 'cancelled'
@@ -75,6 +78,14 @@ def load_admin_signup_details(date_str):
         by_person_role.setdefault(key, []).append(item)
 
     for signup in signups:
+        # 膳食只需报名，无需再分配地点；仅修正负责人页面的展示数据。
+        # 不更新报名表状态，实际签到签退仍由签到系统处理。
+        if (str(signup.get('role') or '').strip() in ('膳食', '膳食组')
+                and signup.get('status') != 'cancelled'):
+            signup['status'] = 'assigned'
+            signup['assigned_place'] = '活动中心'
+            signup['assignment_places'] = ['活动中心']
+            continue
         # 已取消的报名不能显示其他有效排班，避免误导负责人。
         if signup.get('status') == 'cancelled':
             continue
