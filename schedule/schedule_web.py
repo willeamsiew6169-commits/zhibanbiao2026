@@ -7,6 +7,7 @@ from schedule.services.schedule_view_queries import (
 
 from schedule.services.schedule_calendar_queries import (
     get_pending_signup_counts,
+    get_pending_signup_details,
     is_big_day,
     _master_table_dates,
 )
@@ -787,7 +788,7 @@ def build_signup_notice_whatsapp(date_str):
     altar_start, altar_end = ("6:00am", "8:00am") if big_day else ("8:00am", "10:00am")
     cleaning_start, cleaning_end = altar_start, altar_end
     green_section = (
-        "8:00am~10:00am \n🟢 观音堂: \n{hall}\n🟢 活动中心: \n{center}\n\n"
+        "8:00am~10:00am \n🟢 观音堂: \n{hall}\n\n🟢 活动中心: \n{center}\n\n\n"
         if big_day else ""
     )
 
@@ -1016,8 +1017,10 @@ def build_signup_notice_whatsapp(date_str):
 {green_section}10:00am~2:00pm 
 🟠 观音堂: 
 {format_duty_people(groups["橙观音堂"])}
+
 🟠 活动中心: 
 {format_duty_people(groups["橙活动中心"])}
+
 
 2:00pm~6:00pm 
 🟡 观音堂: 
@@ -1245,6 +1248,7 @@ def schedule_admin():
         food_offering_open=dashboard["food_offering_open"],
         records=dashboard["records"],
         pending_counts=dashboard["pending_counts"],
+        pending_details=get_pending_signup_details() if mode == "day" else [],
         day_summary=dashboard["day_summary"],
         signup_details=signup_details,
         is_today_or_past=dashboard["is_today_or_past"],
@@ -2407,22 +2411,101 @@ def schedule_parse_raw():
 
 @schedule_bp.route("/schedule/publish", methods=["POST"])
 def publish_schedule():
-
+    """一键安全排班并发布；已存在的安排绝不整表覆盖。"""
     if not session.get("schedule_login"):
         return redirect(url_for("schedule.schedule_admin"))
 
-    target_date = request.form["date"]
-
-    publish_schedule_for_date(target_date)
-
-    return redirect(
-        url_for(
-            "schedule.schedule_admin",
-            mode="day",
-            override_date=target_date,
-            published="1"
-        )
+    from markupsafe import escape
+    from schedule.builders.schedule_builder import (
+        repair_unassigned_duty_for_date,
+        rebuild_published_cleaning_assignments,
+        _wa6_minutes,
     )
+
+    target_date = (request.form.get("date") or "").strip()
+    try:
+        selected = date.fromisoformat(target_date)
+    except ValueError:
+        return "❌ 日期格式错误", 400
+
+    def failure(reason):
+        return (f"<h2>❌ 未发布：{escape(str(reason))}</h2>"
+                f"<p>原有排班和发布状态保持不变；请检查后重试。</p>"
+                f"<a href='/schedule?mode=day&amp;override_date={target_date}'>返回当天安排</a>"), 409
+
+    try:
+        # 已发布/已有排班时禁止调用 run_schedule_for_date，因它会删除整日旧安排。
+        published = is_schedule_published(target_date)
+        existing = db_query("""
+            SELECT count(*) AS n FROM volunteer_schedule_assignments
+            WHERE assignment_date=%s
+        """, (target_date,), fetchone=True)
+        has_assignments = int((existing or {}).get("n") or 0) > 0
+
+        if not published and not has_assignments:
+            if selected < malaysia_today():
+                return failure("过去日期不能重新自动排班")
+            result = run_schedule_for_date(target_date)
+            if not isinstance(result, str) or result.lstrip().startswith("❌"):
+                return failure(result or "自动排班失败")
+        else:
+            # 只补没有 assignment 的值班报名；保留全部现有排班及管理员调整。
+            repair = repair_unassigned_duty_for_date(target_date)
+            if repair["failed"]:
+                return failure(f"值班补排失败，报名编号：{repair['failed']}")
+
+        # 统一按实际 assignments 验证，不相信报名表的 status 字段。
+        signups = db_query("""
+            SELECT id, name, role, start_time, end_time
+            FROM volunteer_schedule_signups
+            WHERE signup_date=%s AND role IN ('值班','卫生')
+              AND COALESCE(status,'pending') <> 'cancelled'
+        """, (target_date,), fetchall=True) or []
+        assignments = db_query("""
+            SELECT signup_id, role, start_time, end_time
+            FROM volunteer_schedule_assignments
+            WHERE assignment_date=%s
+              AND COALESCE(status,'assigned') <> 'cancelled'
+        """, (target_date,), fetchall=True) or []
+        by_signup = {}
+        for row in assignments:
+            if row.get("signup_id") is not None:
+                by_signup.setdefault(int(row["signup_id"]), []).append(row)
+
+        problems = []
+        for signup in signups:
+            sid = int(signup["id"])
+            matches = [r for r in by_signup.get(sid, []) if r.get("role") == signup["role"]]
+            if not matches:
+                problems.append(f"{signup['name']}（{signup['role']}）未安排")
+                continue
+            if signup["role"] == "值班":
+                try:
+                    start = _wa6_minutes(signup["start_time"])
+                    end = _wa6_minutes(signup["end_time"])
+                    intervals = sorted((_wa6_minutes(r["start_time"]),
+                                        _wa6_minutes(r["end_time"])) for r in matches)
+                    cursor = start
+                    for a, b in intervals:
+                        if a > cursor:
+                            break
+                        cursor = max(cursor, b)
+                    if start >= end or cursor < end:
+                        problems.append(f"{signup['name']}值班时间未完整覆盖")
+                except (ValueError, TypeError):
+                    problems.append(f"{signup['name']}值班时间格式异常")
+        if problems:
+            return failure("；".join(problems[:12]))
+
+        # 已发布不重复触发快照和 WhatsApp 入队；首次发布沿用原有服务。
+        if not published:
+            publish_schedule_for_date(target_date)
+        return redirect(url_for("schedule.schedule_admin", mode="day",
+                                override_date=target_date, published="1"))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("一键排班并发布失败：%s", target_date)
+        return failure("系统处理异常，请查看 Render 日志")
 
 
 @schedule_bp.route("/schedule/override", methods=["POST"])

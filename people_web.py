@@ -100,19 +100,100 @@ def natural_id_key(value):
 
 
 def migrate_volunteer_number(cur, old_id, new_id, member_id):
-    """安全保护：禁止在未核对全部数据库关联表前执行编号迁移。
+    """在同一事务中迁移义工编号及所有 public.volunteer_id 关联记录。"""
+    from psycopg2 import sql
 
-    旧编号涉及报名、正式排班、签到历史、个人档案及其他模块。
-    不能只 UPDATE volunteers.id，否则可能造成历史记录失联。
-    此函数故意中止事务，确保加入月费时连新会员 INSERT 一起回滚。
-    """
     old_id, new_id, member_id = map(clean, (old_id, new_id, member_id))
-    if old_id == new_id:
-        raise ValueError("旧编号与新编号相同，无需转换。")
-    raise RuntimeError(
-        "义工编号转换已安全暂停：需要先核对 Supabase 的报名、排班、签到、"
-        "个人档案及历史编号映射表，才能启用完整迁移。数据库未作任何修改。"
-    )
+    new_id, member_id = new_id.upper(), member_id.upper()
+    if not (old_id.isdigit() and int(old_id) >= 800):
+        raise ValueError("仅允许转换800系列旧义工编号。")
+    if new_id != member_id or not re.fullmatch(r"(?:CHE|STW)-\d+", new_id):
+        raise ValueError("新义工编号必须与有效月费编号相同。")
+
+    # 锁定原义工记录；整个调用方事务失败时自动回滚。
+    cur.execute("""
+        SELECT id, name, member_id FROM volunteers WHERE id=%s FOR UPDATE
+    """, (old_id,))
+    old = cur.fetchone()
+    if not old:
+        raise ValueError("旧义工编号不存在，请刷新页面后重试。")
+    if clean(old.get("member_id")) not in ("", new_id):
+        raise ValueError("旧义工已关联其他月费编号，已停止转换。")
+    cur.execute("SELECT id FROM volunteers WHERE id=%s", (new_id,))
+    if cur.fetchone():
+        raise ValueError("新义工编号已存在，不能覆盖其他义工。")
+    cur.execute("SELECT member_id, name FROM members WHERE member_id=%s", (new_id,))
+    member = cur.fetchone()
+    if not member or clean(member.get("name")) != clean(old.get("name")):
+        raise ValueError("月费主档不存在或姓名不一致，请先人工核对。")
+
+    # 只允许 public schema 的文本型 volunteer_id 字段，避免动态 SQL 误改其他字段。
+    cur.execute("""
+        SELECT table_name FROM information_schema.columns
+        WHERE table_schema='public' AND column_name='volunteer_id'
+          AND data_type IN ('text', 'character varying')
+        ORDER BY table_name
+    """)
+    tables = [r['table_name'] for r in cur.fetchall()]
+    if not tables:
+        raise RuntimeError("找不到义工编号关联字段，已停止转换。")
+
+    # 先检查目标编号是否已在唯一键字段中存在，避免合并不同人的档案。
+    cur.execute("""
+        SELECT tc.table_name, kcu.column_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name=kcu.constraint_name AND tc.table_schema=kcu.table_schema
+        WHERE tc.table_schema='public' AND tc.constraint_type IN ('PRIMARY KEY','UNIQUE')
+          AND kcu.column_name='volunteer_id'
+    """)
+    for row in cur.fetchall():
+        table = row['table_name']
+        if table in tables:
+            cur.execute(sql.SQL("SELECT 1 FROM {} WHERE volunteer_id=%s LIMIT 1").format(
+                sql.Identifier('public', table)), (new_id,))
+            if cur.fetchone():
+                raise ValueError(f"{table} 已存在新编号档案，需人工核对。")
+
+    # 保留旧号对应关系；此表不替代历史导入程序的旧号识别逻辑。
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS public.volunteer_id_aliases (
+            old_id text PRIMARY KEY,
+            new_id text NOT NULL,
+            changed_at timestamptz NOT NULL DEFAULT now()
+        )
+    """)
+    cur.execute("SELECT new_id FROM public.volunteer_id_aliases WHERE old_id=%s FOR UPDATE", (old_id,))
+    alias = cur.fetchone()
+    if alias and alias['new_id'] != new_id:
+        raise ValueError("旧编号已映射至其他编号，已停止转换。")
+
+    # 固定岗位/佛台有 ON UPDATE CASCADE；先更新主档，再更新其他关联表。
+    cur.execute("""
+        UPDATE volunteers SET id=%s, member_id=%s, is_member=true
+        WHERE id=%s
+    """, (new_id, new_id, old_id))
+    if cur.rowcount != 1:
+        raise RuntimeError("义工主档更新笔数异常，已停止转换。")
+    for table in tables:
+        cur.execute(sql.SQL("UPDATE {} SET volunteer_id=%s WHERE volunteer_id=%s").format(
+            sql.Identifier('public', table)), (new_id, old_id))
+
+    # 新义工申请档案也可能保留正式义工编号。
+    cur.execute("""
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='people_applications'
+          AND column_name='formal_volunteer_id'
+    """)
+    if cur.fetchone():
+        cur.execute("""
+            UPDATE public.people_applications SET formal_volunteer_id=%s
+            WHERE formal_volunteer_id=%s
+        """, (new_id, old_id))
+    cur.execute("""
+        INSERT INTO public.volunteer_id_aliases(old_id,new_id)
+        VALUES (%s,%s) ON CONFLICT (old_id) DO NOTHING
+    """, (old_id, new_id))
 
 
 def next_volunteer_id():
@@ -644,7 +725,7 @@ body{background:#f5f7fb;font-family:Arial,"Microsoft YaHei",sans-serif}.wrap{max
 .btn{padding:11px 16px;border:0;border-radius:10px;text-decoration:none;font-weight:800}.primary{background:#6558e8;color:#fff}.secondary{background:#e9ebf0;color:#333}.alert{background:#fdecec;padding:12px;border-radius:10px}
 </style></head><body><div class="wrap"><div class="card">
 <h1>💰 加入月费</h1><p><b>{{ p.name }}</b>（现有义工编号：{{ p.volunteer_id }}）</p>
-<p>原来的义工编号不会改，过去签到/排班记录继续保留；新月费编号会通过 member_id 与这位义工连接。</p>
+<p>确认加入月费后，将统一正式义工编号，并同步关联报名、排班、签到及历史记录；旧编号对应关系会保留。</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <form method="post">
 <label>分会</label><select class="input" name="branch"><option value="CHE" {% if p.branch=='CHE' %}selected{% endif %}>CHE</option><option value="STW" {% if p.branch=='STW' %}selected{% endif %}>STW</option></select>
@@ -869,7 +950,7 @@ def convert_volunteer_number(person_key):
     return render_template_string('''<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <body style="font-family:Arial,'Microsoft YaHei';max-width:640px;margin:40px auto;padding:18px">
     <h2>🔄 统一义工与月费编号</h2><p><b>{{p.name}}</b>：旧义工编号 <b>{{old_id}}</b> → 正式编号 <b>{{mid}}</b></p>
-    <p>历史记录保留旧编号，未来报名、排班及未完成的签到转换为新编号。</p>
+    <p>历史记录内容保留，并统一使用新编号；旧编号对应关系会保留。</p>
     {% if error %}<p style="color:#b00020">{{error}}</p>{% endif %}
     <form method="post"><label>请输入 {{mid}} 确认：<input name="confirm" required></label>
     <button type="submit">确认转换</button></form><p><a href="{{url_for('people.edit',person_key=p.key)}}">取消返回</a></p></body></html>''', p=p, old_id=old_id, mid=mid, error=error)

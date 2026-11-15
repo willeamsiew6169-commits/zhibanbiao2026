@@ -1583,7 +1583,7 @@ def volunteer_my_schedule():
                 from volunteer_schedule_signups
                 where volunteer_id = %s
                 and coalesce(status, 'pending') <> 'cancelled'
-                order by signup_date, start_time
+                order by signup_date DESC, start_time
             """, (vol_id,))
             rows = cur.fetchall()
 

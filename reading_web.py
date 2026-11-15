@@ -160,7 +160,7 @@ def reading():
         for name in names:
             add_reading_record(
                 name=name,
-                identity=t["volunteer_identity"],
+                identity=t.get("volunteer_identity", "Volunteer" if t.get("html_lang", "zh").startswith("en") else "义工"),
                 topic=topic,
                 session=session,
                 time_text=now_time
@@ -169,7 +169,7 @@ def reading():
         for name in extra_names:
             add_reading_record(
                 name=name,
-                identity=t["friend_identity"],
+                identity=t.get("friend_identity", "Friend" if t.get("html_lang", "zh").startswith("en") else "佛友"),
                 topic=topic,
                 session=session,
                 time_text=now_time

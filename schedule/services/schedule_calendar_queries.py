@@ -28,6 +28,7 @@ def get_pending_signup_counts():
 
         from volunteer_schedule_signups
         where coalesce(status, 'pending') = 'pending'
+        and role IS DISTINCT FROM '膳食'
         and signup_date >= %s
     """, (
         today,
@@ -41,6 +42,19 @@ def get_pending_signup_counts():
         "tomorrow": row["tomorrow_count"] or 0,
         "month": row["month_count"] or 0,
     }
+
+def get_pending_signup_details():
+    """与 get_pending_signup_counts 的 month_count 使用完全相同的筛选范围。"""
+    month_start = malaysia_today().replace(day=1)
+    return db_query("""
+        SELECT id, signup_date, name, volunteer_id, role, start_time, end_time
+        FROM volunteer_schedule_signups
+        WHERE COALESCE(status, 'pending') = 'pending'
+          AND role IS DISTINCT FROM '膳食'
+          AND signup_date >= %s
+        ORDER BY signup_date, start_time NULLS LAST, id
+    """, (month_start,), fetchall=True) or []
+
 
 def is_big_day(date_str):
     from datetime import datetime

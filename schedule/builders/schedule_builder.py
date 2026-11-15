@@ -2756,6 +2756,52 @@ def auto_assign_duty(result):
 
             update_place_history_cache(vid, place, place_history_cache)
 
+    # 地点覆盖优先：仅在尚未发布的完整自动排班中调整地点。
+    # 不更改任何义工的报名时段、拆段或工作时数；只在减少无人值班分钟数时移动。
+    for shift, window_start, window_end in (("橙", 600, 840), ("黄", 840, 1080)):
+        hall_key = make_key(shift, "观音堂")
+        center_key = make_key(shift, "活动中心")
+
+        def uncovered_minutes():
+            total = 0
+            for key in (hall_key, center_key):
+                intervals = []
+                for person in result.get(key, []):
+                    a, b = parse_min(get_start(person)), parse_min(get_end(person))
+                    if a is not None and b is not None and b > a:
+                        intervals.append((max(window_start, a), min(window_end, b)))
+                cursor = window_start
+                for a, b in sorted(intervals):
+                    if b <= cursor or a >= window_end:
+                        continue
+                    total += max(0, a - cursor)
+                    cursor = max(cursor, min(window_end, b))
+                total += max(0, window_end - cursor)
+            return total
+
+        # 单调减少空岗分钟数，保证不会来回搬动或陷入循环。
+        while True:
+            before = uncovered_minutes()
+            best = None
+            best_gain = 0
+            for source, target in ((hall_key, center_key), (center_key, hall_key)):
+                for index, person in enumerate(result.get(source, [])):
+                    # 保留现有固定地点例外规则。
+                    if get_volunteer_id(person).upper() == "STW-152":
+                        continue
+                    moved = result[source].pop(index)
+                    result[target].append(moved)
+                    gain = before - uncovered_minutes()
+                    result[target].pop()
+                    result[source].insert(index, moved)
+                    if gain > best_gain:
+                        best_gain = gain
+                        best = (source, target, index)
+            if best is None:
+                break
+            source, target, index = best
+            result[target].append(result[source].pop(index))
+
     return result
 
     
@@ -2893,7 +2939,18 @@ def format_shift_block(items):
 def _compact_whatsapp_message(message):
     """只压缩多余空行，不修改义工名单、岗位或注意事项。"""
     lines = [line.strip() for line in message.splitlines()]
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip() + "\n"
+    message = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip() + "\n"
+    # WhatsApp 排版：同一时段的「活动中心」与「观音堂」之间空一行。
+    message = re.sub(
+        r"(?m)(?<!\n)\n(?=(?:🟢|🟠|🔴|🟡)?[ \t]*活动中心:)",
+        "\n\n", message,
+    )
+    # 主要值班时段之间空两行；不改变姓名、个人时间和其他段落。
+    message = re.sub(
+        r"\n{2}(?=(?:8:00am~10:00am|🟢 8:00am~10:00am|10:00am~2:00pm|2:00pm~6:00pm)[ \t]*\n)",
+        "\n\n\n", message,
+    )
+    return message
 
 
 def get_display_name(p):

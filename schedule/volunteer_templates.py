@@ -770,7 +770,7 @@ function parseTimeToMinutes(value) {
         .toLowerCase()
         .replace(/\s+/g, "");
 
-    const match = text.match(/^(\d{1,2}):(\d{2})(am|pm)$/);
+    const match = text.match(/^([0-9]{1,2}):([0-9]{2})(am|pm)$/);
 
     if (!match) {
         return null;
@@ -1915,20 +1915,29 @@ function updateEndTimes() {
 
     if (!start || !end) return;
 
-    const startIndex = start.selectedIndex;
-
-    for (let i = 0; i < end.options.length; i++) {
-        if (i <= startIndex) {
-            end.options[i].hidden = true;
-            end.options[i].disabled = true;
-        } else {
-            end.options[i].hidden = false;
-            end.options[i].disabled = false;
-        }
+    // 多日报名值班最迟到 6:00pm；结束时间必须晚于开始时间。
+    function minutes(value) {
+        const match = String(value).trim().toLowerCase().match(/^([0-9]{1,2}):([0-9]{2})(am|pm)$/);
+        if (!match) return null;
+        let hour = Number(match[1]) % 12;
+        if (match[3] === "pm") hour += 12;
+        return hour * 60 + Number(match[2]);
     }
 
-    if (end.selectedIndex <= startIndex) {
-        end.selectedIndex = startIndex + 1;
+    const startMinutes = minutes(start.value);
+    const latestEnd = 18 * 60;
+    for (const option of end.options) {
+        const endMinutes = minutes(option.value);
+        const unavailable = endMinutes === null ||
+            endMinutes > latestEnd ||
+            (startMinutes !== null && endMinutes <= startMinutes);
+        option.hidden = unavailable;
+        option.disabled = unavailable;
+    }
+
+    if (end.selectedOptions.length && end.selectedOptions[0].disabled) {
+        const firstAvailable = Array.from(end.options).find(option => !option.disabled);
+        if (firstAvailable) end.value = firstAvailable.value;
     }
 }
 
@@ -1943,6 +1952,15 @@ function goMonthlySignupList() {
 document.addEventListener("DOMContentLoaded", function () {
 
     updateCalendar();
+    // 多日报名值班默认 10:00am 至 6:00pm。
+    const defaultStart = document.getElementById("start_time");
+    const defaultEnd = document.getElementById("end_time");
+    if (defaultStart && Array.from(defaultStart.options).some(o => o.value === "10:00am")) {
+        defaultStart.value = "10:00am";
+    }
+    if (defaultEnd && Array.from(defaultEnd.options).some(o => o.value === "6:00pm")) {
+        defaultEnd.value = "6:00pm";
+    }
     toggleTimeFields();
 
     document.getElementById("year").addEventListener("change", reloadPrebookPage);
