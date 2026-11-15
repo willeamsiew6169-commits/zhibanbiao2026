@@ -680,9 +680,9 @@ def volunteer_signup():
 
             existing = cur.fetchone()
 
-            # 膳食组自动安排报名身份
+            # 派餐义工普通报名最多9位；负责人可从后台特批第10位。
             if role == "膳食":
-
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext('meal_signup'), hashtext(%s))", (str(signup_date),))
                 cur.execute("""
                     select count(*) as cnt
                     from volunteer_schedule_signups
@@ -714,7 +714,7 @@ def volunteer_signup():
                 elif meal_count < 9:
                     meal_role = "派餐义工"
                 else:
-                    meal_role = "候补义工"
+                    return "❌ 派餐义工9个报名名额已满；特殊第10位请联系负责人。<br><a href='/volunteer'>返回</a>"
 
             if existing:
                 if signup_has_formal_assignment(cur, existing['id']):
@@ -911,24 +911,21 @@ def volunteer_signup():
                 my_no = i
                 break
 
-        if my_no and my_no <= 9:
-            my_meal_role = "派餐义工"
-        else:
-            my_meal_role = "候补义工"
-
-        meal_rows = all_rows[:9]
-        backup_rows = all_rows[9:]
+        my_meal_role = "派餐义工"
+        meal_rows = all_rows[:10]
+        backup_rows = []
 
         lines = ""
 
         for i in range(1, 10):
             person = meal_rows[i - 1]["name"] if i <= len(meal_rows) else ""
             lines += f"<div class='name-line'>{i}）{person}</div>"
+        if len(meal_rows) == 10:
+            lines += f"<div class='name-line'>10）{meal_rows[9]['name']}</div>"
 
         backup_lines = ""
 
-        for i, row in enumerate(backup_rows, start=10):
-            backup_lines += f"<div class='name-line'>{i}）{row['name']}</div>"
+
 
         return render_template_string("""
         <!doctype html>
@@ -1021,14 +1018,10 @@ def volunteer_signup():
                 {{ lines|safe }}
             </div>
 
-            <div class="section">
-                <h2>👥 候补义工</h2>
-                {{ backup_lines|safe if backup_lines else "<p>暂时还没有候补义工</p>"|safe }}
-            </div>
 
             <div class="section">
                 <p>✅ 派餐义工最迟 <b>10:45am</b> 开始站岗</p>
-                <p>✅ 所有报名义工需要在 <b>9:30am</b> 前报到</p>
+                <p>✅ 所有报名义工需要在 <b>8:30am</b> 前报到</p>
                 <p>✅ 活动结束后协助清理场地及餐具</p>
             </div>
 
@@ -1304,6 +1297,46 @@ def query_volunteer_api():
     })
 
 
+@schedule_bp.route("/schedule/meal_extra_tenth", methods=["POST"])
+def meal_extra_tenth():
+    """负责人特批第10位派餐义工；不修改正常9位报名机制。"""
+    if not session.get("schedule_login"):
+        return "❌ 请先登录负责人系统", 403
+    target = request.form.get("date", "").strip()
+    keyword = request.form.get("volunteer_id", "").strip()
+    try:
+        datetime.strptime(target, "%Y-%m-%d")
+    except ValueError:
+        return "❌ 日期无效", 400
+    if not keyword:
+        return "❌ 请输入义工编号", 400
+    matches = find_volunteer_by_keyword(keyword)
+    if len(matches) != 1:
+        return "❌ 请填写唯一的义工正式编号", 400
+    vol = matches[0]
+    vol_id, name = str(vol["id"]), str(vol["name"])
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext('meal_signup'), hashtext(%s))", (target,))
+            cur.execute("""SELECT COUNT(*) AS cnt FROM volunteer_schedule_signups
+                WHERE signup_date=%s AND role='膳食'
+                AND coalesce(status,'pending') <> 'cancelled'""", (target,))
+            count = int(cur.fetchone()["cnt"] or 0)
+            if count != 9:
+                return "❌ 仅已有9位时才能特批第10位；当前人数：" + str(count), 409
+            cur.execute("""SELECT 1 FROM volunteer_schedule_signups
+                WHERE signup_date=%s AND role='膳食' AND volunteer_id=%s
+                AND coalesce(status,'pending') <> 'cancelled' LIMIT 1""", (target, vol_id))
+            if cur.fetchone():
+                return "❌ 该义工已报名", 409
+            cur.execute("""INSERT INTO volunteer_schedule_signups
+                (volunteer_id,name,signup_date,role,start_time,end_time,status,remarks,meal_role)
+                VALUES (%s,%s,%s,'膳食','8:00am','2:00pm','pending','负责人特批第10位','派餐义工')""",
+                (vol_id,name,target))
+        conn.commit()
+    return redirect('/volunteer/meal_status?date=' + target)
+
+
 @schedule_bp.route("/volunteer/meal_status")
 def volunteer_meal_status():
 
@@ -1333,17 +1366,18 @@ def volunteer_meal_status():
             print("MEAL STATUS ROWS:", rows)
             
 
-    meal_names = [r["name"] for r in rows[:9]]
-    backup_names = [r["name"] for r in rows[9:]]
+    meal_names = [r["name"] for r in rows[:10]]
+    backup_names = []
 
     lines = ""
     for i in range(1, 10):
         person = meal_names[i - 1] if i <= len(meal_names) else ""
         lines += f"<div class='name-line'>{i}）{person}</div>"
 
+    # 第10位若由负责人特批，作为正式派餐义工列出。
+    if len(meal_names) == 10:
+        lines += f"<div class='name-line'>10）{meal_names[9]}</div>"
     backup_lines = ""
-    for i, person in enumerate(backup_names, start=10):
-        backup_lines += f"<div class='name-line'>{i}）{person}</div>"
 
     meal_count = len(meal_names)
     backup_count = len(backup_names)
@@ -1478,7 +1512,7 @@ def volunteer_meal_status():
         </div>
 
         <div class="status-box">
-            派餐义工：{{ meal_count }} / 9 位
+            派餐义工：{{ meal_count }} 位（通常9位）
         </div>
 
         <div class="section">
@@ -1486,24 +1520,25 @@ def volunteer_meal_status():
             {{ lines|safe }}
         </div>
 
-        <div class="section">
-            <h2>👥 候补义工</h2>
-
-            {% if backup_lines %}
-                {{ backup_lines|safe }}
-            {% else %}
-                <div class="empty">暂时还没有候补义工</div>
-            {% endif %}
-        </div>
 
         <div class="note">
             ⚠️ 派餐义工最多 9 位。<br>
-            第 10 位开始会列为候补义工，如现场需要，膳食组负责人会再安排。<br><br>
+            <br>
             ✅ 派餐义工最迟 10:45am 开始站岗。<br>
-            ✅ 所有报名义工需要在 9:30am 前报到。<br>
+            ✅ 所有报名义工需要在 8:30am 前报到。<br>
             ✅ 活动结束后协助清理场地及餐具。
         </div>
 
+        {% if admin_logged_in and meal_count == 9 %}
+        <div class="section">
+            <h2>🔐 负责人特批第10位</h2>
+            <form method="post" action="/schedule/meal_extra_tenth">
+                <input type="hidden" name="date" value="{{ signup_date }}">
+                <input name="volunteer_id" required placeholder="输入义工正式编号" style="width:70%;padding:12px;font-size:20px;">
+                <button type="submit" style="padding:12px;font-size:20px;">特批加入第10位</button>
+            </form>
+        </div>
+        {% endif %}
         <a class="btn" href="/volunteer">返回义工首页</a>
 
     </div>
@@ -1515,7 +1550,8 @@ def volunteer_meal_status():
     meal_count=meal_count,
     backup_count=backup_count,
     lines=lines,
-    backup_lines=backup_lines)
+    backup_lines=backup_lines,
+    admin_logged_in=bool(session.get("schedule_login")))
 
 
 @schedule_bp.route("/schedule/meal_leader/add", methods=["POST"])
@@ -1726,7 +1762,6 @@ def volunteer_my_schedule():
                     ">
                         📍 <b>{place}</b><br>
                         🕐 {a_start} ~ {a_end}
-                        {f'<br>班段：{shift}' if shift else ''}
                     </div>
                     """
 
@@ -2474,42 +2509,104 @@ def volunteer_today_schedule():
 
 @schedule_bp.route("/volunteer/day_schedule")
 def volunteer_day_schedule():
-    signup_date = request.args.get("date", "").strip()
+    """义工只读电子通告；复用现有正式值班表来源，不修改排班或发送。"""
+    from html import escape
 
-    if not signup_date:
-        return "❌ 没有日期<br><a href='/volunteer'>返回</a>"
-
+    signup_date = request.args.get("date", "").strip() or str(malaysia_today())
     try:
-        output = build_whatsapp_from_assigned(signup_date)
-        notice_html = build_signup_shortage_notice(signup_date)
-    except Exception as e:
-        output = f"❌ 暂时无法生成值班表：{e}"
+        selected_day = datetime.strptime(signup_date, "%Y-%m-%d").date()
+        if selected_day.year < 2020 or selected_day.year > 2100:
+            raise ValueError("date out of range")
+    except ValueError:
+        return "日期格式不正确。<a href='/volunteer'>返回</a>", 400
+
+    published = is_schedule_published(signup_date)
+    entries = []
+    if published:
+        try:
+            message = build_whatsapp_from_assigned(signup_date)
+            # 将原有正式排班文字按段落整理成阅读卡片；不改变内容或排班规则。
+            for paragraph in message.replace("\r\n", "\n").split("\n\n"):
+                lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
+                if lines:
+                    entries.append(lines)
+        except Exception:
+            return "暂时无法读取正式值班表，请稍后再试。<a href='/volunteer'>返回</a>", 503
+    else:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT name, role, start_time, end_time, supply_task
+                    FROM volunteer_schedule_signups
+                    WHERE signup_date = %s
+                      AND coalesce(status, 'pending') <> 'cancelled'
+                    ORDER BY role, start_time, name
+                """, (signup_date,))
+                signups = cur.fetchall()
+        for role in ("值班", "卫生", "供台", "膳食"):
+            group = [r for r in signups if r.get("role") == role]
+            if group:
+                lines = [role]
+                for r in group:
+                    name = str(r.get("name") or "")
+                    start = str(r.get("start_time") or "")
+                    end = str(r.get("end_time") or "")
+                    task = str(r.get("supply_task") or "")
+                    lines.append(" ".join(x for x in (name, task, f"{start}～{end}" if start and end else "") if x))
+                entries.append(lines)
+        if not entries:
+            entries = [["目前尚无报名资料"]]
 
     return render_template_string("""
-    <!doctype html>
-    <html>
-    <head>
-    <meta charset="utf-8">
+    <!doctype html><html lang="zh"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>当天值班表</title>
+    <title>义工值班安排</title>
     <style>
-    body { font-family:"Microsoft YaHei"; background:#f5f5f5; padding:20px; }
-    .box { background:white; max-width:900px; margin:auto; padding:25px; border-radius:15px; }
-    textarea { width:100%; height:650px; font-size:20px; padding:15px; box-sizing:border-box; }
-    a, button { font-size:22px; padding:10px 18px; margin:8px; }
-    </style>
-    </head>
-    <body>
-    <div class="box">
-    <h1>📋 当天值班表</h1>
-    {{ notice_html|safe }}
-    <a href="/volunteer">继续报名</a>
-    <br><br>
-    <textarea readonly>{{ output }}</textarea>
-    </div>
-    </body>
-    </html>
-    """, output=output, notice_html=notice_html)
+    *{box-sizing:border-box}body{margin:0;background:#f3f5f4;color:#293b34;
+      font-family:'Microsoft YaHei','Noto Sans SC',Arial,sans-serif}
+    .page{max-width:830px;margin:24px auto;background:white;padding:34px 42px;
+      border-radius:15px;box-shadow:0 6px 26px #253c2a12}
+    h1{text-align:center;font-size:30px;color:#41674d;margin:4px 0 6px}
+    .sub{text-align:center;color:#69766c;margin:0 0 23px}
+    .toolbar{display:flex;align-items:center;justify-content:center;gap:10px;
+      flex-wrap:wrap;margin:0 0 18px}
+    input[type=date]{font-size:17px;padding:10px;border:1px solid #cbd8ce;border-radius:9px}
+    button,.link{border:0;border-radius:9px;background:#298b56;color:white;
+      padding:11px 17px;font-size:17px;text-decoration:none;cursor:pointer}
+    .status{text-align:center;border-radius:9px;padding:11px;margin:0 0 22px;
+      background:{{ '#e8f5eb' if published else '#fff4dd' }};
+      color:{{ '#237344' if published else '#93620b' }};font-weight:bold}
+    .section{border:1px solid #e2ebe3;border-radius:11px;margin:13px 0;
+      padding:16px 19px;line-height:1.8;overflow-wrap:anywhere}
+    .section-title{font-weight:800;color:#315d41;font-size:20px;margin-bottom:5px}
+    .line{font-size:17px;white-space:pre-wrap}
+    .footer{display:flex;gap:12px;flex-wrap:wrap;justify-content:center;margin-top:25px}
+    .secondary{background:#687a70}
+    @media(max-width:600px){.page{margin:0;padding:22px 14px;border-radius:0;
+      box-shadow:none}h1{font-size:25px}.section{padding:13px 12px}
+      .section-title{font-size:19px}.line{font-size:16px}}
+    </style></head><body><main class="page">
+    <h1>🪷 蕉赖共修会</h1><p class="sub">义工值班安排</p>
+    <form class="toolbar" method="get" action="/volunteer/day_schedule">
+      <input type="date" name="date" value="{{ signup_date }}" aria-label="选择日期">
+      <button type="submit">查看</button>
+    </form>
+    <div class="status">{{ '🟢 正式值班安排（已发布）' if published else '🟡 当天报名情况（尚未正式排班）' }}<br>
+      {{ date_label }}</div>
+    {% for lines in entries %}
+    <section class="section">
+      {% if lines|length > 1 %}
+        <div class="section-title">{{ lines[0] }}</div>
+        {% for line in lines[1:] %}<div class="line">{{ line }}</div>{% endfor %}
+      {% else %}<div class="line">{{ lines[0] }}</div>{% endif %}
+    </section>
+    {% endfor %}
+    <div class="footer"><a class="link" href="/volunteer">🙏 我要报名</a>
+    <a class="link secondary" href="/volunteer">⬅ 返回义工首页</a></div>
+    </main></body></html>
+    """, signup_date=signup_date,
+         date_label=f"{selected_day.strftime('%d/%m/%Y')}（星期{'一二三四五六日'[selected_day.weekday()]}）",
+         published=published, entries=entries)
 
 @schedule_bp.route("/volunteer/monthly_signup_list")
 def volunteer_monthly_signup_list():

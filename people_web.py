@@ -328,7 +328,7 @@ def load_people():
             # members 是个人资料主来源；空白时才从 volunteers 补。
             p["name"] = p["name"] or clean(v.get("name"))
             p["phone"] = p["phone"] or format_phone(v.get("phone"))
-            p["pin"] = p["pin"] or clean(v.get("pin"))
+            p["pin"] = clean(v.get("pin")) or p["pin"]
             p["remark"] = p["remark"] or clean(v.get("remark"))
         else:
             key = "V:" + vid.upper()
@@ -390,7 +390,7 @@ def find_person(person_key):
             "name": clean(m.get("name")) or (clean(v.get("name")) if v else ""),
             "english_name": clean(m.get("english_name")),
             "phone": format_phone(m.get("phone")) or (format_phone(v.get("phone")) if v else ""),
-            "pin": clean(m.get("pin")) or (clean(v.get("pin")) if v else ""),
+            "pin": (clean(v.get("pin")) if v else "") or clean(m.get("pin")),
             "ic_number": clean(m.get("ic_number")),
             "remark": clean(m.get("remark")) or (clean(v.get("remark")) if v else ""),
             "is_member": True, "member_status": clean(m.get("member_status") or m.get("status") or "在供"),

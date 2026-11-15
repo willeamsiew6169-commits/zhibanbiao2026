@@ -19,7 +19,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
-from admin_web import admin_bp
+from admin_web import admin_bp, ADMIN_PIN
 from reports_web import reports_bp
 from member_web import member_bp
 from people_web import people_bp
@@ -323,32 +323,11 @@ def delete_record(row_number: int, pin: str) -> tuple[bool, str]:
     if row.get("date") != now_date_str():
         return False, "为了安全，页面只允许删除今天的记录。"
 
-    volunteer_id = (row.get("volunteer_id") or "").strip()
     name = row.get("name") or ""
 
-    if not volunteer_id:
-        return False, "这笔记录没有义工编号，不能用本人 PIN 删除。"
-
-    vol = db_query("""
-        select pin, phone
-        from volunteers
-        where id = %s
-    """, (volunteer_id,), fetchone=True)
-
-    if not vol:
-        return False, "找不到这位义工资料，不能删除。"
-
-    correct_pin = (vol.get("pin") or "").strip()
-
-    if not correct_pin:
-        phone = (vol.get("phone") or "").strip()
-        correct_pin = phone[-4:] if len(phone) >= 4 else ""
-
-    if not correct_pin:
-        return False, "这位义工没有 PIN，也没有电话号码后4位，不能删除。"
-
-    if pin != correct_pin:
-        return False, "PIN 不正确，不能删除。"
+    # 此页面明确要求管理员 PIN；与 admin_web.py 使用同一验证来源。
+    if pin != ADMIN_PIN:
+        return False, "管理员 PIN 不正确，不能删除。"
 
     db_query("""
         delete from attendance
@@ -642,17 +621,41 @@ PAGE = """
     <div class="summary-grid">
       <div class="summary-box stat-box-1">
         <div class="summary-title">👥 {{ t.checked_in }}</div>
-        <div class="summary-value">{{ today_count }}</div>
+        <div class="summary-value" id="liveTotal">{{ today_count }}</div>
       </div>
 
       <div class="summary-box stat-box-2">
         <div class="summary-title">🕒 {{ t.on_duty }}</div>
-        <div class="summary-value">{{ not_out }}</div>
+        <div class="summary-value" id="liveOpen">{{ not_out }}</div>
       </div>
 
       <div class="summary-box stat-box-3">
         <div class="summary-title">✅ {{ t.checked_out }}</div>
-        <div class="summary-value">{{ done_out }}</div>
+        <div class="summary-value" id="liveFinished">{{ done_out }}</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="padding:14px 18px;">
+    <details id="todayAttendanceDetails">
+      <summary style="cursor:pointer;font-weight:700;font-size:18px;">👥 {{ '查看今日签到名单' if t.html_lang.startswith('zh') else 'View today’s attendance' }}（<span id="liveListCount">{{ today_count }}</span>）</summary>
+      <div id="todayAttendanceList" style="margin-top:12px;">{{ '点击展开后加载名单…' if t.html_lang.startswith('zh') else 'Loading on expand…' }}</div>
+    </details>
+  </div>
+
+  <form id="listQuickSignoutForm" method="post" action="{{ url_for('quick_list_signout') }}" style="display:none;">
+    <input type="hidden" name="row_number" id="listSignoutRow">
+    <input type="hidden" name="pin" id="listSignoutPin">
+  </form>
+  <div id="listSignoutMask" class="dialog-mask" style="display:none;">
+    <div class="dialog-card">
+      <h2 class="section-title">{{ '快捷签退' if t.html_lang.startswith('zh') else 'Quick check-out' }}</h2>
+      <p id="listSignoutTarget"></p>
+      <label class="form-label">{{ '请输入本人 PIN' if t.html_lang.startswith('zh') else 'Enter your own PIN' }}</label>
+      <input id="listPinInput" class="form-input" type="password" inputmode="numeric" autocomplete="off">
+      <div class="btn-row" style="margin-top:18px;">
+        <button type="button" class="btn-tool btn-secondary" onclick="closeListSignout()">{{ '取消' if t.html_lang.startswith('zh') else 'Cancel' }}</button>
+        <button type="button" class="btn-tool btn-danger" onclick="confirmListSignout()">{{ '确认签退' if t.html_lang.startswith('zh') else 'Check out' }}</button>
       </div>
     </div>
   </div>
@@ -900,6 +903,108 @@ PAGE = """
 </div>
 
 <script>
+const LIST_LANG_ZH = {{ t.html_lang.startswith('zh')|tojson }};
+let listSignoutId = null;
+const todayDetails = document.getElementById('todayAttendanceDetails');
+const todayList = document.getElementById('todayAttendanceList');
+function listText(zh, en) { return LIST_LANG_ZH ? zh : en; }
+function safeText(v) { return String(v == null ? '' : v); }
+function formatListTime(value) {
+  const raw = safeText(value).trim();
+  const match = raw.match(/^(\\d{1,2}):(\\d{2})(?::\\d{2})?\\s*(am|pm)?$/i);
+  if (!match) return raw;
+  let hour = Number(match[1]);
+  const minute = match[2];
+  const suffix = (match[3] || '').toLowerCase();
+  if (hour > 23 || Number(minute) > 59 || (suffix && (hour < 1 || hour > 12))) return raw;
+  if (suffix) hour = hour % 12 + (suffix === 'pm' ? 12 : 0);
+  return `${hour % 12 || 12}:${minute}${hour >= 12 ? 'pm' : 'am'}`;
+}
+function renderTodayList(rows) {
+  todayList.replaceChildren();
+  if (!rows.length) { todayList.textContent = listText('今天暂无签到记录。', 'No attendance records today.'); return; }
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'overflow-x:auto;';
+  const table = document.createElement('table');
+  table.style.cssText = 'width:100%;border-collapse:collapse;min-width:340px;';
+  const head = document.createElement('tr');
+  [listText('姓名','Name'),listText('岗位','Role'),listText('签到','In'),listText('状态／操作','Status / Action')].forEach(label => {
+    const th=document.createElement('th'); th.textContent=label; th.style.cssText='padding:10px 6px;text-align:left;border-bottom:1px solid #ddd;';head.appendChild(th);
+  });
+  table.appendChild(head);
+  rows.forEach(r => {
+    const tr=document.createElement('tr');
+    [r.name, r.role_label, formatListTime(r.start_time)].forEach(value => {
+      const td=document.createElement('td');td.textContent=safeText(value);td.style.cssText='padding:10px 6px;border-bottom:1px solid #eee;';tr.appendChild(td);
+    });
+    const td=document.createElement('td');td.style.cssText='padding:10px 6px;border-bottom:1px solid #eee;';
+    if(r.open) {
+      const btn=document.createElement('button');btn.type='button';btn.className='btn-tool btn-danger';btn.style.cssText='width:auto;padding:8px 12px;';btn.textContent=listText('签退','Check out');
+      btn.addEventListener('click',()=>openListSignout(r.id,r.name,r.role_label));td.appendChild(btn);
+    } else {
+      td.textContent='✅ '+listText('已签退','Checked out')+(r.end_time?' · '+formatListTime(r.end_time):'');
+    }
+    tr.appendChild(td);table.appendChild(tr);
+  });
+  wrap.appendChild(table);todayList.appendChild(wrap);
+}
+async function loadTodayList() {
+  try {
+    const resp=await fetch({{ url_for('today_attendance_list')|tojson }},{cache:'no-store'});
+    if(!resp.ok) throw new Error('HTTP '+resp.status);
+    const data=await resp.json();renderTodayList(data.rows || []);
+  } catch(e) {todayList.textContent=listText('名单加载失败，请稍后再试。','Unable to load list. Please try again.');}
+}
+todayDetails.addEventListener('toggle',()=>{if(todayDetails.open)loadTodayList();});
+// 只更新统计数字和已展开的名单；不刷新整页、不干扰正在输入的编号或 PIN。
+let attendanceRefreshBusy = false;
+async function refreshAttendanceOverview() {
+  if (attendanceRefreshBusy || document.hidden) return;
+  attendanceRefreshBusy = true;
+  try {
+    const resp = await fetch({{ url_for('today_attendance_stats')|tojson }}, {cache:'no-store'});
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    if (data.date !== {{ today_date|tojson }}) {
+      // 跨午夜时更新日期、农历信息和当日名单；避免在输入中途刷新。
+      if (!document.getElementById('volunteer_id').value.trim() &&
+          !document.getElementById('pin').value.trim() &&
+          document.getElementById('listSignoutMask').style.display === 'none') {
+        window.location.reload();
+      }
+      return;
+    }
+    document.getElementById('liveTotal').textContent = data.total;
+    document.getElementById('liveOpen').textContent = data.open;
+    document.getElementById('liveFinished').textContent = data.finished;
+    document.getElementById('liveListCount').textContent = data.total;
+    if (todayDetails.open && document.getElementById('listSignoutMask').style.display === 'none') {
+      await loadTodayList();
+    }
+  } catch (e) {
+    // 网络暂时中断时保留现有画面，不影响签到操作。
+  } finally {
+    attendanceRefreshBusy = false;
+  }
+}
+setInterval(refreshAttendanceOverview, 10000);
+document.addEventListener('visibilitychange', () => {if (!document.hidden) refreshAttendanceOverview();});
+function openListSignout(id,name,role) {
+  listSignoutId=id;
+  document.getElementById('listSignoutTarget').textContent=name+' · '+role;
+  document.getElementById('listPinInput').value='';
+  document.getElementById('listSignoutMask').style.display='flex';
+  document.getElementById('listPinInput').focus();
+}
+function closeListSignout(){listSignoutId=null;document.getElementById('listPinInput').value='';document.getElementById('listSignoutMask').style.display='none';}
+function confirmListSignout(){
+  const pin=document.getElementById('listPinInput').value.trim();
+  if(!pin){alert(listText('请输入本人 PIN。','Please enter your PIN.'));return;}
+  document.getElementById('listSignoutRow').value=listSignoutId;
+  document.getElementById('listSignoutPin').value=pin;
+  document.getElementById('listQuickSignoutForm').submit();
+}
+document.getElementById('listPinInput').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();confirmListSignout();}});
 const ROLE_LABELS = {{ role_text_labels|tojson }};
 window.ROLE_LABELS = ROLE_LABELS;
 const TXT = {
@@ -1690,6 +1795,7 @@ def index():
         role_label=role_label,
         role_text_labels={r: role_label(r) for r in ROLES},
         today_count=stats["total"],
+        today_date=now_date_str(),
         not_out=stats["open"],
         done_out=stats["finished"],
 
@@ -1714,6 +1820,55 @@ def _attendance_speed_report(response):
         app.logger.info("[ATTENDANCE_SPEED] route=%s status=%s elapsed_ms=%.1f", route, response.status_code, elapsed_ms)
         response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.1f}"
     return response
+
+
+@app.route("/api/today-attendance-stats")
+def today_attendance_stats():
+    """签到首页轻量只读刷新接口；沿用原统计口径。"""
+    stats = get_today_stats()
+    return jsonify({"date": now_date_str(), **stats})
+
+
+@app.route("/api/today-attendance-list")
+def today_attendance_list():
+    """只读名单；按岗位记录显示，不公开编号、电话或 PIN。"""
+    rows = db_query("""
+        select id, name, role, start_time, end_time
+        from attendance
+        where date=%s
+        order by case when end_time is null or end_time='' then 0 else 1 end,
+                 start_time desc, id desc
+    """, (now_date_str(),), fetchall=True) or []
+    return jsonify({"rows": [{
+        "id": r["id"], "name": r.get("name") or "",
+        "role_label": role_label(r.get("role") or ""),
+        "start_time": r.get("start_time") or "",
+        "end_time": r.get("end_time") or "",
+        "open": not bool(r.get("end_time")),
+    } for r in rows]})
+
+
+@app.route("/quick-list-signout", methods=["POST"])
+def quick_list_signout():
+    """凭本人 PIN 精确签退所点击的一笔记录；复用原有双表事务。"""
+    auto_signout_unfinished_today()
+    try:
+        row_id = int(request.form.get("row_number") or 0)
+    except (TypeError, ValueError):
+        row_id = 0
+    if row_id <= 0:
+        flash("签退记录无效。", "bad")
+        return redirect(url_for("index"))
+    row = db_query("""
+        select volunteer_id from attendance
+        where id=%s and date=%s and (end_time is null or end_time='')
+    """, (row_id, now_date_str()), fetchone=True)
+    if not row:
+        flash("这笔记录已经签退或不存在。", "bad")
+        return redirect(url_for("index"))
+    ok, msg = sign_out(str(row["volunteer_id"]), request.form.get("pin", ""), attendance_id=row_id)
+    flash((f"{msg}｜签退时间：{now_time_str()}" if ok else msg), "ok" if ok else "bad")
+    return redirect(url_for("index"))
 
 
 @app.route("/signin", methods=["POST"])
@@ -1982,6 +2137,10 @@ def api_volunteer(volunteer_id):
                     order by start_time, assigned_place
                 """, (v.get("编号"), today))
                 today_assignments = cur.fetchall()
+                # 佛学班地点统一显示为活动中心，不改动数据库排班及签到记录。
+                for assignment in today_assignments:
+                    if assignment.get('role') == '佛学班':
+                        assignment['assigned_place'] = '活动中心'
                 # 负责人指定的设师父供台人员保存在每日标记中，仅用于页面显示。
                 cur.execute("""
                     SELECT setup_people, remove_people FROM schedule_day_flags
@@ -2104,6 +2263,20 @@ def api_volunteer(volunteer_id):
                             'start_time': '', 'end_time': '', 'shift_label': '',
                             'state': _extra_state(fixed_role), 'display_only': True,
                         })
+        # 佛学班固定老师：周六、周日补充显示，与签到岗位资格保持一致。
+        # 仅显示，不新增正式排班或改变签到、签退规则。
+        if today.weekday() in (5, 6) and not any(a.get('role') == '佛学班' for a in today_assignments):
+            fixed_class = db_query("""
+                SELECT 1 FROM volunteer_fixed_roles
+                WHERE volunteer_id = ANY(%s) AND role = '佛学班'
+                LIMIT 1
+            """, (get_assignment_id_candidates(v, volunteer_id),), fetchone=True)
+            if fixed_class:
+                today_assignments.append({
+                    'id': None, 'role': '佛学班', 'assigned_place': '活动中心',
+                    'start_time': '', 'end_time': '', 'shift_label': '',
+                    'state': _extra_state('佛学班'), 'display_only': True,
+                })
         if meal_signups and not any(a.get('role') == '膳食' for a in today_assignments):
             meal = meal_signups[0]
             meal_position = next((i for i, r in enumerate(meal_signups)
@@ -2232,11 +2405,23 @@ def change_pin(volunteer_id: str, old_pin: str, new_pin: str, confirm_pin: str):
     if new_pin != confirm_pin:
         return False, "两次 PIN 不一致"
 
-    db_query("""
-        update volunteers
-        set pin = %s
-        where id = %s
-    """, (new_pin, normalize_member_id(volunteer_id)))
+    # 同一事务更新义工及同编号月费佛友的 PIN，避免只成功一张表。
+    # 不创建 members 记录；纯义工不会受影响。
+    canonical_id = normalize_member_id(volunteer_id)
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE volunteers SET pin = %s WHERE id = %s
+                """, (new_pin, canonical_id))
+                if cur.rowcount != 1:
+                    raise ValueError("找不到对应义工，PIN 未更新")
+                cur.execute("""
+                    UPDATE members SET pin = %s WHERE member_id = %s
+                """, (new_pin, canonical_id))
+    except Exception as exc:
+        app.logger.exception("PIN 同步更新失败：%s", type(exc).__name__)
+        return False, "PIN 更新失败，请联系负责人。"
 
     return True, "PIN 已更新"
 

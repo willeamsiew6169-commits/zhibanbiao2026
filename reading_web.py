@@ -3,7 +3,7 @@
 import os
 import pandas as pd
 
-from db import db_query
+from db import db_query, get_conn
 from openpyxl import load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
@@ -111,6 +111,24 @@ def add_reading_record(name, identity, topic, session, time_text):
         time_text
     ))
 
+def add_reading_once_today(name, identity, topic, time_text):
+    """同一天同一姓名只记一次；事务锁避免两台设备同时重复提交。"""
+    from psycopg2.extras import RealDictCursor
+    day = now_date_str()
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 相同日期与姓名的提交串行处理，不需要修改数据库表结构。
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))", (day, name))
+            cur.execute("SELECT 1 FROM reading WHERE date=%s AND name=%s LIMIT 1", (day, name))
+            if cur.fetchone():
+                return False
+            cur.execute("""
+                INSERT INTO reading (date, name, identity, topic, session, time)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (day, name, identity, topic, "", time_text))
+    return True
+
+
 def get_reading_topics():
     rows = db_query("""
         select distinct topic
@@ -140,7 +158,6 @@ def reading():
     if request.method == "POST":
         topic = request.form.get("topic", "").strip()
         names = request.form.getlist("names")
-        session = request.form.get("session", "").strip()
         extra_text = request.form.get("extra_names", "").strip()
 
         extra_names = []
@@ -149,31 +166,26 @@ def reading():
                 extra_text = extra_text.replace(sep, " ")
             extra_names = [x.strip() for x in extra_text.split(" ") if x.strip()]
 
-        if len(names) + len(extra_names) < 2:
-            return f"❌ {t['need_two_people']}<br><a href='/reading'>{t['back_home']}</a>"
+        if not names and not extra_names:
+            return "❌ 请选择至少一位共修者。<br><a href='/reading'>返回</a>"
 
         if not topic:
             return f"❌ {t['enter_topic']}<br><a href='/reading'>{t['back_home']}</a>"
 
         now_time = datetime.now(MY_TZ).strftime("%I:%M %p").lstrip("0")
 
+        # 同一表单重复勾选／填写同名，也只尝试一次。
+        unique_people = {}
         for name in names:
-            add_reading_record(
-                name=name,
-                identity=t.get("volunteer_identity", "Volunteer" if t.get("html_lang", "zh").startswith("en") else "义工"),
-                topic=topic,
-                session=session,
-                time_text=now_time
-            )
-
+            clean_name = str(name).strip()
+            if clean_name:
+                unique_people[clean_name] = t.get("volunteer_identity", "Volunteer" if t.get("html_lang", "zh").startswith("en") else "义工")
         for name in extra_names:
-            add_reading_record(
-                name=name,
-                identity=t.get("friend_identity", "Friend" if t.get("html_lang", "zh").startswith("en") else "佛友"),
-                topic=topic,
-                session=session,
-                time_text=now_time
-            )
+            clean_name = str(name).strip()
+            if clean_name and clean_name not in unique_people:
+                unique_people[clean_name] = t.get("friend_identity", "Friend" if t.get("html_lang", "zh").startswith("en") else "佛友")
+        for name, identity in unique_people.items():
+            add_reading_once_today(name, identity, topic, now_time)
 
         return redirect(url_for("reading.reading"))
 
@@ -205,6 +217,9 @@ def reading():
         for (name, identity), count in summary_map.items()
     ]
 
+    # 已点名者从待选名单隐藏，其他设备旧页面提交也由数据库事务再次检查。
+    recorded_names = {str(r.get("name") or "").strip() for r in rows}
+    attendees = [name for name in attendees if name not in recorded_names]
     topic_options = get_reading_topics()
 
     html = """
@@ -213,158 +228,67 @@ def reading():
     <head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-            body {
-                font-family: "Microsoft YaHei", Arial;
-                background: #f6f7f2;
-                padding: 18px;
-                font-size: 24px;
-            }
-            .card {
-                background: white;
-                padding: 28px;
-                border-radius: 16px;
-                margin-bottom: 18px;
-                box-shadow: 0 2px 8px #ccc;
-            }
-            input[type=text] {
-                width: 95%;
-                font-size: 32px;
-                padding: 20px;
-                border-radius: 10px;
-                border: 1px solid #aaa;
-            }
-            label {
-                display: block;
-                padding: 8px;
-                font-size: 21px;
-            }
-            button {
-                font-size: 32px;
-                padding: 12px 22px;
-                border-radius: 18px;
-                border: none;
-                background: #4CAF50;
-                color: white;
-                margin: 5px;
-            }
-            .delete {
-                background: #d9534f;
-            }
-            .edit {
-                background: #f0ad4e;
-            }
-            a {
-                text-decoration: none;
-            }
-            table {
-                width: 100%;
-                border-collapse: collapse;
-                background: white;
-                font-size: 18px;
-            }
-            th, td {
-                border: 1px solid #ccc;
-                padding: 8px;
-                text-align: center;
-            }
-            th {
-                background: #d9ead3;
-            }
+          *{box-sizing:border-box}
+          body{font-family:"Microsoft YaHei",Arial,sans-serif;background:#f6f7f2;margin:0;padding:16px;color:#26352a;font-size:17px}
+          .wrap{max-width:950px;margin:auto}
+          .card{background:#fff;padding:22px;border-radius:16px;margin:14px 0;box-shadow:0 2px 10px #00000012}
+          h2{font-size:23px;margin:0 0 18px} h3{font-size:19px}
+          .field-label{display:block;margin:16px 0 8px;font-weight:700}
+          input[type=text]{width:100%;font-size:18px;padding:13px;border:1px solid #cbd5cc;border-radius:10px}
+          .name-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:9px;margin:12px 0}
+          .name-item{display:flex;align-items:center;gap:8px;padding:12px;background:#f4f8f3;border-radius:10px;font-size:17px}
+          .name-item input{width:19px;height:19px}
+          button,.button-link{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:0;border-radius:10px;padding:11px 16px;background:#399d55;color:white;font-size:16px;cursor:pointer;text-decoration:none}
+          .button-link{margin:0 8px 8px 0}.secondary{background:#4778bb}.edit{background:#e6a23c}.delete{background:#d9534f}
+          .actions{display:flex;gap:7px;flex-wrap:wrap}.actions button,.actions .button-link{font-size:14px;padding:8px 10px;margin:0}
+          .record{border:1px solid #e2e9e2;border-radius:12px;padding:13px;margin:10px 0}
+          .record-head{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+          .record-meta{font-size:14px;color:#66736a;margin-bottom:10px;overflow-wrap:anywhere}
+          .muted{color:#718074;font-size:15px}
+          details summary{cursor:pointer;font-size:19px;font-weight:700;padding:5px 0}
+          @media(max-width:600px){body{padding:9px;font-size:16px}.card{padding:15px;border-radius:13px}h2{font-size:20px}.name-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.name-item{padding:10px;font-size:16px}.record-head{align-items:flex-start}.actions{width:100%}.actions .button-link{flex:1}}
         </style>
     </head>
-    <body>
-
-    <a href="/"><button>⬅ {{ t.back_home }}</button></a>
-
-    <a href="/download_reading">
-        <button style="background:#2196F3;">{{ t.download_report }}</button>
-    </a>
-
-    <div class="card">
+    <body><main class="wrap">
+      <nav>
+        <a class="button-link" href="/">⬅ {{ t.back_home }}</a>
+        <a class="button-link secondary" href="/download_reading">{{ t.download_report }}</a>
+      </nav>
+      <section class="card">
         <h2>{{ t.bhff_record_title }}</h2>
-
         <form method="post">
-            <p>{{ t.today_topic }}：</p>
-            <input type="text" name="topic" list="topicList" placeholder="{{ t.topic_placeholder }}">
-
-            <datalist id="topicList">
-            {% for topic in topic_options %}
-                <option value="{{ topic }}">
-            {% endfor %}
-            </datalist>
-
-            <p>{{ t.session_remark }}：</p>
-            <input type="text" name="session" placeholder="{{ t.session_placeholder }}">
-
-            <p>{{ t.volunteer_list }}：</p>
-
-            <button type="button" onclick="selectAllNames()" style="margin-bottom:10px;">
-                {{ t.select_all_volunteers }}
-            </button>
-
-            {% for name in attendees %}
-                <label>
-                    <input type="checkbox" name="names" value="{{name}}">
-                    {{name}}
-                </label>
-            {% endfor %}
-
-            <br>
-            <button type="submit">{{ t.record_study }}</button>
-
-            <p>{{ t.extra_friend_name }}：</p>
-            <input type="text" name="extra_names" placeholder="{{ t.extra_friend_placeholder }}"
-                style="font-size:20px;width:420px;padding:8px;">
-            <p style="color:#777;">{{ t.extra_friend_tip }}</p>
+          <label class="field-label">{{ t.today_topic }}</label>
+          <input type="text" name="topic" list="topicList" placeholder="{{ t.topic_placeholder }}" required>
+          <datalist id="topicList">{% for topic in topic_options %}<option value="{{ topic }}">{% endfor %}</datalist>
+          <label class="field-label">{{ t.volunteer_list }}（{{ attendees|length }}）</label>
+          <button type="button" onclick="selectAllNames()">{{ t.select_all_volunteers }}</button>
+          {% if attendees %}
+          <div class="name-grid">
+          {% for name in attendees %}<label class="name-item"><input type="checkbox" name="names" value="{{ name }}">{{ name }}</label>{% endfor %}
+          </div>
+          {% else %}<p class="muted">今日签到义工均已点名，或暂无可点名义工。</p>{% endif %}
+          <label class="field-label">{{ t.extra_friend_name }}</label>
+          <input type="text" name="extra_names" placeholder="{{ t.extra_friend_placeholder }}">
+          <p class="muted">{{ t.extra_friend_tip }}</p>
+          <button type="submit">{{ t.record_study }}</button>
         </form>
-    </div>
-
-    <div class="card">
-        <h2>{{ t.today_recorded }}</h2>
-
-        <table>
-            <tr>
-                <th>{{ t.name }}</th>
-                <th>{{ t.identity }}</th>
-                <th>{{ t.topic }}</th>
-                <th>{{ t.time }}</th>
-                <th>{{ t.operation }}</th>
-            </tr>
-
-            {% for r in today_records %}
-            <tr>
-                <td>{{ r["姓名"] }}</td>
-                <td>{{ r["身份"] }}</td>
-                <td>{{ r["主题"] }}</td>
-                <td>{{ r["时间"] }}</td>
-                <td>
-                    <a href="/reading_edit/{{ r['id'] }}"><button class="edit">{{ t.edit }}</button></a>
-                    <a href="/reading_delete/{{ r['id'] }}" onclick="return confirm('{{ t.delete_confirm_simple }}')">
-                        <button class="delete">{{ t.delete_record }}</button>
-                    </a>
-                </td>
-            </tr>
-            {% endfor %}
-        </table>
-
-        <h3 style="margin-top:20px;">{{ t.today_study_count }}</h3>
-
-        <table>
-            <tr>
-                <th>{{ t.name }}</th>
-                <th>{{ t.identity }}</th>
-                <th>{{ t.count }}</th>
-            </tr>
-
-            {% for r in today_summary %}
-            <tr>
-                <td>{{ r["姓名"] }}</td>
-                <td>{{ r["身份"] }}</td>
-                <td>{{ r["共修次数"] }}</td>
-            </tr>
-            {% endfor %}
-        </table>
-    </div>
+      </section>
+      <section class="card">
+        <details>
+          <summary>📋 {{ t.today_recorded }}（{{ today_records|length }}）</summary>
+          {% for r in today_records %}
+          <div class="record">
+            <div class="record-head"><strong>{{ r["姓名"] }}</strong><span class="muted">{{ r["时间"] }}</span></div>
+            <div class="record-meta">{{ r["身份"] }} · {{ r["主题"] }}</div>
+            <div class="actions">
+              <a class="button-link edit" href="/reading_edit/{{ r['id'] }}">{{ t.edit }}</a>
+              <a class="button-link delete" href="/reading_delete/{{ r['id'] }}" onclick="return confirm({{ t.get("delete_confirm_simple", "确定删除这笔共修记录吗？" if not t.get("html_lang", "zh").startswith("en") else "Delete this study record?")|tojson }})">{{ t.delete_record }}</a>
+            </div>
+          </div>
+          {% else %}<p class="muted">今日暂无记录。</p>{% endfor %}
+        </details>
+      </section>
+    </main>
 
     <script>
     function selectAllNames() {
@@ -409,7 +333,7 @@ def reading_edit(record_id):
 
     if request.method == "POST":
         new_topic = request.form.get("topic", "").strip()
-        new_session = request.form.get("session", "").strip()
+        new_session = row.get("session") or ""
 
         db_query("""
             update reading
@@ -482,18 +406,7 @@ def reading_edit(record_id):
 
                 </div>
 
-                <div class="form-group">
 
-                    <label class="form-label">
-                        场次 / 备注
-                    </label>
-
-                    <input
-                        class="form-input"
-                        name="session"
-                        value="{{ session }}">
-
-                </div>
 
                 <div class="btn-row">
 

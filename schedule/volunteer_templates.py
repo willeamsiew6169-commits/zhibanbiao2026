@@ -306,6 +306,12 @@ VOLUNTEER_SIGNUP_HTML = """
 
         </div>
 
+        <a href="/volunteer/day_schedule?date={{ default_date }}"
+           class="btn-tool btn-blue btn-full"
+           style="display:flex;justify-content:center;text-align:center;margin:0 0 20px;font-size:25px;">
+            📋 查看完整值班表
+        </a>
+
         <div class="alert alert-warning">
             🌸 报名后将由系统安排岗位，必要时负责人会调整。<br>
             📢 10:00pm 正式发布前，可自行修改或取消。<br>

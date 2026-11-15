@@ -229,9 +229,14 @@ def get_eligible_signin_roles(volunteer, raw_id, assignments=None):
 
     fixed = db_query("""
         SELECT role FROM volunteer_fixed_roles
-        WHERE volunteer_id = ANY(%s) AND role IN ('供花','供果','佛学班')
+        WHERE volunteer_id = ANY(%s) AND role IN ('供花','供果','佛学班','膳食')
     """, (ids,), fetchall=True) or []
     fixed_roles = {r["role"] for r in fixed}
+    # 膳食固定负责人：仅指定膳食服务日免报名；派餐义工仍按当天有效报名判断。
+    if "膳食" in fixed_roles:
+        from schedule.services.settings_service import is_meal_festival_day
+        if is_meal_festival_day(today):
+            roles.add("膳食")
     if "佛学班" in fixed_roles and today.weekday() in (5, 6):
         roles.add("佛学班")
     if fixed_roles.intersection(("供花", "供果")):
@@ -421,7 +426,7 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
     return True, f"{volunteer['姓名']} 已签到\n\n今天没有正式排班记录。\n已登记：{role}\n\n完成后请记得签退。"
 
 
-def sign_out(volunteer_id: str, pin: str, assignment_id=None, role=None) -> tuple[bool, str]:
+def sign_out(volunteer_id: str, pin: str, assignment_id=None, role=None, attendance_id=None) -> tuple[bool, str]:
     raw_id = str(volunteer_id or "").strip()
     if not raw_id:
         return False, "请输入编号。"
@@ -446,7 +451,12 @@ def sign_out(volunteer_id: str, pin: str, assignment_id=None, role=None) -> tupl
             open_rows = cur.fetchall() or []
             if not open_rows:
                 return False, f"{volunteer['姓名']} 今天没有未签退记录。"
-            if role:
+            if attendance_id is not None:
+                # 快捷签退必须精确匹配点击的记录，不能误签退同岗位的另一笔。
+                row = next((r for r in open_rows if int(r["id"]) == int(attendance_id)), None)
+                if row is None:
+                    return False, "这笔记录已经签退或不属于今天的进行中记录。"
+            elif role:
                 row = next((r for r in open_rows if r.get("role") == role), None)
                 if row is None:
                     return False, f"今天没有进行中的{role}记录。"

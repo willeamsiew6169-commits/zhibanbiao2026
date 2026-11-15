@@ -1494,7 +1494,7 @@ def toggle_schedule_setting():
 
     key = request.form.get("key", "").strip()
     force = request.form.get("force", "").strip()
-    return_to = request.form.get("return_to") or url_for("schedule.schedule_admin")
+    return_to = url_for("schedule.schedule_admin", mode="controls", override_date=request.form.get("override_date") or request.args.get("override_date") or malaysia_today().isoformat())
 
     allowed_keys = {
         "multi_day_signup_open",
@@ -4933,7 +4933,7 @@ def schedule_signups_manage():
 
 
 # 固定岗位人员管理：独立页面，不影响现有排班、佛台及通知功能。
-_FIXED_ROLE_OPTIONS = ("供花", "供果", "佛学班")
+_FIXED_ROLE_OPTIONS = ("供花", "供果", "佛学班", "膳食")
 
 
 

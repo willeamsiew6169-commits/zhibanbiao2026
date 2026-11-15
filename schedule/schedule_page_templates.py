@@ -179,7 +179,7 @@ button{cursor:pointer}.primary{background:#187c71;color:white;border:0;padding:1
 </style></head><body><div class="wrap">
 <a href="/schedule/management/fixed">← 返回佛台及固定岗位管理</a>
 <h1>👥 固定岗位人员管理</h1>
-<p class="muted">管理供花、供果、佛学班及整理佛台每星期固定轮值；此页面不会直接修改已发布排班或签到记录。</p>
+<p class="muted">管理供花、供果、佛学班、膳食组及整理佛台每星期固定轮值；此页面不会直接修改已发布排班或签到记录。</p>
 {% with messages = get_flashed_messages(with_categories=true) %}{% for category,msg in messages %}
 <div class="notice {{ 'error' if category == 'error' else '' }}">{{ msg }}</div>
 {% endfor %}{% endwith %}
@@ -187,6 +187,7 @@ button{cursor:pointer}.primary{background:#187c71;color:white;border:0;padding:1
 <button type="button" class="tab active" data-role="供花">🌸 供花（{{ members['供花']|length }}）</button>
 <button type="button" class="tab" data-role="供果">🍎 供果（{{ members['供果']|length }}）</button>
 <button type="button" class="tab" data-role="佛学班">📖 佛学班（{{ members['佛学班']|length }}）</button>
+<button type="button" class="tab" data-role="膳食">🍱 膳食组（{{ members['膳食']|length }}）</button>
 <button type="button" class="tab" data-role="佛台">🪷 整理佛台</button>
 </div></div>
 <div class="card"><h2>➕ 加入固定成员</h2>
@@ -205,7 +206,7 @@ button{cursor:pointer}.primary{background:#187c71;color:white;border:0;padding:1
 </form></div>
 {% for role in roles %}
 <div class="card role-panel {{ 'active' if role == '供花' else '' }}" data-panel="{{ role }}">
-<h2>{{ '🌸' if role == '供花' else ('🍎' if role == '供果' else '📖') }} {{ role }}（{{ members[role]|length }} 人）</h2>
+<h2>{{ '🌸' if role == '供花' else ('🍎' if role == '供果' else ('🍱' if role == '膳食' else '📖')) }} {{ role }}（{{ members[role]|length }} 人）</h2>
 {% if members[role] %}<table><thead><tr><th>编号</th><th>姓名</th><th>操作</th></tr></thead><tbody>
 {% for member in members[role] %}<tr><td>{{ member.volunteer_id }}</td><td>{{ member.name }}</td>
 <td><form method="post" onsubmit="return confirm('确定从{{ role }}移除 {{ member.name }}？');">
