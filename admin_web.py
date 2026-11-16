@@ -760,9 +760,7 @@ def admin_report():
             </a>
 
             <a class="btn-tool btn-primary"
-               href="{{ url_for('admin.admin_today_records', pin=pin) }}">
-                {{ t.get("view_today_records", "查看今日记录") }}
-            </a>
+               href="{{ url_for('admin.manage_history', pin=pin, kind='attendance') }}">📋 签到记录管理（今日／历史）</a>
         </div>
     </div>
 
@@ -791,9 +789,7 @@ def admin_report():
             </a>
 
             <a class="btn-tool btn-purple"
-               href="{{ url_for('admin.admin_records', pin=pin) }}">
-                {{ t["admin_records"] }}
-            </a>
+               href="{{ url_for('admin.manage_history', pin=pin, kind='reading') }}">📖 白话佛法记录管理／补点名</a>
         </div>
     </div>
 
@@ -1708,3 +1704,170 @@ def download_schedule_assignments():
 
     except Exception as e:
         return f"下载正式排班失败：{e}"
+
+# 历史记录管理：独立管理员入口，不修改义工签到与 /reading 页面。
+def _history_day(raw):
+    try:
+        chosen = date.fromisoformat(str(raw or now_date_str()))
+    except (TypeError, ValueError):
+        return None
+    if chosen > datetime.now(MY_TZ).date():
+        return None
+    return chosen.isoformat()
+
+
+def _history_authorized():
+    return (request.values.get("pin") or "").strip() == ADMIN_PIN
+
+
+def _history_redirect(kind, day, pin):
+    return redirect(url_for("admin.manage_history", kind=kind, day=day, pin=pin))
+
+
+@admin_bp.route("/admin/history")
+def manage_history():
+    if not _history_authorized():
+        return "无权限", 403
+    pin = request.args["pin"]
+    kind = request.args.get("kind", "attendance")
+    if kind not in ("attendance", "reading"):
+        return "无效类型", 400
+    day = _history_day(request.args.get("day"))
+    if not day:
+        return "日期无效或不能选择未来日期", 400
+    rows = db_query(
+        "SELECT * FROM attendance WHERE date=%s ORDER BY id DESC" if kind == "attendance"
+        else "SELECT * FROM reading WHERE date=%s ORDER BY id DESC",
+        (day,), fetchall=True) or []
+    candidates = []
+    if kind == "reading":
+        candidates = db_query("""
+            SELECT DISTINCT name FROM attendance
+            WHERE date=%s AND signin=1 AND name IS NOT NULL AND TRIM(name)<>''
+            ORDER BY name
+        """, (day,), fetchall=True) or []
+    recorded = {str(r.get("name") or "").strip() for r in rows}
+    return render_template_string(HISTORY_PAGE, pin=pin, kind=kind, day=day,
+                                  rows=rows, candidates=candidates, recorded=recorded,
+                                  today=now_date_str())
+
+
+@admin_bp.route("/admin/history/reading/add", methods=["POST"])
+def history_reading_add():
+    if not _history_authorized():
+        return "无权限", 403
+    pin = request.form["pin"]
+    day = _history_day(request.form.get("day"))
+    if not day:
+        return "日期无效", 400
+    topic = request.form.get("topic", "").strip()
+    time_text = request.form.get("time", "").strip()
+    names = {n.strip(): "义工" for n in request.form.getlist("names") if n.strip()}
+    for raw in request.form.get("extra_names", "").replace("，", ",").replace("、", ",").replace("\n", ",").split(","):
+        name = raw.strip()
+        if name and name not in names:
+            names[name] = "佛友"
+    if not topic or not names or not time_text:
+        flash("请填写姓名、主题及共修时间", "bad")
+        return _history_redirect("reading", day, pin)
+    # 防止客户端伪造义工名单；手工添加的姓名归类为佛友。
+    eligible = db_query("SELECT DISTINCT name FROM attendance WHERE date=%s AND signin=1", (day,), fetchall=True) or []
+    eligible_names = {str(r.get("name") or "").strip() for r in eligible}
+    for name in names:
+        if name not in eligible_names:
+            names[name] = "佛友"
+    from db import get_conn
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            for name, identity in names.items():
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s),hashtext(%s))", (day, name))
+                cur.execute("SELECT 1 FROM reading WHERE date=%s AND name=%s LIMIT 1", (day, name))
+                if cur.fetchone():
+                    continue
+                cur.execute("INSERT INTO reading (date,name,identity,topic,session,time) VALUES (%s,%s,%s,%s,%s,%s)",
+                            (day, name, identity, topic, "", time_text))
+    flash("补点名已保存（已有记录者自动跳过）", "ok")
+    return _history_redirect("reading", day, pin)
+
+
+@admin_bp.route("/admin/history/<kind>/<int:record_id>/edit", methods=["GET", "POST"])
+def history_edit(kind, record_id):
+    if not _history_authorized():
+        return "无权限", 403
+    if kind not in ("attendance", "reading"):
+        return "无效类型", 400
+    pin = request.values["pin"]
+    row = db_query(f"SELECT * FROM {kind} WHERE id=%s", (record_id,), fetchone=True)
+    if not row:
+        return "找不到记录", 404
+    day = str(row["date"])
+    if request.method == "POST":
+        if kind == "reading":
+            name = request.form.get("name", "").strip()
+            identity = request.form.get("identity", "").strip()
+            topic = request.form.get("topic", "").strip()
+            time_text = request.form.get("time", "").strip()
+            if not all((name, identity, topic, time_text)):
+                return "姓名、身份、主题、时间不能为空", 400
+            # 保持同一天同名只能一笔的原规则。
+            conflict = db_query("SELECT 1 FROM reading WHERE date=%s AND name=%s AND id<>%s LIMIT 1",
+                                (day, name, record_id), fetchone=True)
+            if conflict:
+                return "该姓名在这一天已经有白话佛法记录", 400
+            db_query("UPDATE reading SET name=%s, identity=%s, topic=%s, time=%s WHERE id=%s",
+                     (name, identity, topic, time_text, record_id))
+        else:
+            role = request.form.get("role", "").strip()
+            start = request.form.get("start_time", "").strip()
+            end = request.form.get("end_time", "").strip()
+            remark = request.form.get("remark", "").strip()
+            if role not in ("值班", "卫生", "佛台", "供台", "供花", "供果", "膳食", "佛学班"):
+                return "岗位无效", 400
+            try:
+                hours = calc_hours(start, end) if start and end else None
+            except Exception:
+                return "时间格式不正确", 400
+            db_query("UPDATE attendance SET role=%s,start_time=%s,end_time=%s,hours=%s,remark=%s WHERE id=%s",
+                     (role, start, end, hours, remark, record_id))
+        flash("记录已修改", "ok")
+        return _history_redirect(kind, day, pin)
+    return render_template_string(HISTORY_EDIT_PAGE, row=row, kind=kind, pin=pin, day=day)
+
+
+@admin_bp.route("/admin/history/<kind>/<int:record_id>/delete", methods=["POST"])
+def history_delete(kind, record_id):
+    if not _history_authorized():
+        return "无权限", 403
+    if kind not in ("attendance", "reading"):
+        return "无效类型", 400
+    pin = request.form["pin"]
+    row = db_query(f"SELECT date FROM {kind} WHERE id=%s", (record_id,), fetchone=True)
+    if not row:
+        return "找不到记录", 404
+    day = str(row["date"])
+    db_query(f"DELETE FROM {kind} WHERE id=%s", (record_id,))
+    flash("记录已删除", "ok")
+    return _history_redirect(kind, day, pin)
+
+
+HISTORY_PAGE = """
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>记录管理</title><link rel="stylesheet" href="{{ url_for('static',filename='css/toolbox.css') }}">
+<style>.history-wrap{max-width:1050px;margin:auto}.history-table{width:100%;border-collapse:collapse}.history-table td,.history-table th{padding:12px;border-bottom:1px solid #ddd;text-align:left}.history-actions{display:flex;gap:8px;flex-wrap:wrap}.history-actions form{margin:0}.history-check{display:block;padding:9px;border-bottom:1px solid #eee}.history-check.done{color:#888;background:#f4f4f4}.history-check input{margin-right:10px}.history-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}.history-scroll{overflow-x:auto}.history-input{max-width:100%;padding:10px;margin:5px 0}.history-link{display:inline-block;padding:10px;margin:4px;background:#e8efff;border-radius:8px;text-decoration:none}</style>
+</head><body><div class="page history-wrap"><div class="card"><h1 class="page-title">{{ '📋 义工签到记录管理' if kind=='attendance' else '📖 白话佛法记录管理' }}</h1>
+<a class="history-link" href="{{ url_for('admin.admin_report',pin=pin) }}">← 返回管理员</a>
+<a class="history-link" href="{{ url_for('admin.manage_history',pin=pin,kind='attendance',day=day) }}">签到记录</a>
+<a class="history-link" href="{{ url_for('admin.manage_history',pin=pin,kind='reading',day=day) }}">白话佛法</a>
+{% with msgs=get_flashed_messages(with_categories=true) %}{% for category,msg in msgs %}<div class="alert {{ 'alert-success' if category=='ok' else 'alert-danger' }}">{{msg}}</div>{% endfor %}{% endwith %}
+<form method="get"><input type="hidden" name="pin" value="{{pin}}"><input type="hidden" name="kind" value="{{kind}}"><label>📅 选择日期：</label><input class="history-input" type="date" name="day" value="{{day}}" max="{{today}}" required><button class="btn-tool btn-primary" style="width:auto;display:inline-flex" type="submit">🔍 查询</button></form>
+<p>所选日期：<b>{{day}}</b>　共 {{rows|length}} 笔</p>
+<div class="history-scroll"><table class="history-table"><thead><tr><th>姓名</th>{% if kind=='attendance' %}<th>岗位</th><th>签到</th><th>签退</th><th>时数</th>{% else %}<th>身份</th><th>主题</th><th>时间</th>{% endif %}<th>操作</th></tr></thead><tbody>
+{% for r in rows %}<tr><td>{{r.name}}</td>{% if kind=='attendance' %}<td>{{r.role}}</td><td>{{r.start_time or '-'}}</td><td>{{r.end_time or '未签退'}}</td><td>{{r.hours if r.hours is not none else '-'}}</td>{% else %}<td>{{r.identity}}</td><td>{{r.topic}}</td><td>{{r.time}}</td>{% endif %}<td><div class="history-actions"><a class="history-link" href="{{url_for('admin.history_edit',kind=kind,record_id=r.id,pin=pin)}}">✏️ 修改</a><form method="post" action="{{url_for('admin.history_delete',kind=kind,record_id=r.id)}}" onsubmit="return confirm('确定删除这笔记录吗？删除后无法从此页面恢复。')"><input type="hidden" name="pin" value="{{pin}}"><button class="btn-tool btn-danger" style="width:auto;padding:10px" type="submit">🗑️ 删除</button></form></div></td></tr>{% else %}<tr><td colspan="6">这一天暂无记录。</td></tr>{% endfor %}
+</tbody></table></div></div>
+{% if kind=='reading' %}<div class="card"><h2>➕ 补录白话佛法点名</h2><p>以下为 {{day}} 实际签到的义工。已点名者显示灰色，不可重复勾选。</p><form method="post" action="{{url_for('admin.history_reading_add')}}"><input type="hidden" name="pin" value="{{pin}}"><input type="hidden" name="day" value="{{day}}"><div class="history-grid">{% for c in candidates %}<label class="history-check {{'done' if c.name in recorded else ''}}"><input type="checkbox" name="names" value="{{c.name}}" {{'disabled' if c.name in recorded else ''}}>{{c.name}} {{'✅ 已点名' if c.name in recorded else '🔴 未点名'}}</label>{% else %}<p>当天没有实际签到的义工。</p>{% endfor %}</div><p><label>其他佛友姓名（可用逗号分隔多人）<br><input class="form-input" name="extra_names" placeholder="例如：张三，李四"></label></p><p><label>共修主题<br><input class="form-input" name="topic" required></label></p><p><label>共修时间<br><input class="form-input" name="time" placeholder="例如：10:30 AM" required></label></p><button class="btn-tool btn-success" type="submit">保存补点名</button></form></div>{% endif %}
+</div></body></html>
+"""
+
+HISTORY_EDIT_PAGE = """
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>修改记录</title><link rel="stylesheet" href="{{url_for('static',filename='css/toolbox.css')}}"></head><body><div class="page"><div class="card"><h1>✏️ 修改{{'签到' if kind=='attendance' else '白话佛法'}}记录</h1><p>{{row.name}} · {{day}}</p><form method="post"><input type="hidden" name="pin" value="{{pin}}">{% if kind=='attendance' %}<label>岗位</label><select class="form-input" name="role">{% for role in ['值班','卫生','佛台','供台','供花','供果','膳食','佛学班'] %}<option value="{{role}}" {{'selected' if role==row.role else ''}}>{{role}}</option>{% endfor %}</select><label>签到时间</label><input class="form-input" name="start_time" value="{{row.start_time or ''}}"><label>签退时间</label><input class="form-input" name="end_time" value="{{row.end_time or ''}}"><label>备注</label><input class="form-input" name="remark" value="{{row.remark or ''}}">{% else %}<label>姓名</label><input class="form-input" name="name" value="{{row.name or ''}}" required><label>身份</label><select class="form-input" name="identity"><option value="义工" {{'selected' if row.identity=='义工' else ''}}>义工</option><option value="佛友" {{'selected' if row.identity=='佛友' else ''}}>佛友</option></select><label>共修主题</label><input class="form-input" name="topic" value="{{row.topic or ''}}" required><label>共修时间</label><input class="form-input" name="time" value="{{row.time or ''}}" required>{% endif %}<div class="btn-row" style="margin-top:20px"><button class="btn-tool btn-success" type="submit">保存修改</button><a class="btn-tool btn-secondary" href="{{url_for('admin.manage_history',kind=kind,day=day,pin=pin)}}">取消／返回</a></div></form></div></div></body></html>
+"""

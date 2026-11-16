@@ -2525,11 +2525,50 @@ def volunteer_day_schedule():
     if published:
         try:
             message = build_whatsapp_from_assigned(signup_date)
-            # 将原有正式排班文字按段落整理成阅读卡片；不改变内容或排班规则。
+            # 仅在本页面合并同一人、同一段落内连续的值班时段；不修改正式排班原文。
+            import re
+            interval_re = re.compile(
+                r"^\s*(\d{1,2}:\d{2}\s*(?:am|pm))\s*[~～至-]+\s*"
+                r"(\d{1,2}:\d{2}\s*(?:am|pm))\s*$", re.I
+            )
+
+            def minutes_of(clock):
+                clock = clock.strip().lower().replace(" ", "")
+                hour, rest = clock.split(":", 1)
+                minute = int(rest[:2])
+                h = int(hour) % 12 + (12 if rest[2:] == "pm" else 0)
+                return h * 60 + minute
+
+            def merge_display_lines(lines):
+                # 仅合并相邻的「姓名 / 时间 / 同姓名 / 时间」；不同地点分段不合并。
+                merged = []
+                i = 0
+                while i < len(lines):
+                    if i + 1 < len(lines) and interval_re.fullmatch(lines[i + 1]):
+                        name = lines[i]
+                        first = interval_re.fullmatch(lines[i + 1])
+                        start, end = first.group(1), first.group(2)
+                        end_minutes = minutes_of(end)
+                        j = i + 2
+                        while (j + 1 < len(lines) and lines[j] == name
+                               and (next_match := interval_re.fullmatch(lines[j + 1]))):
+                            next_start = minutes_of(next_match.group(1))
+                            next_end = minutes_of(next_match.group(2))
+                            if next_start > end_minutes or next_end < end_minutes:
+                                break
+                            end, end_minutes = next_match.group(2), next_end
+                            j += 2
+                        merged.extend((name, f"{start}~{end}" if j > i + 2 else lines[i + 1]))
+                        i = j
+                    else:
+                        merged.append(lines[i])
+                        i += 1
+                return merged
+
             for paragraph in message.replace("\r\n", "\n").split("\n\n"):
                 lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
                 if lines:
-                    entries.append(lines)
+                    entries.append(merge_display_lines(lines))
         except Exception:
             return "暂时无法读取正式值班表，请稍后再试。<a href='/volunteer'>返回</a>", 503
     else:

@@ -964,19 +964,42 @@ def build_signup_notice_whatsapp(date_str):
         return "\n".join(lines)
 
     def format_duty_people(rows):
-        """仅用于值班通知：同地点且起止时间相同的姓名合并一行。"""
+        """仅合并通知显示：同一人同地点的连续/重叠时段；保留同时间多人同行。"""
         if not rows:
             return ""
         from collections import OrderedDict
-        grouped = OrderedDict()
+
+        # 此函数每次只处理一个地点，因此不跨地点合并。
+        by_name = OrderedDict()
+        unparsed = []
         for row in rows:
-            start = str(row.get("start_time") or "").strip()
-            end = str(row.get("end_time") or "").strip()
             name = str(row.get("name") or "").strip()
+            start_text = str(row.get("start_time") or "").strip()
+            end_text = str(row.get("end_time") or "").strip()
             if not name:
                 continue
-            key = (start, end)
-            names = grouped.setdefault(key, [])
+            start, end = _minutes(start_text), _minutes(end_text)
+            if start is None or end is None or end <= start:
+                unparsed.append((name, start_text, end_text))
+                continue
+            by_name.setdefault(name, []).append((start, end))
+
+        merged_rows = []
+        for name, intervals in by_name.items():
+            intervals.sort()
+            merged = []
+            for start, end in intervals:
+                if merged and start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+            for start, end in merged:
+                merged_rows.append((name, _clock(start), _clock(end)))
+        merged_rows.extend(unparsed)
+
+        grouped = OrderedDict()
+        for name, start, end in merged_rows:
+            names = grouped.setdefault((start, end), [])
             if name not in names:
                 names.append(name)
         lines = []

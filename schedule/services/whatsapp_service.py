@@ -135,6 +135,57 @@ def build_whatsapp_from_assigned(date_str):
         # 两位卫生义工时，楼梯由两人共同负责。
         arranged["楼梯卫生"] = cleaners[:]
 
+    # 仅合并正式值班表的显示时段；不修改报名或排班数据库记录。
+    # 相同班别、地点及姓名，且时间连续或重叠时才合并。
+    def _minute(value):
+        if isinstance(value, time):
+            return value.hour * 60 + value.minute
+        value = str(value or "").strip().lower().replace(" ", "")
+        for fmt in ("%I:%M%p", "%I%p", "%H:%M", "%H:%M:%S"):
+            try:
+                parsed = datetime.strptime(value, fmt)
+                return parsed.hour * 60 + parsed.minute
+            except ValueError:
+                pass
+        return None
+
+    for duty_key in ("绿观音堂", "绿活动中心", "橙观音堂", "橙活动中心",
+                     "黄观音堂", "黄活动中心"):
+        original = arranged[duty_key]
+        by_name = {}
+        for index, (name, start, end) in enumerate(original):
+            begin, finish = _minute(start), _minute(end)
+            if begin is None or finish is None or finish <= begin:
+                continue
+            by_name.setdefault(name, []).append((begin, finish, index))
+
+        # 保留原始顺序和无法解析的时段，避免影响现有通知格式。
+        merged_at = {}
+        hidden = set()
+        for name, spans in by_name.items():
+            spans.sort(key=lambda item: (item[0], item[1]))
+            groups = []
+            for begin, finish, index in spans:
+                if groups and begin <= groups[-1][1]:
+                    groups[-1][1] = max(groups[-1][1], finish)
+                    groups[-1][2].append(index)
+                else:
+                    groups.append([begin, finish, [index]])
+            for begin, finish, indices in groups:
+                if len(indices) < 2:
+                    continue
+                first = min(indices)
+                # 沿用第一段的时间文字，结束时间沿用最晚结束的一段。
+                first_start = min(indices, key=lambda i: _minute(original[i][1]))
+                last_end = max(indices, key=lambda i: _minute(original[i][2]))
+                merged_at[first] = (name, original[first_start][1], original[last_end][2])
+                hidden.update(i for i in indices if i != first)
+
+        arranged[duty_key] = [
+            merged_at.get(i, item)
+            for i, item in enumerate(original) if i not in hidden
+        ]
+
     if template_type == "normal":
         return build_normal_message(
             date_obj,

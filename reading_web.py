@@ -1,6 +1,7 @@
 # reading_web.py
 
 import os
+import re
 import pandas as pd
 
 from db import db_query, get_conn
@@ -129,6 +130,23 @@ def add_reading_once_today(name, identity, topic, time_text):
     return True
 
 
+def get_reading_volunteer_by_number(number):
+    """按完整 CHE/STW 编号查义工，避免仅凭数字误认其他分会。"""
+    number = str(number or "").strip().upper().replace(" ", "")
+    match = re.fullmatch(r"(CHE|STW)-?(\d+)", number)
+    if not match:
+        return None
+    branch, digits = match.groups()
+    normalized = f"{branch}-{int(digits)}"
+    rows = db_query("""
+        select id, name from volunteers
+        where upper(id) = %s or upper(coalesce(member_id, '')) = %s
+        limit 2
+    """, (normalized, normalized), fetchall=True) or []
+    names = {str(r.get("name") or "").strip() for r in rows if r.get("name")}
+    return next(iter(names)) if len(names) == 1 else None
+
+
 def get_reading_topics():
     rows = db_query("""
         select distinct topic
@@ -159,6 +177,7 @@ def reading():
         topic = request.form.get("topic", "").strip()
         names = request.form.getlist("names")
         extra_text = request.form.get("extra_names", "").strip()
+        volunteer_number = request.form.get("volunteer_number", "").strip()
 
         extra_names = []
         if extra_text:
@@ -166,7 +185,7 @@ def reading():
                 extra_text = extra_text.replace(sep, " ")
             extra_names = [x.strip() for x in extra_text.split(" ") if x.strip()]
 
-        if not names and not extra_names:
+        if not names and not extra_names and not volunteer_number:
             return "❌ 请选择至少一位共修者。<br><a href='/reading'>返回</a>"
 
         if not topic:
@@ -184,6 +203,11 @@ def reading():
             clean_name = str(name).strip()
             if clean_name and clean_name not in unique_people:
                 unique_people[clean_name] = t.get("friend_identity", "Friend" if t.get("html_lang", "zh").startswith("en") else "佛友")
+        if volunteer_number:
+            volunteer_name = get_reading_volunteer_by_number(volunteer_number)
+            if not volunteer_name:
+                return "❌ 找不到此 CHE/STW 义工编号，请检查编号。<br><a href='/reading'>返回</a>", 400
+            unique_people[volunteer_name] = t.get("volunteer_identity", "Volunteer" if t.get("html_lang", "zh").startswith("en") else "义工")
         for name, identity in unique_people.items():
             add_reading_once_today(name, identity, topic, now_time)
 
@@ -235,6 +259,11 @@ def reading():
           h2{font-size:23px;margin:0 0 18px} h3{font-size:19px}
           .field-label{display:block;margin:16px 0 8px;font-weight:700}
           input[type=text]{width:100%;font-size:18px;padding:13px;border:1px solid #cbd5cc;border-radius:10px}
+          .branch-number-row{display:flex;gap:10px;align-items:stretch}
+          .branch-switch{flex:0 0 88px;font-weight:700;font-size:18px;border-radius:10px}
+          .branch-switch.che{background:#399d55;color:#fff}
+          .branch-switch.stw{background:#dc3545;color:#fff}
+          .branch-number-row input[type=text]{flex:1;min-width:0}
           .name-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:9px;margin:12px 0}
           .name-item{display:flex;align-items:center;gap:8px;padding:12px;background:#f4f8f3;border-radius:10px;font-size:17px}
           .name-item input{width:19px;height:19px}
@@ -267,6 +296,13 @@ def reading():
           {% for name in attendees %}<label class="name-item"><input type="checkbox" name="names" value="{{ name }}">{{ name }}</label>{% endfor %}
           </div>
           {% else %}<p class="muted">今日签到义工均已点名，或暂无可点名义工。</p>{% endif %}
+          <label class="field-label">{{ '未签到的义工：输入 CHE/STW 编号' if not t.html_lang.startswith('en') else 'Volunteer not yet checked in: enter CHE/STW number' }}</label>
+          <div class="branch-number-row">
+            <button type="button" id="readingBranchBtn" class="branch-switch che" onclick="toggleReadingBranch()" aria-label="切换 CHE 或 STW">CHE</button>
+            <input type="text" id="readingNumberDigits" inputmode="numeric" autocomplete="off" pattern="[0-9]+" placeholder="例如：208" title="只需输入数字编号">
+          </div>
+          <input type="hidden" name="volunteer_number" id="readingVolunteerNumber">
+          <p class="muted">{{ '不必填写姓名；保存时自动从义工资料读取姓名。' if not t.html_lang.startswith('en') else 'No name needed; the volunteer name is looked up when saving.' }}</p>
           <label class="field-label">{{ t.extra_friend_name }}</label>
           <input type="text" name="extra_names" placeholder="{{ t.extra_friend_placeholder }}">
           <p class="muted">{{ t.extra_friend_tip }}</p>
@@ -291,6 +327,20 @@ def reading():
     </main>
 
     <script>
+    let readingBranch = 'CHE';
+    function toggleReadingBranch() {
+        readingBranch = readingBranch === 'CHE' ? 'STW' : 'CHE';
+        const btn = document.getElementById('readingBranchBtn');
+        btn.textContent = readingBranch;
+        btn.className = 'branch-switch ' + readingBranch.toLowerCase();
+    }
+    function syncReadingVolunteerNumber() {
+        const digits = document.getElementById('readingNumberDigits').value.trim();
+        document.getElementById('readingVolunteerNumber').value = digits ? readingBranch + '-' + digits : '';
+    }
+    document.getElementById('readingNumberDigits').addEventListener('input', syncReadingVolunteerNumber);
+    document.getElementById('readingBranchBtn').addEventListener('click', syncReadingVolunteerNumber);
+    document.getElementById('readingNumberDigits').closest('form').addEventListener('submit', syncReadingVolunteerNumber);
     function selectAllNames() {
         const boxes = document.querySelectorAll('input[name="names"]');
         boxes.forEach(b => b.checked = true);

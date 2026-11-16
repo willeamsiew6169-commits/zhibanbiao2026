@@ -294,6 +294,17 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
     if role not in ROLES:
         return False, "请选择正确岗位。"
 
+    # 卫生一天只允许签到一次（包括已签退记录），不影响其他岗位。
+    if role == "卫生":
+        cleaning_done = db_query("""
+            select id from attendance
+            where date=%s and volunteer_id=%s and role='卫生'
+            limit 1
+        """, (now_date_str(), volunteer["编号"]), fetchone=True)
+        if cleaning_done:
+            return False, (f"{volunteer['姓名']} 今天已经签到过卫生。"
+                           "卫生每天只允许签到一次；如今天还有值班安排，请返回选择『值班』。")
+
     # 仅允许值班和供台两种不同岗位并行；同岗位不可重复签到。
     opened = db_query("""
         select id, role from attendance
@@ -810,6 +821,9 @@ def auto_signout_unfinished_today():
                     continue
                 credited_end = f"{cutoff // 60:02d}:{cutoff % 60:02d}"
                 start_min = time_to_minutes(row.get("start_time"))
+                # 不得自动写入早于签到的签退时间；保留异常记录供负责人核查。
+                if start_min is not None and cutoff < start_min:
+                    continue
                 hours = round(max(0, cutoff - start_min) / 60, 2) if start_min is not None else None
                 remark = str(row.get("remark") or "") + "｜系统自动签退（忘记签退；服务计至排班结束）"
                 cur.execute("""
