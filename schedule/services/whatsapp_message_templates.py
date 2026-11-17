@@ -1,7 +1,7 @@
 """WhatsApp 唯一文案中心。只负责文字排版；不触碰数据库、排班、队列及发送。"""
 import re
 
-WHATSAPP_FOOTER = '- 观音堂早晚香 由值班义工带领上香\n\n- 观音堂续香 -\n佛友可以续香，但是要跟着请安词，必须燃烧完了一支香才续香。如有多位佛友要续香，请先让给先到达观音堂的佛友，轮流续香\n\n！！值班义工请注意：\n1）下雨天记得关上烧送小房子的窗口\n2）在离开观音堂之前，请确保把所有的窗口关上\n3）观音堂第一架的冷气坚决不能调/关，第二架和第三架需要轮流替换，不建议长时间只开其中一架\n4）活动中心的冷气也需要轮流替换，每一架冷气上都有标贴（ABCD)。请在特定时段只开其中两架\n\n例如：10am-2pm开冷气 A或者C，2pm-6pm开冷气 B或者D\n\n另外，请大家多留意义工群信息，以便大家能够团结一致的护持好观音堂。佛子齐心，普度众生。\n\n义工报名请点击以下链接：\nhttps://gyt-checkin-sg.onrender.com/volunteer\n\n非常感恩大家！\n大家功德无量！\n🙏🙏🙏'
+WHATSAPP_FOOTER = '- 观音堂早晚香 由值班义工带领上香\n\n- 观音堂续香 -\n佛友可以续香，但是要跟着请安词，必须燃烧完了一支香才续香。如有多位佛友要续香，请先让给先到达观音堂的佛友，轮流续香\n\n！！值班义工请注意：\n1）下雨天记得关上烧送小房子的窗口\n2）在离开观音堂之前，请确保把所有的窗口关上\n3）观音堂第一架的冷气坚决不能调/关，第二架和第三架需要轮流替换，不建议长时间只开其中一架\n4）活动中心的冷气也需要轮流替换，每一架冷气上都有标贴（ABCD)。请在特定时段只开其中两架\n\n例如：10am-2pm开冷气 A或者C，2pm-6pm开冷气 B或者D\n\n另外，请大家多留意义工群信息，以便大家能够团结一致的护持好观音堂。佛子齐心，普度众生。\n\n非常感恩大家！\n大家功德无量！\n🙏🙏🙏'
 
 def _compact_whatsapp_message(message):
     """只压缩多余空行，不修改义工名单、岗位或注意事项。"""
@@ -69,6 +69,7 @@ def build_roster_message(date_obj, arranged, special_info, remove_info, kind):
     if festival:
         sections.append(festival)
     sections.extend([
+        "📝 义工报名请点击以下链接👇\n" + SIGNUP_URL,
         greeting,
         "［整理佛台］",
         f"{start}~{end}  或\n{start}~整理完毕",
@@ -147,6 +148,9 @@ def build_signup_message(*, date_only, weekday_only, lunar_and_festival, greetin
 {date_only}
 
 {weekday_only}{lunar_and_festival}
+
+📝 义工报名请点击以下链接👇
+{SIGNUP_URL}
 
 {greeting_time}
 

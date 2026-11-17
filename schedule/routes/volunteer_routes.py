@@ -2612,6 +2612,15 @@ def volunteer_day_schedule():
     else:
         display_text = "\n\n".join("\n".join(str(x) for x in group) for group in entries)
 
+    # 仅义工网页隐藏报名链接提示；不改 WhatsApp 正式文案。
+    if published:
+        import re as _web_re
+        display_text = _web_re.sub(
+            r"(?m)^[ \t]*(?:📝[ \t]*)?义工报名请点击以下链接[^\n]*\n"
+            r"[ \t]*https?://[^\s]+/volunteer[ \t]*\n?",
+            "", display_text,
+        )
+
     # 只影响义工网页显示：文字原样保留，按岗位给标题柔和着色。
     import html
     from markupsafe import Markup

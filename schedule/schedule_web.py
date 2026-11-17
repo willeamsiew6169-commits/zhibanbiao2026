@@ -509,7 +509,7 @@ def edit_assigned_place(assignment_id):
     except ValueError:
         return_date = ""
 
-    shift_options = ["绿班", "橙班", "黄班"]
+    shift_options = ["绿", "橙", "黄"]
     place_options = [
         "观音堂",
         "活动中心",
@@ -523,16 +523,51 @@ def edit_assigned_place(assignment_id):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
+            if request.method == "POST" and request.form.get("action") == "delete":
+                # 只删除选中的 assignment，不误删同一报名拆出的其他时段。
+                cur.execute("""
+                    select id, signup_id, assignment_date
+                    from volunteer_schedule_assignments where id=%s for update
+                """, (assignment_id,))
+                target = cur.fetchone()
+                if not target:
+                    return "❌ 找不到排班记录", 404
+                cur.execute("delete from volunteer_schedule_assignments where id=%s", (assignment_id,))
+                # 最后一笔被删除时同步取消报名，防止夜间缺漏修复重新补入。
+                if target["signup_id"] is not None:
+                    cur.execute("""
+                        select 1 from volunteer_schedule_assignments
+                        where signup_id=%s and role='值班'
+                          and coalesce(status,'assigned') <> 'cancelled' limit 1
+                    """, (target["signup_id"],))
+                    if not cur.fetchone():
+                        cur.execute("""
+                            update volunteer_schedule_signups
+                            set status='cancelled', assigned_place=null
+                            where id=%s and role='值班'
+                        """, (target["signup_id"],))
+                conn.commit()
+                mark_schedule_need_republish(target["assignment_date"])
+                if return_date and return_date == str(target["assignment_date"]):
+                    return redirect(url_for("schedule.schedule_view_assigned", date=return_date))
+                return redirect("/schedule/signups")
+
             if request.method == "POST":
                 shift_label = request.form.get("shift_label", "").strip()
+                # 数据库统一保存「绿／橙／黄」，兼容旧页面可能传入的「绿班」。
+                shift_label = shift_label.removesuffix("班")
                 assigned_place = request.form.get("assigned_place", "").strip()
                 start_time = request.form.get("start_time", "").strip()
                 end_time = request.form.get("end_time", "").strip()
 
+                # 报名时段与排班时段分别保存；只更新当前排班所关联的报名。
+                signup_start = request.form.get("signup_start_time", "").strip()
+                signup_end = request.form.get("signup_end_time", "").strip()
                 cur.execute("""
-                    select assignment_date
+                    select assignment_date, signup_id
                     from volunteer_schedule_assignments
                     where id = %s
+                    for update
                 """, (assignment_id,))
 
                 assignment_info = cur.fetchone()
@@ -541,6 +576,29 @@ def edit_assigned_place(assignment_id):
                     return "❌ 找不到排班记录<br><a href='/schedule/signups'>返回</a>"
 
                 assignment_date = assignment_info["assignment_date"]
+                signup_id = assignment_info.get("signup_id")
+                if signup_id is not None:
+                    # 禁止空值或无法识别的时段写入原始报名。
+                    def _minutes(value):
+                        raw = value.lower().replace(" ", "")
+                        for fmt in ("%I:%M%p", "%I%p", "%H:%M", "%H:%M:%S"):
+                            try:
+                                t = datetime.strptime(raw, fmt)
+                                return t.hour * 60 + t.minute
+                            except ValueError:
+                                pass
+                        return None
+
+                    begin, finish = _minutes(signup_start), _minutes(signup_end)
+                    if begin is None or finish is None or begin >= finish:
+                        return "❌ 报名时段无效：请填写正确的开始和结束时间（例如 10:00am、2:00pm）", 400
+                    cur.execute("""
+                        select id from volunteer_schedule_signups
+                        where id=%s and coalesce(status,'pending') <> 'cancelled'
+                        for update
+                    """, (signup_id,))
+                    if not cur.fetchone():
+                        return "❌ 关联报名不存在或已取消，未保存任何修改", 400
 
                 cur.execute("""
                     update volunteer_schedule_assignments
@@ -561,6 +619,13 @@ def edit_assigned_place(assignment_id):
                     assignment_id
                 ))
 
+                if signup_id is not None:
+                    cur.execute("""
+                        update volunteer_schedule_signups
+                        set start_time=%s, end_time=%s
+                        where id=%s
+                    """, (signup_start, signup_end, signup_id))
+
                 conn.commit()
 
                 mark_schedule_need_republish(assignment_date)
@@ -576,6 +641,13 @@ def edit_assigned_place(assignment_id):
             """, (assignment_id,))
 
             row = cur.fetchone()
+            signup_row = None
+            if row and row.get("signup_id") is not None:
+                cur.execute("""
+                    select start_time, end_time from volunteer_schedule_signups
+                    where id=%s
+                """, (row["signup_id"],))
+                signup_row = cur.fetchone()
 
     if not row:
         return "❌ 找不到排班记录<br><a href='/schedule/signups'>返回</a>"
@@ -591,6 +663,13 @@ body { font-family:"Microsoft YaHei", Arial; background:#f5f5f5; padding:20px; }
 .box { background:white; max-width:700px; margin:auto; padding:25px; border-radius:15px; }
 input, select, button { font-size:24px; padding:10px; margin:8px 0; width:100%; box-sizing:border-box; }
 p { font-size:22px; }
+.time-picker { display:flex; align-items:center; gap:8px; margin:8px 0; }
+.time-picker input[type=number] { width:90px; min-width:0; margin:0; text-align:center; }
+.time-picker .time-minute { width:100px; }
+.time-picker select { width:125px; margin:0; }
+.time-picker span { font-size:26px; }
+@media(max-width:480px) { .time-picker input[type=number] { width:70px; } .time-picker .time-minute { width:80px; } .time-picker select { width:100px; } }
+
 </style>
 </head>
 <body>
@@ -617,6 +696,31 @@ p { font-size:22px; }
 <form method="post">
     <input type="hidden" name="return_date" value="{{ return_date }}">
 
+    {% if signup_row %}
+    <div style="background:#eef7ff;padding:14px;border-radius:12px;margin:12px 0;">
+        <h3 style="margin:0 0 10px;">📝 修改报名时段</h3>
+        <label>报名开始时间</label>
+        <div class="time-picker" data-time-picker>
+  <input type="hidden" name="signup_start_time" value="{{ signup_row.start_time or '' }}">
+  <input type="number" class="time-hour" min="1" max="12" step="1" inputmode="numeric" aria-label="小时" required>
+  <span>:</span>
+  <input type="number" class="time-minute" min="0" max="59" step="1" inputmode="numeric" aria-label="分钟" required>
+  <select class="time-period" aria-label="上午或下午"><option value="am">AM</option><option value="pm">PM</option></select>
+</div>
+        <label>报名结束时间</label>
+        <div class="time-picker" data-time-picker>
+  <input type="hidden" name="signup_end_time" value="{{ signup_row.end_time or '' }}">
+  <input type="number" class="time-hour" min="1" max="12" step="1" inputmode="numeric" aria-label="小时" required>
+  <span>:</span>
+  <input type="number" class="time-minute" min="0" max="59" step="1" inputmode="numeric" aria-label="分钟" required>
+  <select class="time-period" aria-label="上午或下午"><option value="am">AM</option><option value="pm">PM</option></select>
+</div>
+        <small>只修改这位义工的原始报名，不会自动重排其他义工。</small>
+    </div>
+    {% else %}
+    <p style="color:#805b15;">此排班没有关联报名记录，只能调整排班。</p>
+    {% endif %}
+
     <label>班别</label>
     <select name="shift_label">
         <option value="">无</option>
@@ -637,13 +741,31 @@ p { font-size:22px; }
     </select>
 
     <label>开始时间</label>
-    <input name="start_time" value="{{ row.start_time or '' }}" placeholder="例如 11:00am">
+    <div class="time-picker" data-time-picker>
+  <input type="hidden" name="start_time" value="{{ row.start_time or '' }}">
+  <input type="number" class="time-hour" min="1" max="12" step="1" inputmode="numeric" aria-label="小时" required>
+  <span>:</span>
+  <input type="number" class="time-minute" min="0" max="59" step="1" inputmode="numeric" aria-label="分钟" required>
+  <select class="time-period" aria-label="上午或下午"><option value="am">AM</option><option value="pm">PM</option></select>
+</div>
 
     <label>结束时间</label>
-    <input name="end_time" value="{{ row.end_time or '' }}" placeholder="例如 2:00pm">
+    <div class="time-picker" data-time-picker>
+  <input type="hidden" name="end_time" value="{{ row.end_time or '' }}">
+  <input type="number" class="time-hour" min="1" max="12" step="1" inputmode="numeric" aria-label="小时" required>
+  <span>:</span>
+  <input type="number" class="time-minute" min="0" max="59" step="1" inputmode="numeric" aria-label="分钟" required>
+  <select class="time-period" aria-label="上午或下午"><option value="am">AM</option><option value="pm">PM</option></select>
+</div>
 
     <button type="submit">💾 保存调整</button>
 
+</form>
+
+<form method="post" onsubmit="return confirm('确定删除这笔排班？\\n如果这是该报名最后一笔值班排班，系统也会取消该报名，避免自动补排回来。');">
+    <input type="hidden" name="return_date" value="{{ return_date }}">
+    <input type="hidden" name="action" value="delete">
+    <button type="submit" style="background:#fff0f0;color:#a51e1e;border:2px solid #d99;border-radius:10px;">🗑️ 删除这笔排班</button>
 </form>
 
 <br>
@@ -654,10 +776,45 @@ p { font-size:22px; }
 {% endif %}
 
 </div>
+<script>
+(function () {
+  const pickers = Array.from(document.querySelectorAll('[data-time-picker]'));
+  for (const picker of pickers) {
+    const hidden = picker.querySelector('input[type="hidden"]');
+    const hour = picker.querySelector('.time-hour');
+    const minute = picker.querySelector('.time-minute');
+    const period = picker.querySelector('.time-period');
+    const raw = (hidden.value || '').trim();
+    const m = raw.match(/^(\d{1,2})(?::(\d{1,2}))?(am|pm)$/i);
+    const m24 = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+    if (m) {
+      hour.value = Number(m[1]);
+      minute.value = Number(m[2] || 0);
+      period.value = m[3].toLowerCase();
+    } else if (m24) {
+      const h = Number(m24[1]);
+      hour.value = h % 12 || 12;
+      minute.value = Number(m24[2]);
+      period.value = h < 12 ? 'am' : 'pm';
+    }
+    const form = picker.closest('form');
+    form.addEventListener('submit', function (event) {
+      const h = Number(hour.value), min = Number(minute.value);
+      if (!Number.isInteger(h) || h < 1 || h > 12 || !Number.isInteger(min) || min < 0 || min > 59) {
+        event.preventDefault();
+        alert('请选择正确的小时（1–12）和分钟（0–59）');
+        return;
+      }
+      hidden.value = h + ':' + String(min).padStart(2, '0') + period.value;
+    });
+  }
+})();
+</script>
 </body>
 </html>
 """,
         row=row,
+        signup_row=signup_row,
         shift_options=shift_options,
         place_options=place_options,
         return_date=return_date
@@ -2915,6 +3072,8 @@ def schedule_view_assigned():
         else:
             other_groups.setdefault(place, []).append(item)
 
+    other_groups_display = {place: names for place, names in other_groups.items() if place != "整理佛台"}
+
     # 仅合并查看排班页面的连续时段，不修改原始 assignments。
     # 保留每段原始 ID，负责人仍可分别调整，避免只修改其中一段却误以为全部已改。
     def _time_minutes(value):
@@ -2983,6 +3142,20 @@ def schedule_view_assigned():
           href="{{ url_for('static', filename='css/toolbox.css') }}">
 
     <style>
+    .assigned-floating-back {
+        position: fixed;
+        right: 22px;
+        bottom: 22px;
+        z-index: 9999;
+        background: #2563eb;
+        color: white !important;
+        padding: 13px 20px;
+        border-radius: 999px;
+        font-size: 20px;
+        font-weight: bold;
+        text-decoration: none;
+        box-shadow: 0 4px 14px rgba(0,0,0,.2);
+    }
     /* 排班结果：仅更换页面底色 */
     body { background-color: #F5F1FC !important; }
 
@@ -3048,6 +3221,11 @@ def schedule_view_assigned():
         font-size:24px;
         color:#6b7280;
     }
+    /* 仅调整查看排班的响应式排列，不改变数据和按钮 */
+    .assigned-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start;}
+    .assigned-grid > .card,.assigned-grid > .assignment-section{min-width:0;margin:0;}
+    .assigned-grid .person-row{flex-wrap:wrap;}
+    @media(max-width:767px){.assigned-grid{grid-template-columns:minmax(0,1fr);}}
     </style>
     </head>
 
@@ -3083,6 +3261,7 @@ def schedule_view_assigned():
 
         </div>
 
+        <div class="assigned-grid">
         <div class="card">
 
             <h2 class="section-title">🧹 卫生</h2>
@@ -3118,6 +3297,21 @@ def schedule_view_assigned():
 
         <div class="card">
 
+            <h2 class="section-title">🙏 整理佛台</h2>
+
+            <div class="assignment-section">
+                {% for item in other_groups.get("整理佛台", []) %}
+                    <div class="person-row">
+                        <div><span class="person-name">{{ item.name }}</span></div>
+                        <a class="edit-link"
+                           href="/schedule/edit_assigned/{{ item.id }}?return_date={{ date_str }}">✏️ 调整</a>
+                    </div>
+                {% endfor %}
+                {% if not other_groups.get("整理佛台") %}
+                    <div class="empty-line">暂无安排</div>
+                {% endif %}
+            </div>
+
             <h2 class="section-title">🙏 供台</h2>
 
             <div class="assignment-section">
@@ -3143,11 +3337,14 @@ def schedule_view_assigned():
 
         </div>
 
+        </div>
+
         <div class="card">
 
             <h2 class="section-title">🏠 值班</h2>
 
             {% for shift, places in duty_groups.items() %}
+            {% if shift != "绿" or places["观音堂"] or places["活动中心"] %}
 
                 {% if shift == "绿" %}
                     <h3 class="shift-title">🟢 绿班</h3>
@@ -3159,6 +3356,7 @@ def schedule_view_assigned():
                     <h3 class="shift-title">{{ shift }}</h3>
                 {% endif %}
 
+                <div class="assigned-grid">
                 {% for place, names in places.items() %}
                     <div class="assignment-section">
 
@@ -3199,17 +3397,18 @@ def schedule_view_assigned():
 
                     </div>
                 {% endfor %}
-
+                </div>
+            {% endif %}
             {% endfor %}
 
         </div>
 
-        {% if other_groups %}
+        {% if other_groups_display %}
         <div class="card">
 
             <h2 class="section-title">其他</h2>
 
-            {% for place, names in other_groups.items() %}
+            {% for place, names in other_groups_display.items() %}
                 <div class="assignment-section">
 
                     <div class="assignment-place-title">
@@ -3247,6 +3446,7 @@ def schedule_view_assigned():
 
     </div>
 
+    <a class="assigned-floating-back" href="/schedule?mode=day&amp;override_date={{ date_str }}">⬅ 返回</a>
     </body>
     </html>
     """,
@@ -3255,6 +3455,7 @@ def schedule_view_assigned():
         offering_group=offering_group,
         duty_groups=duty_groups,
         other_groups=other_groups,
+        other_groups_display=other_groups_display,
     )
 
 

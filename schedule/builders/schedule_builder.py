@@ -2565,7 +2565,7 @@ def format_shift_block(items):
     if not items:
         return ""
 
-    groups = {}  # 保留排班原始出现顺序
+    groups = {}  # 同时段姓名合并；输出时按开始、结束时间排序
     for item in items:
         if isinstance(item, dict):
             name = item.get("name") or item.get("姓名") or ""
@@ -2588,8 +2588,24 @@ def format_shift_block(items):
         if name not in names:
             names.append(name)
 
+    def _time_order(value):
+        value = str(value or "").strip().lower().replace(" ", "")
+        if not value:
+            return (1, 0)
+        if re.fullmatch(r"\d{1,2}(am|pm)", value):
+            value = value[:-2] + ":00" + value[-2:]
+        for fmt in ("%I:%M%p", "%H:%M", "%H:%M:%S"):
+            try:
+                dt = datetime.strptime(value, fmt)
+                return (0, dt.hour * 60 + dt.minute)
+            except ValueError:
+                continue
+        return (1, 0)
+
     lines = []
-    for (start_txt, end_txt), names in groups.items():
+    for (start_txt, end_txt), names in sorted(
+        groups.items(), key=lambda entry: (_time_order(entry[0][0]), _time_order(entry[0][1]))
+    ):
         lines.append("、".join(names))
         if start_txt and end_txt:
             lines.append(f"{start_txt}~{end_txt}")
