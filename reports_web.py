@@ -1,9 +1,13 @@
-"""年月报表中心：下载已上传至 Supabase Storage 的原版 Excel。
+"""年月报表中心：月报实时生成；年报下载 Supabase Storage 现有文件。
 
-本页面不重新生成报表，不修改数据库；不存在的文件会明确提示。
+不修改数据库；实时月报的报名数据尚未核实。
 """
 from datetime import datetime
 from io import BytesIO
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 import os
 from zoneinfo import ZoneInfo
 
@@ -27,7 +31,7 @@ PAGE = '''<!doctype html>
 <section class="report-card login-wrap"><div class="section-top"><span class="icon">🔐</span><div><h2>负责人验证</h2><p>请输入管理员 PIN 进入报表中心</p></div></div><form method="post" action="{{ url_for('reports.login') }}"><div class="field"><label for="admin_pin">管理员 PIN</label><input id="admin_pin" name="admin_pin" type="password" required autocomplete="off" placeholder="请输入管理员 PIN"></div><button class="report-button" type="submit">🔓 进入报表中心</button></form>{% if error %}<p class="error" role="alert">PIN 不正确，请重试。</p>{% endif %}</section>
 {% else %}
 <section class="report-card"><div class="section-top"><span class="icon">📅</span><div><h2>选择报表期间</h2><p>选择需要下载的年份与月份</p></div></div><div class="report-row"><div class="field"><label for="year">报表年份</label><select id="year">{% for y in years %}<option value="{{y}}" {% if y==current_year %}selected{% endif %}>{{y}} 年</option>{% endfor %}</select></div><div class="field"><label for="month">报表月份</label><select id="month">{% for m in range(1,13) %}<option value="{{m}}" {% if m==current_month %}selected{% endif %}>{{m}} 月</option>{% endfor %}</select></div></div></section>
-<section class="report-card"><div class="section-top"><span class="icon">📥</span><div><h2>下载 Excel 报表</h2><p>保留原有 Excel 报表格式</p></div></div><div class="button-grid"><a class="report-button" id="month-download" href="#">📄 下载月报 Excel ↓</a><a class="report-button alt" id="year-download" href="#">📚 下载年报 Excel ↓</a></div><div class="report-note">ℹ️ 当前下载的是 Supabase Storage 中已上传的 Excel 文件，<strong>不会自动重新计算最新历史记录</strong>。若该月份或年份的报表尚未上传，系统会提示找不到文件。</div></section>
+<section class="report-card"><div class="section-top"><span class="icon">📥</span><div><h2>下载 Excel 报表</h2><p>保留原有 Excel 报表格式</p></div></div><div class="button-grid"><a class="report-button" id="month-download" href="#">📄 下载月报 Excel ↓</a><a class="report-button alt" id="year-download" href="#">📚 下载年报 Excel ↓</a></div><div class="report-note">ℹ️ 月报每次从 Supabase 实时生成，报名资料尚未核实，月明细报名栏显示「—」，不可据此判断报名异常。年报仍下载 Supabase Storage 中已上传的文件，不会自动更新。</div></section>
 <section class="report-card footer"><a href="{{ url_for('admin.admin_home') }}">← 返回管理员中心</a><a href="{{ url_for('reports.logout') }}">退出报表中心 ↗</a></section>
 <script>
 function updateReportLinks(){
@@ -90,6 +94,10 @@ def download(kind):
     if not 2020 <= year <= 2100 or (kind == 'month' and not 1 <= month <= 12):
         abort(400, description='年份或月份不正确')
 
+    if kind == 'month':
+        # 月报实时生成；年报仍使用原有 Supabase Storage 下载逻辑。
+        return _generate_live_month(year, month, download_name=f'{year}_{month:02d}_month_report.xlsx')
+
     # 与 upload_reports.py 的 make_remote_name() 保持一致。
     remote_name = (f'{year}_{month:02d}_month_report.xlsx'
                    if kind == 'month' else f'{year}_year_report.xlsx')
@@ -106,4 +114,56 @@ def download(kind):
         current_app.logger.warning('报表下载失败 %s: %s', remote_name, type(exc).__name__)
         abort(404, description=f'尚未找到 {remote_name}，请先从本地上传对应报表。')
     return send_file(BytesIO(payload), as_attachment=True, download_name=remote_name,
+                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
+@reports_bp.route('/preview-month', methods=['GET'])
+def preview_month():
+    """独立子进程试生成，避免原版引擎临时覆盖 pandas 方法影响其他请求。"""
+    if not _authorized():
+        abort(403)
+    try:
+        year = int(request.args.get('year', ''))
+        month = int(request.args.get('month', ''))
+    except (TypeError, ValueError):
+        abort(400, description='请选择正确的年月')
+    if not 2020 <= year <= 2099 or not 1 <= month <= 12:
+        abort(400, description='年月不正确')
+    return _generate_live_month(year, month, download_name=f'{year}_{month:02d}_云端月报_仅核对.xlsx')
+
+
+def _generate_live_month(year, month, download_name):
+    """复用已验证的试生成流程，仅更改下载文件名；不写数据库或 Storage。"""
+    from flask import current_app
+    root = Path(__file__).resolve().parent
+    script = root / 'reports_local_style_trial.py'
+    engine = root / 'reports_original_engine.py'
+    if not script.is_file() or not engine.is_file():
+        abort(503, description='试生成程序尚未安装')
+    with tempfile.TemporaryDirectory(prefix='gyt_preview_') as workdir:
+        # 生成结果只写临时目录；不会写入项目、Storage 或数据库。
+        code = ('from reports_local_style_trial import generate; '
+                f'generate({year}, {month})')
+        env = os.environ.copy()
+        env['PYTHONPATH'] = str(root) + os.pathsep + env.get('PYTHONPATH', '')
+        # Windows 子进程默认 GBK 无法输出原版引擎的 emoji；只调整本子进程编码。
+        env['PYTHONIOENCODING'] = 'utf-8'
+        env['PYTHONUTF8'] = '1'
+        try:
+            result = subprocess.run(
+                [sys.executable, '-c', code], cwd=workdir, env=env,
+                capture_output=True, text=True, timeout=90, check=False)
+        except subprocess.TimeoutExpired:
+            current_app.logger.warning('月报试生成超时 %s-%02d', year, month)
+            abort(503, description='试生成超时，请联系管理员核对日志')
+        if result.returncode != 0:
+            current_app.logger.error('月报试生成失败 %s-%02d: %s', year, month, result.stderr[-2000:])
+            abort(503, description='月报试生成未通过核对，请联系管理员检查日志')
+        path = Path(workdir) / f'{year}_{month:02d}_云端仿本地月报_仅核对.xlsx'
+        if not path.is_file():
+            abort(503, description='试生成没有输出预期的 Excel')
+        # 先读取到内存，再退出临时目录；send_file 不依赖临时文件继续存在。
+        payload = path.read_bytes()
+    return send_file(BytesIO(payload), as_attachment=True,
+                     download_name=download_name,
                      mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')

@@ -15,7 +15,7 @@ DUTY_PLACES = [
 ]
 
 
-def load_place_history_cache():
+def load_place_history_cache(target_date=None):
     """
     读取最近值班地点历史。
     只统计 role='值班'。
@@ -39,17 +39,24 @@ def load_place_history_cache():
                 where role = '值班'
                   and assigned_place in ('观音堂', '活动中心')
                   and volunteer_id is not null
+                  and coalesce(status, 'assigned') <> 'cancelled'
+                  and assignment_date < coalesce(%s::date, (now() at time zone 'Asia/Kuala_Lumpur')::date)
                 order by volunteer_id, assignment_date desc, id desc
-            """)
+            """, (str(target_date)[:10] if target_date else None,))
 
             rows = cur.fetchall()
 
+    seen_dates = set()
     for r in rows:
         volunteer_id = str(r.get("volunteer_id") or "").strip()
         place = r.get("assigned_place")
 
         if not volunteer_id or place not in DUTY_PLACES:
             continue
+        day_key = (volunteer_id, str(r.get('assignment_date'))[:10], place)
+        if day_key in seen_dates:
+            continue
+        seen_dates.add(day_key)
 
         if volunteer_id not in history:
             history[volunteer_id] = {

@@ -502,6 +502,13 @@ def edit_assigned_place(assignment_id):
     if not session.get("schedule_login"):
         return redirect(url_for("schedule.schedule_admin"))
 
+    # 从排班结果进入时，保存后回到同一天的排班结果。
+    return_date = request.values.get("return_date", "").strip()
+    try:
+        return_date = datetime.strptime(return_date, "%Y-%m-%d").strftime("%Y-%m-%d") if return_date else ""
+    except ValueError:
+        return_date = ""
+
     shift_options = ["绿班", "橙班", "黄班"]
     place_options = [
         "观音堂",
@@ -558,6 +565,8 @@ def edit_assigned_place(assignment_id):
 
                 mark_schedule_need_republish(assignment_date)
 
+                if return_date and return_date == str(assignment_date):
+                    return redirect(url_for("schedule.schedule_view_assigned", date=return_date))
                 return redirect("/schedule/signups")
 
             cur.execute("""
@@ -606,6 +615,7 @@ p { font-size:22px; }
 {% endif %}
 
 <form method="post">
+    <input type="hidden" name="return_date" value="{{ return_date }}">
 
     <label>班别</label>
     <select name="shift_label">
@@ -637,7 +647,11 @@ p { font-size:22px; }
 </form>
 
 <br>
+{% if return_date %}
+<form method="get" action="/schedule/view_assigned"><input type="hidden" name="date" value="{{ return_date }}"><button type="submit">⬅ 返回排班结果</button></form>
+{% else %}
 <a href="/schedule/signups">⬅ 返回报名管理</a>
+{% endif %}
 
 </div>
 </body>
@@ -645,7 +659,8 @@ p { font-size:22px; }
 """,
         row=row,
         shift_options=shift_options,
-        place_options=place_options
+        place_options=place_options,
+        return_date=return_date
     )
 
 
@@ -1018,47 +1033,70 @@ def build_signup_notice_whatsapp(date_str):
 
     greeting_time = "八点正请安" if big_day else "十点正请安"
 
+    # 19:00 报名通知：仅调整文字排版，不改变报名来源、分组或发送流程。
+    date_only = f"{date_obj.day}/{date_obj.month}/{date_obj.year}"
+    weekday_only = f"({weekday_map[date_obj.weekday()]})"
+    lunar_and_festival = ("\n\n" + "\n".join(
+        [f"（{lunar_label}）"] if lunar_label else []
+    )) if lunar_label else ""
+    if festival_names:
+        lunar_and_festival += "\n\n" + "\n".join(f"🙏 {name}" for name in festival_names)
+
     text = f"""师兄们大家好！
 
-{date_text}{special_heading}
+报名通知（初步名单）
+
+{date_only}
+
+{weekday_only}{lunar_and_festival}
 
 {greeting_time}
 
-{altar_start}~{altar_end}  或      
-{altar_start}~完成佛台工作 
-整理佛台: 
+［整理佛台］
+
+{altar_start}~{altar_end}  或
+{altar_start}~完成佛台工作
+
 {buddha_text}
 
-{setup_notice}{remove_notice}
-{cleaning_start}~{cleaning_end} 或 
-{cleaning_start}~完成卫生工作 
+{setup_notice}{remove_notice}［打扫卫生］
+
+{cleaning_start}~{cleaning_end} 或
+{cleaning_start}~完成卫生工作
+
 佛堂卫生: {"　".join(str(r.get("name") or "").strip() for r in groups["佛堂卫生"] if str(r.get("name") or "").strip())}
+
 二楼卫生: {"　".join(str(r.get("name") or "").strip() for r in groups["二楼卫生"] if str(r.get("name") or "").strip())}
+
 楼梯卫生: {"　".join(str(r.get("name") or "").strip() for r in groups["楼梯卫生"] if str(r.get("name") or "").strip())}
+
 每日卫生义工请注意：清理完卫生之后，请把卫生用具包括吸尘机放回原位（活动中心store里面的小房间）
 
-{green_section}10:00am~2:00pm 
-🟠 观音堂: 
+［值班］
+
+{green_section}10:00am~2:00pm
+
+🟠 观音堂:
 {format_duty_people(groups["橙观音堂"])}
 
-🟠 活动中心: 
+🟠 活动中心:
 {format_duty_people(groups["橙活动中心"])}
 
 
-2:00pm~6:00pm 
-🟡 观音堂: 
+2:00pm~6:00pm
+
+🟡 观音堂:
 {format_duty_people(groups["黄观音堂"])}
 
-🟡 活动中心: 
+🟡 活动中心:
 {format_duty_people(groups["黄活动中心"])}
 
+- 观音堂早晚香 由值班义工带领上香。
 
-观音堂早晚香 由值班义工带领上香。
-
-观音堂续香
+- 观音堂续香 -
 佛友可以续香（黑色无烟香），但是要跟着请安词，必须燃烧完了一支香才续香。如有多位佛友要续香，请先让给先到达观音堂的佛友，轮流续香。
 
-值班义工请注意
+！！值班义工请注意：
 1）下雨天记得关上烧送小房子的窗口。
 2）在离开观音堂之前，请确保把所有的窗口关上。
 3）观音堂第一架的冷气坚决不能调。第二架和第三架可以轮流。
@@ -1225,6 +1263,7 @@ def schedule_admin():
             elif item.get("type") == "buddhist_festival":
                 festival_label = "恩师卢军宏涅槃日" if "十月初六" in lunar_text or "十月初六" in "、".join(names) else ("、".join(names) if names else "佛诞日")
         item_display["festival_label"] = festival_label
+        item_display["date_weekday"] = (day.strftime("%m/%d") + "（" + "一二三四五六日"[day.weekday()] + "）") if day else ""
         item_display["scheduled_names"] = scheduled_by_date.get(day.isoformat(), []) if day else []
         supply_alerts_display.append(item_display)
     # 收供台日期独立于设供台日期，允许未来90天内的普通日。
@@ -1271,6 +1310,7 @@ def schedule_admin():
         food_offering_open=dashboard["food_offering_open"],
         records=dashboard["records"],
         pending_counts=dashboard["pending_counts"],
+        pending_tomorrow_label=(malaysia_today() + timedelta(days=1)).strftime("%Y-%m-%d") + "（" + "一二三四五六日"[(malaysia_today() + timedelta(days=1)).weekday()] + "）",
         pending_details=get_pending_signup_details() if mode == "day" else [],
         day_summary=dashboard["day_summary"],
         signup_details=signup_details,
@@ -2803,13 +2843,17 @@ def generate_shortage_notice():
     )
 
 
-@schedule_bp.route("/schedule/view_assigned", methods=["POST"])
+@schedule_bp.route("/schedule/view_assigned", methods=["GET", "POST"])
 def schedule_view_assigned():
 
     if not session.get("schedule_login"):
         return redirect(url_for("schedule.schedule_admin"))
 
-    date_str = request.form.get("date", "").strip()
+    date_str = request.values.get("date", "").strip()
+    try:
+        date_str = datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return "❌ 日期格式错误", 400
 
     rows = load_assigned_places_for_date(date_str)
 
@@ -2841,6 +2885,7 @@ def schedule_view_assigned():
     for r in rows:
         item = {
             "id": r["id"],
+            "volunteer_id": r.get("volunteer_id"),
             "name": r["name"],
             "role": r.get("role"),
             "shift_label": r.get("shift_label"),
@@ -2870,6 +2915,62 @@ def schedule_view_assigned():
         else:
             other_groups.setdefault(place, []).append(item)
 
+    # 仅合并查看排班页面的连续时段，不修改原始 assignments。
+    # 保留每段原始 ID，负责人仍可分别调整，避免只修改其中一段却误以为全部已改。
+    def _time_minutes(value):
+        import re
+        if value is None:
+            return None
+        if hasattr(value, "hour"):
+            return value.hour * 60 + value.minute
+        match = re.fullmatch(r"(\d{1,2}):(\d{2})\s*(am|pm)?", str(value).strip().lower())
+        if not match:
+            return None
+        hour, minute, suffix = int(match[1]), int(match[2]), match[3]
+        if minute > 59 or (suffix and not 1 <= hour <= 12) or (not suffix and hour > 23):
+            return None
+        if suffix:
+            hour = hour % 12 + (12 if suffix == "pm" else 0)
+        return hour * 60 + minute
+
+    for places in duty_groups.values():
+        for place, names in places.items():
+            by_person = {}
+            for item in names:
+                # 仅同一编号（缺编号时用姓名）及同一地点/班别才考虑合并。
+                key = str(item.get("volunteer_id") or item["name"]).strip()
+                by_person.setdefault(key, []).append(item)
+            display_rows = []
+            for person_rows in by_person.values():
+                valid, invalid = [], []
+                for item in person_rows:
+                    start = _time_minutes(item.get("start_time"))
+                    end = _time_minutes(item.get("end_time"))
+                    if start is None or end is None or start >= end:
+                        invalid.append(item)
+                    else:
+                        valid.append((start, end, item))
+                valid.sort(key=lambda entry: (entry[0], entry[1]))
+                merged = []
+                for start, end, item in valid:
+                    if merged and start <= merged[-1][1]:
+                        group = merged[-1]
+                        if end > group[1]:
+                            group[1] = end
+                            group[3] = item["end_time"]
+                        group[4].append(item["id"])
+                    else:
+                        merged.append([start, end, item["start_time"], item["end_time"], [item["id"]], item["name"]])
+                for start, end, start_text, end_text, ids, name in merged:
+                    display_rows.append({"name": name, "start_time": start_text,
+                                         "end_time": end_text, "edit_ids": ids,
+                                         "sort_time": start})
+                for item in invalid:
+                    display_rows.append({**item, "edit_ids": [item["id"]],
+                                         "sort_time": float("inf")})
+            display_rows.sort(key=lambda item: item["sort_time"])
+            places[place] = display_rows
+
     return render_template_string("""
     <!doctype html>
     <html>
@@ -2882,6 +2983,9 @@ def schedule_view_assigned():
           href="{{ url_for('static', filename='css/toolbox.css') }}">
 
     <style>
+    /* 排班结果：仅更换页面底色 */
+    body { background-color: #F5F1FC !important; }
+
     .assigned-wrap{
         max-width:1100px;
         margin:auto;
@@ -2998,7 +3102,7 @@ def schedule_view_assigned():
                                 </div>
 
                                 <a class="edit-link"
-                                href="/schedule/edit_assigned/{{ item.id }}">
+                                href="/schedule/edit_assigned/{{ item.id }}?return_date={{ date_str }}">
                                     ✏️ 调整
                                 </a>
                             </div>
@@ -3026,7 +3130,7 @@ def schedule_view_assigned():
                             </div>
 
                             <a class="edit-link"
-                            href="/schedule/edit_assigned/{{ item.id }}">
+                            href="/schedule/edit_assigned/{{ item.id }}?return_date={{ date_str }}">
                                 ✏️ 调整
                             </a>
                         </div>
@@ -3078,10 +3182,14 @@ def schedule_view_assigned():
                                         {% endif %}
                                     </div>
 
-                                    <a class="edit-link"
-                                    href="/schedule/edit_assigned/{{ item.id }}">
-                                        ✏️ 调整
-                                    </a>
+                                    <div>
+                                        {% for edit_id in item.edit_ids %}
+                                            <a class="edit-link"
+                                            href="/schedule/edit_assigned/{{ edit_id }}?return_date={{ date_str }}">
+                                                ✏️ 调整{% if item.edit_ids|length > 1 %}{{ loop.index }}{% endif %}
+                                            </a>
+                                        {% endfor %}
+                                    </div>
 
                                 </div>
                             {% endfor %}
@@ -3124,7 +3232,7 @@ def schedule_view_assigned():
                             </div>
 
                             <a class="edit-link"
-                            href="/schedule/edit_assigned/{{ item.id }}">
+                            href="/schedule/edit_assigned/{{ item.id }}?return_date={{ date_str }}">
                                 ✏️ 调整
                             </a>
 
@@ -4499,6 +4607,9 @@ def schedule_signups_manage():
           href="{{ url_for('static', filename='css/toolbox.css') }}">
 
     <style>
+    /* 报名管理：仅更换页面底色 */
+    body { background-color: #F0F8F1 !important; }
+
     .signup-admin-wrap{
         max-width:1280px;
         margin:auto;

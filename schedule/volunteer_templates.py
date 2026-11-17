@@ -26,6 +26,9 @@ VOLUNTEER_SIGNUP_HTML = """
       href="{{ url_for('static', filename='css/toolbox.css') }}">
 
 <style>
+/* 报名页：淡竹叶绿背景，保留原有卡片与按钮 */
+body { background-color: #F0F8F1 !important; }
+
 /* =========================
    Volunteer Signup V4
    只保留本页专用样式，其余交给 toolbox.css
@@ -305,12 +308,6 @@ VOLUNTEER_SIGNUP_HTML = """
             {% endif %}
 
         </div>
-
-        <a href="/volunteer/day_schedule?date={{ default_date }}"
-           class="btn-tool btn-blue btn-full"
-           style="display:flex;justify-content:center;text-align:center;margin:0 0 20px;font-size:25px;">
-            📋 查看完整值班表
-        </a>
 
         <div class="alert alert-warning">
             🌸 报名后将由系统安排岗位，必要时负责人会调整。<br>
@@ -776,7 +773,7 @@ function parseTimeToMinutes(value) {
         .toLowerCase()
         .replace(/\s+/g, "");
 
-    const match = text.match(/^([0-9]{1,2}):([0-9]{2})(am|pm)$/);
+    const match = text.match(/^(\d{1,2}):(\d{2})(am|pm)$/);
 
     if (!match) {
         return null;
@@ -1921,29 +1918,20 @@ function updateEndTimes() {
 
     if (!start || !end) return;
 
-    // 多日报名值班最迟到 6:00pm；结束时间必须晚于开始时间。
-    function minutes(value) {
-        const match = String(value).trim().toLowerCase().match(/^([0-9]{1,2}):([0-9]{2})(am|pm)$/);
-        if (!match) return null;
-        let hour = Number(match[1]) % 12;
-        if (match[3] === "pm") hour += 12;
-        return hour * 60 + Number(match[2]);
+    const startIndex = start.selectedIndex;
+
+    for (let i = 0; i < end.options.length; i++) {
+        if (i <= startIndex) {
+            end.options[i].hidden = true;
+            end.options[i].disabled = true;
+        } else {
+            end.options[i].hidden = false;
+            end.options[i].disabled = false;
+        }
     }
 
-    const startMinutes = minutes(start.value);
-    const latestEnd = 18 * 60;
-    for (const option of end.options) {
-        const endMinutes = minutes(option.value);
-        const unavailable = endMinutes === null ||
-            endMinutes > latestEnd ||
-            (startMinutes !== null && endMinutes <= startMinutes);
-        option.hidden = unavailable;
-        option.disabled = unavailable;
-    }
-
-    if (end.selectedOptions.length && end.selectedOptions[0].disabled) {
-        const firstAvailable = Array.from(end.options).find(option => !option.disabled);
-        if (firstAvailable) end.value = firstAvailable.value;
+    if (end.selectedIndex <= startIndex) {
+        end.selectedIndex = startIndex + 1;
     }
 }
 
@@ -1958,15 +1946,6 @@ function goMonthlySignupList() {
 document.addEventListener("DOMContentLoaded", function () {
 
     updateCalendar();
-    // 多日报名值班默认 10:00am 至 6:00pm。
-    const defaultStart = document.getElementById("start_time");
-    const defaultEnd = document.getElementById("end_time");
-    if (defaultStart && Array.from(defaultStart.options).some(o => o.value === "10:00am")) {
-        defaultStart.value = "10:00am";
-    }
-    if (defaultEnd && Array.from(defaultEnd.options).some(o => o.value === "6:00pm")) {
-        defaultEnd.value = "6:00pm";
-    }
     toggleTimeFields();
 
     document.getElementById("year").addEventListener("change", reloadPrebookPage);

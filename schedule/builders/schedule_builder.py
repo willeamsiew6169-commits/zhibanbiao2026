@@ -8,6 +8,13 @@ import threading
 import pandas as pd
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+
+def malaysia_today():
+    """取得马来西亚当地日期，供现有卫生排班默认日期使用。"""
+    return datetime.now(ZoneInfo("Asia/Kuala_Lumpur")).date()
+
 from db import get_db, db_query, get_conn
 from psycopg2.extras import RealDictCursor
 from sqlalchemy import create_engine, text
@@ -202,6 +209,44 @@ def patch_schedule_for_date(date_str, only_signup_id=None):
     """
 
     try:
+        # V2 单笔值班补排：只安排本次报名，已有排班仅作不可变参考。
+        if only_signup_id is not None:
+            signup = db_query("""
+                select id, volunteer_id, name, signup_date, role,
+                       start_time, end_time, status
+                from volunteer_schedule_signups
+                where id=%s and signup_date=%s
+                  and coalesce(status,'pending') <> 'cancelled'
+            """, (int(only_signup_id), date_str), fetchone=True)
+            if signup and signup.get('role') == '值班':
+                from schedule.builders.duty_v2 import plan
+                existing = db_query("""
+                    select volunteer_id, assigned_place, start_time, end_time
+                    from volunteer_schedule_assignments
+                    where assignment_date=%s and role='值班'
+                      and assigned_place in ('观音堂','活动中心')
+                      and coalesce(status,'assigned') <> 'cancelled'
+                """, (date_str,), fetchall=True) or []
+                # 已有同报名的排班：不重复补入、不更改其已公布的时段。
+                existing_signup = db_query("""
+                    select id from volunteer_schedule_assignments
+                    where assignment_date=%s and role='值班' and signup_id=%s
+                      and coalesce(status,'assigned') <> 'cancelled' limit 1
+                """, (date_str, int(only_signup_id)), fetchone=True)
+                if existing_signup:
+                    return 0
+                person = {'signup_id': int(only_signup_id),
+                          'volunteer_id': signup.get('volunteer_id'),
+                          'name': signup.get('name'),
+                          'start_time': signup.get('start_time'),
+                          'end_time': signup.get('end_time')}
+                arranged = plan([person], existing=existing,
+                                history=load_place_history_cache())
+                target_rows = [dict(item, assigned_place=key[1:],
+                                    shift_label=key[0]) for key,item in arranged]
+                return sync_patch_assignments(date_str, target_rows,
+                                              only_signup_id=only_signup_id)
+
         # 单笔值班补排即使整日计算失败，也必须继续尝试单人安全补排。
         # 例如 fixed_schedule.xlsx 缺失时，不能让当天报名永久停在 pending。
         assigned_rows = []
@@ -661,37 +706,85 @@ def sync_schedule_after_signup_change(signup_id, action="upsert", changed_by="sy
 
         return deleted_count
 
-    # ✅ 发布后修改 / 新增：
-    # 先删除这个人的旧 assignment，再重新 patch 这个人
-    deleted = db_query("""
-        delete from volunteer_schedule_assignments
-        where signup_id = %s
-        and coalesce(locked_by_admin, false) = false
-        returning id
-    """, (int(signup_id),), fetchall=True)
-
-    deleted_count = len(deleted or [])
-
-    inserted_count = patch_schedule_for_date(
-        date_str,
-        only_signup_id=int(signup_id)
-    )
-
-    print(
-        "✅ sync 完成：",
-        signup_id,
-        signup.get("name"),
-        "旧 assignment 删除：",
-        deleted_count,
-        "新 assignment 新增：",
-        inserted_count
-    )
+    # V2 安全替换：在同一事务中计算、删除及写入；失败时自动回滚。
+    try:
+        inserted_count, deleted_count = _replace_duty_signup_atomic(int(signup_id), date_str)
+    except Exception as exc:
+        print("❌ V2 报名替换失败，原排班已回滚保留：", repr(exc))
+        traceback.print_exc()
+        return 0
 
     if published and (deleted_count > 0 or inserted_count > 0):
         mark_schedule_need_republish(date_str)
-
     return inserted_count
     
+def _replace_duty_signup_atomic(signup_id, date_str):
+    """只替换本报名的非锁定值班记录；整个替换在同一事务中完成。"""
+    from schedule.builders.duty_v2 import plan
+
+    # 历史只读，不能在事务中触发另一条连接写入。
+    history = load_place_history_cache(target_date=date_str)
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 同一天的值班补排串行化，避免两笔报名并发读到相同空位。
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("duty:" + str(date_str),))
+            cur.execute("""
+                SELECT id, volunteer_id, name, start_time, end_time, role, status
+                FROM volunteer_schedule_signups
+                WHERE id=%s AND signup_date=%s FOR UPDATE
+            """, (signup_id, date_str))
+            signup = cur.fetchone()
+            if not signup or signup['role'] != '值班' or signup.get('status') == 'cancelled':
+                raise ValueError('报名不存在、不是值班或已取消')
+
+            cur.execute("""
+                SELECT id, signup_id, volunteer_id, assigned_place, start_time, end_time,
+                       COALESCE(locked_by_admin,false) AS locked_by_admin
+                FROM volunteer_schedule_assignments
+                WHERE assignment_date=%s AND role='值班'
+                  AND COALESCE(status,'assigned') <> 'cancelled'
+                FOR UPDATE
+            """, (date_str,))
+            old_rows = cur.fetchall()
+            target = [r for r in old_rows if r.get('signup_id') is not None
+                      and int(r['signup_id']) == signup_id]
+            if any(r['locked_by_admin'] for r in target):
+                # 管理员锁定的安排绝对不能自动覆盖。
+                return 0, 0
+            existing = [r for r in old_rows if r not in target]
+            person = dict(signup)
+            person['signup_id'] = signup_id
+            arranged = plan([person], existing=existing, history=history)
+            if not arranged:
+                raise ValueError('V2 未能生成有效值班安排，保留原有记录')
+
+            # 只删除本报名；所有 INSERT 成功后才提交事务。
+            cur.execute("""
+                DELETE FROM volunteer_schedule_assignments
+                WHERE assignment_date=%s AND role='值班' AND signup_id=%s
+                  AND COALESCE(locked_by_admin,false)=false
+                RETURNING id
+            """, (date_str, signup_id))
+            deleted_count = len(cur.fetchall())
+            for key, item in arranged:
+                cur.execute("""
+                    INSERT INTO volunteer_schedule_assignments
+                      (signup_id, volunteer_id, name, assignment_date, role,
+                       shift_label, assigned_place, start_time, end_time,
+                       status, remarks, assignment_source, locked_by_admin)
+                    VALUES (%s,%s,%s,%s,'值班',%s,%s,%s,%s,
+                            'assigned','发布后自动补排','system',false)
+                """, (signup_id, signup['volunteer_id'], signup['name'], date_str,
+                      key[0], key[1:], item['start_time'], item['end_time']))
+            cur.execute("""
+                UPDATE volunteer_schedule_signups
+                SET status='assigned'
+                WHERE id=%s AND COALESCE(status,'pending') <> 'cancelled'
+            """, (signup_id,))
+        conn.commit()
+    return len(arranged), deleted_count
+
+
 def repair_unassigned_duty_for_date(date_str):
     """只补指定日期缺漏的值班报名，不重排已有义工；可重复安全执行。
 
@@ -991,182 +1084,19 @@ def sync_patch_assignments(date_str, assigned_rows, only_signup_id=None):
     return len(new_rows)
 
 def auto_assign_new_duty(result):
-    """
-    发布后自动补排：
-    - 4小时或以上：拆成两段，前半段一个地方，后半段换地方
-    - 少过4小时：不拆，整段安排去人数少的地方
-    """
-
-    duty_keys = [
-        "绿观音堂", "绿活动中心",
-        "橙观音堂", "橙活动中心",
-        "黄观音堂", "黄活动中心",
-    ]
-
-    cleaning_place_by_name = {}
-
-    place_history_cache = load_place_history_cache()
-
-    def choose_place_for_item(shift, item, preferred_place=None):
-
-        if isinstance(item, dict):
-            item["_place_history_cache"] = place_history_cache
-
-        return calculate_best_place(
-            shift=shift,
-            item=item,
-            preferred_place=preferred_place,
-            cleaning_place_by_name=cleaning_place_by_name,
-            choose_less_place_func=choose_less_place,
-        )
-
-    def get_start(item):
-        return item.get("start_time") or item.get("开始时间")
-
-    def get_end(item):
-        return item.get("end_time") or item.get("结束时间")
-    
-    def get_volunteer_id(item):
-        return str(
-            item.get("volunteer_id")
-            or item.get("编号")
-            or ""
-        ).strip()
-
-   
-    def shift_of(start_min):
-        if start_min < 10 * 60:
-            return "绿"
-        if start_min < 14 * 60:
-            return "橙"
-        return "黄"
-
-    def make_key(shift, place):
-        return f"{shift}{place}"
-
-    def make_item(item, start_txt, end_txt):
-        new_item = dict(item)
-        new_item["start_time"] = start_txt
-        new_item["end_time"] = end_txt
-        new_item["开始时间"] = start_txt
-        new_item["结束时间"] = end_txt
-        new_item["role"] = "值班"
-        new_item["岗位"] = "值班"
-        return new_item
-
-    def place_count(shift, place):
-        return len(result.get(make_key(shift, place), []))
-
-    def choose_less_place(shift, item):
-        # 按本次义工的实际时间比较两地点覆盖人数，避免整班人数掩盖空岗。
-        start = parse_min(get_start(item))
-        end = parse_min(get_end(item))
-        if start is None or end is None or end <= start:
-            return None
-
-        def coverage(place):
-            intervals = []
-            for existing in result.get(make_key(shift, place), []):
-                a = parse_min(get_start(existing))
-                b = parse_min(get_end(existing))
-                if a is not None and b is not None and b > start and a < end:
-                    intervals.append((max(start, a), min(end, b)))
-            # 按覆盖的分钟数计算；无人覆盖的时段优先补人。
-            return sum(b - a for a, b in intervals)
-
-        gyt = coverage("观音堂")
-        act = coverage("活动中心")
-        if gyt < act:
-            return "观音堂"
-        if act < gyt:
-            return "活动中心"
-        return None
-
-    def opposite_place(place):
-        return "活动中心" if place == "观音堂" else "观音堂"
-
-    duty_pool = []
-
+    """V2：覆盖优先、历史公平、按需换岗；仅处理本次 result 的值班人员。"""
+    from schedule.builders.duty_v2 import plan
+    duty_keys = [f"{shift}{place}" for shift in ("绿", "橙", "黄")
+                 for place in ("观音堂", "活动中心")]
+    pool = [dict(person) for key in duty_keys for person in result.get(key, [])
+            if isinstance(person, dict)]
+    # 历史仅作次级决策，不改变数据库中的任何历史记录。
+    history = load_place_history_cache()
+    rows = plan(pool, history=history)
     for key in duty_keys:
-        for item in result.get(key, []):
-            s = parse_min(get_start(item))
-            e = parse_min(get_end(item))
-
-            if s is not None and e is not None and e > s:
-                duty_pool.append(item)
-
         result[key] = []
-
-    duty_pool.sort(
-        key=lambda item: (
-            parse_min(get_start(item)) or 9999,
-            parse_min(get_end(item)) or 9999,
-            item.get("name") or item.get("姓名") or ""
-        )
-    )
-
-    for item in duty_pool:
-        s = parse_min(get_start(item))
-        e = parse_min(get_end(item))
-
-        if s is None or e is None or e <= s:
-            continue
-
-        duration = e - s
-
-        if duration >= 4 * 60:
-            mid = choose_split_time(s, e)
-
-            first_shift = shift_of(s)
-            first_place = choose_place_for_item(
-                first_shift,
-                item
-            )
-
-            second_shift = shift_of(mid)
-            second_place = opposite_place(first_place)
-
-            result[make_key(first_shift, first_place)].append(
-                make_item(item, min_to_ampm(s), min_to_ampm(mid))
-            )
-
-            vid = get_volunteer_id(item)
-
-            update_place_history_cache(
-                vid,
-                first_place,
-                place_history_cache
-            )
-
-            result[make_key(second_shift, second_place)].append(
-                make_item(item, min_to_ampm(mid), min_to_ampm(e))
-            )
-
-            update_place_history_cache(
-                vid,
-                second_place,
-                place_history_cache
-            )
-            
-        else:
-            shift = shift_of(s)
-            place = choose_place_for_item(
-                shift,
-                item
-            )
-
-            result[make_key(shift, place)].append(
-                make_item(item, min_to_ampm(s), min_to_ampm(e))
-            )
-
-            vid = get_volunteer_id(item)
-
-            update_place_history_cache(
-                vid,
-                place,
-                place_history_cache
-            )
-
+    for key, person in rows:
+        result[key].append(person)
     return result
 
 
@@ -2519,292 +2449,22 @@ def assign_jobs(fixed_people, signup_df, special_info, patch_mode=False, cleanin
 
     
 def auto_assign_duty(result):
-    def parse_min(t):
-        if not t:
-            return None
-
-        s = str(t).strip().lower().replace(" ", "")
-
-        if re.match(r"^\d{1,2}(am|pm)$", s):
-            s = s.replace("am", ":00am").replace("pm", ":00pm")
-
-        for fmt in ("%H:%M", "%H:%M:%S", "%I:%M%p"):
-            try:
-                dt = datetime.strptime(s, fmt)
-                return dt.hour * 60 + dt.minute
-            except:
-                pass
-
-        return None
-
-    def min_to_ampm(m):
-        hour = m // 60
-        minute = m % 60
-        suffix = "am" if hour < 12 else "pm"
-        hour12 = hour % 12 or 12
-        return f"{hour12}:{minute:02d}{suffix}"
-
-    def get_name(item):
-        if isinstance(item, dict):
-            return item.get("name") or item.get("姓名")
-        if isinstance(item, (list, tuple)):
-            return item[0] if item else None
-        return str(item) if item else None
-
-    def get_start(item):
-        if isinstance(item, dict):
-            return item.get("start_time") or item.get("开始时间")
-        if isinstance(item, (list, tuple)):
-            return item[1] if len(item) > 1 else None
-        return None
-
-    def get_end(item):
-        if isinstance(item, dict):
-            return item.get("end_time") or item.get("结束时间")
-        if isinstance(item, (list, tuple)):
-            return item[2] if len(item) > 2 else None
-        return None
-
-    def get_volunteer_id(item):
-        if isinstance(item, dict):
-            return str(
-                item.get("volunteer_id")
-                or item.get("编号")
-                or ""
-            ).strip()
-        return ""
-
-    def make_item(item, start_txt, end_txt):
-        if isinstance(item, dict):
-            new_item = dict(item)
-        else:
-            name = get_name(item)
-            new_item = {
-                "name": name,
-                "姓名": name,
-                "signup_id": None,
-                "volunteer_id": None,
-            }
-
-        new_item["start_time"] = start_txt
-        new_item["end_time"] = end_txt
-        new_item["开始时间"] = start_txt
-        new_item["结束时间"] = end_txt
-        new_item["role"] = "值班"
-        new_item["岗位"] = "值班"
-        return new_item
-
-    def shift_of(start_min):
-        if start_min < 10 * 60:
-            return "绿"
-        if start_min < 14 * 60:
-            return "橙"
-        return "黄"
-
-    def make_key(shift, place):
-        return f"{shift}{place}"
-
-    def place_load(key):
-        total = 0
-        for item in result.get(key, []):
-            s = parse_min(get_start(item))
-            e = parse_min(get_end(item))
-            if s is not None and e is not None and e > s:
-                total += e - s
-        return total
-
-    def choose_less_place(shift, item):
-        # 按本次义工的实际时间比较两地点覆盖人数，避免整班人数掩盖空岗。
-        start = parse_min(get_start(item))
-        end = parse_min(get_end(item))
-        if start is None or end is None or end <= start:
-            return None
-
-        def coverage(place):
-            intervals = []
-            for existing in result.get(make_key(shift, place), []):
-                a = parse_min(get_start(existing))
-                b = parse_min(get_end(existing))
-                if a is not None and b is not None and b > start and a < end:
-                    intervals.append((max(start, a), min(end, b)))
-            # 按覆盖的分钟数计算；无人覆盖的时段优先补人。
-            return sum(b - a for a, b in intervals)
-
-        gyt = coverage("观音堂")
-        act = coverage("活动中心")
-        if gyt < act:
-            return "观音堂"
-        if act < gyt:
-            return "活动中心"
-        return None
-
-    def choose_place_by_rotation(volunteer_id):
-        counts = get_recent_place_counts(volunteer_id)
-
-        gyt_count = counts["观音堂"]
-        act_count = counts["活动中心"]
-
-        if gyt_count > act_count:
-            return "活动中心"
-
-        if act_count > gyt_count:
-            return "观音堂"
-
-        return None
-    
-    def get_cleaning_place_by_name():
-        mapping = {}
-
-        for key in ["佛堂卫生", "二楼卫生", "楼梯卫生"]:
-            for item in result.get(key, []):
-                name = get_name(item)
-                if name and name not in mapping:
-                    # 楼梯共同协助不覆盖个人主要卫生岗位，避免影响值班分配。
-                    mapping[name] = key
-
-        return mapping
-
-    def opposite_place(place):
-        return "活动中心" if place == "观音堂" else "观音堂"
-        
-    cleaning_place_by_name = get_cleaning_place_by_name()
-    place_history_cache = load_place_history_cache()
-
-    def choose_place_for_item(shift, item, preferred_place=None):
-
-        if isinstance(item, dict):
-            item["_place_history_cache"] = place_history_cache
-
-        return calculate_best_place(
-            shift=shift,
-            item=item,
-            preferred_place=preferred_place,
-            cleaning_place_by_name=cleaning_place_by_name,
-            choose_less_place_func=choose_less_place,
-        )
-       
-    duty_keys = [
-        "绿观音堂", "绿活动中心",
-        "橙观音堂", "橙活动中心",
-        "黄观音堂", "黄活动中心",
-    ]
-
-    duty_pool = []
-
-    for key in duty_keys:
-        for item in result.get(key, []):
-            s = parse_min(get_start(item))
-            e = parse_min(get_end(item))
-
-            if s is None or e is None or e <= s:
-                continue
-
-            duty_pool.append({
-                "name": get_name(item),
-                "start": s,
-                "end": e,
-                "duration": e - s,
-                "raw": item,
-            })
-
+    """V2：覆盖优先、历史公平、按需换岗；仅处理本次 result 的值班人员。"""
+    from schedule.builders.duty_v2 import plan
+    duty_keys = [f"{shift}{place}" for shift in ("绿", "橙", "黄")
+                 for place in ("观音堂", "活动中心")]
+    pool = [dict(person) for key in duty_keys for person in result.get(key, [])
+            if isinstance(person, dict)]
+    # 历史仅作次级决策，不改变数据库中的任何历史记录。
+    history = load_place_history_cache()
+    rows = plan(pool, history=history)
     for key in duty_keys:
         result[key] = []
-
-    duty_pool.sort(
-        key=lambda x: (
-            x["start"],
-            -x["duration"],
-            x["name"] or ""
-        )
-    )
-
-    for p in duty_pool:
-        s = p["start"]
-        e = p["end"]
-        duration = p["duration"]
-        raw = p["raw"]
-
-        if duration >= 4 * 60:
-
-            # 真人排班习惯：长班尽量切在整点
-            mid = choose_split_time(s, e)
-
-            first_shift = shift_of(s)
-            first_place = choose_place_for_item(first_shift, raw)
-
-            second_shift = shift_of(mid)
-            second_place = opposite_place(first_place)
-
-            first_item = make_item(raw, min_to_ampm(s), min_to_ampm(mid))
-            second_item = make_item(raw, min_to_ampm(mid), min_to_ampm(e))
-
-            result[make_key(first_shift, first_place)].append(first_item)
-            result[make_key(second_shift, second_place)].append(second_item)
-
-            vid = get_volunteer_id(raw)
-
-            update_place_history_cache(vid, first_place, place_history_cache)
-            update_place_history_cache(vid, second_place, place_history_cache)
-
-        else:
-            shift = shift_of(s)
-            place = choose_place_for_item(shift, raw)
-
-            item = make_item(raw, min_to_ampm(s), min_to_ampm(e))
-            result[make_key(shift, place)].append(item)
-            vid = get_volunteer_id(raw)
-
-            update_place_history_cache(vid, place, place_history_cache)
-
-    # 地点覆盖优先：仅在尚未发布的完整自动排班中调整地点。
-    # 不更改任何义工的报名时段、拆段或工作时数；只在减少无人值班分钟数时移动。
-    for shift, window_start, window_end in (("橙", 600, 840), ("黄", 840, 1080)):
-        hall_key = make_key(shift, "观音堂")
-        center_key = make_key(shift, "活动中心")
-
-        def uncovered_minutes():
-            total = 0
-            for key in (hall_key, center_key):
-                intervals = []
-                for person in result.get(key, []):
-                    a, b = parse_min(get_start(person)), parse_min(get_end(person))
-                    if a is not None and b is not None and b > a:
-                        intervals.append((max(window_start, a), min(window_end, b)))
-                cursor = window_start
-                for a, b in sorted(intervals):
-                    if b <= cursor or a >= window_end:
-                        continue
-                    total += max(0, a - cursor)
-                    cursor = max(cursor, min(window_end, b))
-                total += max(0, window_end - cursor)
-            return total
-
-        # 单调减少空岗分钟数，保证不会来回搬动或陷入循环。
-        while True:
-            before = uncovered_minutes()
-            best = None
-            best_gain = 0
-            for source, target in ((hall_key, center_key), (center_key, hall_key)):
-                for index, person in enumerate(result.get(source, [])):
-                    # 保留现有固定地点例外规则。
-                    if get_volunteer_id(person).upper() == "STW-152":
-                        continue
-                    moved = result[source].pop(index)
-                    result[target].append(moved)
-                    gain = before - uncovered_minutes()
-                    result[target].pop()
-                    result[source].insert(index, moved)
-                    if gain > best_gain:
-                        best_gain = gain
-                        best = (source, target, index)
-            if best is None:
-                break
-            source, target, index = best
-            result[target].append(result[source].pop(index))
-
+    for key, person in rows:
+        result[key].append(person)
     return result
 
-    
+
 def get_recent_place_counts(volunteer_id):
     """
     读取这位义工最近 N 次值班地点。
@@ -2936,271 +2596,22 @@ def format_shift_block(items):
     return "\n".join(lines)
 
 
-def _compact_whatsapp_message(message):
-    """只压缩多余空行，不修改义工名单、岗位或注意事项。"""
-    lines = [line.strip() for line in message.splitlines()]
-    message = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip() + "\n"
-    # WhatsApp 排版：同一时段的「活动中心」与「观音堂」之间空一行。
-    message = re.sub(
-        r"(?m)(?<!\n)\n(?=(?:🟢|🟠|🔴|🟡)?[ \t]*活动中心:)",
-        "\n\n", message,
-    )
-    # 主要值班时段之间空两行；不改变姓名、个人时间和其他段落。
-    message = re.sub(
-        r"\n{2}(?=(?:8:00am~10:00am|🟢 8:00am~10:00am|10:00am~2:00pm|2:00pm~6:00pm)[ \t]*\n)",
-        "\n\n\n", message,
-    )
-    return message
-
-
-def get_display_name(p):
-    if isinstance(p, dict):
-        return p.get("name") or p.get("姓名") or ""
-    if isinstance(p, (list, tuple)):
-        return p[0] if p else ""
-    return str(p or "")
+def _build_unified_roster_message(date_obj, arranged, special_info, remove_info, kind):
+    """统一从 WhatsApp 文案中心取格式；保留原有函数入口。"""
+    from schedule.services.whatsapp_message_templates import build_roster_message
+    return build_roster_message(date_obj, arranged, special_info, remove_info, kind)
 
 
 def build_normal_message(date_obj, arranged, special_info, remove_info):
-    weekday = get_weekday_name(date_obj)
-    date_text = f"{date_obj.day}/{date_obj.month}/{date_obj.year}"
-
-    setup_people = arranged.get("设师父供台", [])
-    remove_people = arranged.get("收师父供台", [])
-
-    setup_master = format_people_inline(setup_people)
-    remove_master = format_people_inline(remove_people)
-
-    master_section = ""
-
-    # 自动需要设供台，或负责人已安排设供台人员，都必须显示。
-    if special_info.get("setup_shifu") or setup_master:
-
-        if not setup_master:
-            setup_master = "待安排"
-
-        master_section += f"""
-    6:00am~8:00am
-    设师父供台:
-    {setup_master}
-    """
-
-    # 自动判断需要收供台
-    if remove_info.get("need_remove_today_after_12") or remove_master:
-
-        if not remove_master:
-            remove_master = "待安排"
-
-        master_section += f"""
-    12:00pm~2:00pm
-    收师父供台:
-    {remove_master}
-    12pm的香结束之后，请下供桌。
-    """
-
-    green_section = ""
-
-    if arranged.get("绿观音堂") or arranged.get("绿活动中心"):
-        green_section = f"""
-🟢 绿班
-🟢 观音堂:
-{format_shift_block(arranged.get("绿观音堂", []))}
-🟢 活动中心:
-{format_shift_block(arranged.get("绿活动中心", []))}
-"""
-
-    msg = f"""师兄们大家好！
-
-{date_text} ({weekday}) 
-
-十点正请安
-
-8:00am~完成佛台工作 
-整理佛台: 
-{format_people_inline(arranged.get("整理佛台", []))}
-
-{master_section}
-8:00am~完成卫生工作 
-佛堂卫生: {format_people_inline(arranged.get("佛堂卫生", []))}
-二楼卫生: {format_people_inline(arranged.get("二楼卫生", []))}
-楼梯卫生: {format_people_inline(arranged.get("楼梯卫生", []), sep="/")}
-每日卫生义工请注意：清理完卫生之后，请把卫生用具包括吸尘机放回原位（活动中心store里面的小房间）
-
-{green_section}
-
-10:00am~2:00pm 
-🟠 观音堂: 
-{format_shift_block(arranged.get("橙观音堂", []))}
-🟠 活动中心: 
-{format_shift_block(arranged.get("橙活动中心", []))}
-
-2:00pm~6:00pm 
-🟡 观音堂: 
-{format_shift_block(arranged.get("黄观音堂", []))}
-🟡 活动中心: 
-{format_shift_block(arranged.get("黄活动中心", []))}
-
-观音堂早晚香 由值班义工带领上香。
-
-观音堂续香
-佛友可以续香（黑色无烟香），但是要跟着请安词，必须燃烧完了一支香才续香。如有多位佛友要续香，请先让给先到达观音堂的佛友，轮流续香。
-
-值班义工请注意
-1）下雨天记得关上烧送小房子的窗口。
-2）在离开观音堂之前，请确保把所有的窗口关上。
-3）观音堂第一架的冷气坚决不能调。第二架和第三架可以轮流。
-
-另外，请大家多留意义工群信息，以便大家能够团结一致的护持好观音堂。佛子齐心，普度众生。
-
-义工报名请点击以下链接：
-{VOLUNTEER_SIGNUP_URL}
-
-非常感恩大家！
-大家功德无量！
-🙏🙏🙏
-"""
-    return _compact_whatsapp_message(msg)
+    return _build_unified_roster_message(date_obj, arranged, special_info, remove_info, "normal")
 
 
 def build_lunar_1_15_message(date_obj, arranged, special_info, remove_info):
-    weekday = get_weekday_name(date_obj)
-    date_text = f"{date_obj.day}/{date_obj.month}/{date_obj.year}"
-    lunar_text = special_info.get("lunar_text", "")
-
-    msg = f"""师兄们，大家好！
-
-{date_text} ({weekday}) 
-
-{lunar_text}
-
-八点正请安 
-
-6:00am~完成佛台工作 
-整理佛台:  
-{format_people_inline(arranged["整理佛台"])}
-
-{build_master_table_section(arranged)}
-
-6:00am~完成卫生工作 
-佛堂卫生: {format_people_inline(arranged["佛堂卫生"])}
-二楼卫生: {format_people_inline(arranged["二楼卫生"])}
-楼梯卫生: {format_people_inline(arranged["楼梯卫生"], sep="/")}
-每日卫生义工请注意：清理完卫生之后，请把卫生用具包括吸尘机放回原位（活动中心store里面的小房间）
-
-🟢 8:00am~10:00am
-每个岗位1位师兄
-观音堂:
-{format_shift_block(arranged["绿观音堂"])}
-活动中心:
-{format_shift_block(arranged["绿活动中心"])}
-
-10:00am~2:00pm 
-🟠 观音堂: 
-{format_shift_block(arranged["橙观音堂"])}
-🟠 活动中心: 
-{format_shift_block(arranged["橙活动中心"])}
-
-2:00pm~6:00pm 
-🟡 观音堂: 
-{format_shift_block(arranged["黄观音堂"])}
-🟡 活动中心: 
-{format_shift_block(arranged["黄活动中心"])}
-
-观音堂早晚香
-由值班义工带领上香。
-
-观音堂续香
-佛友可以续香（黑色无烟香），但是要跟着请安词，必须燃烧完了一支香才续香。如有多位佛友要续香，请先让给先到达观音堂的佛友，轮流续香。
-
-值班义工请注意
-1）下雨天记得关上烧送小房子的窗口。
-2）在离开观音堂之前，请确保把所有的窗口关上。
-3）观音堂第一架的冷气坚决不能调。第二架和第三架可以轮流。
-
-另外，请大家多留意义工群信息，以便大家能够团结一致的护持好观音堂。佛子齐心，普度众生。
-
-义工报名请点击以下链接：
-{VOLUNTEER_SIGNUP_URL}
-
-非常感恩大家！
-大家功德无量！
-🙏🙏🙏
-"""
-    return _compact_whatsapp_message(msg)
+    return _build_unified_roster_message(date_obj, arranged, special_info, remove_info, "lunar")
 
 
 def build_buddhist_festival_message(date_obj, arranged, special_info, remove_info):
-    weekday = get_weekday_name(date_obj)
-    date_text = f"{date_obj.day}/{date_obj.month}/{date_obj.year}"
-    lunar_text = special_info.get("lunar_text", "")
-    festival_text = "\n".join(special_info.get("special_names", []))
-
-    remove_notice = ""
-    if remove_info["need_remove_today_after_12"]:
-        remove_notice = "今日中午12点后请记得撤供台。\n\n"
-
-    msg = f"""师兄们，大家好！
-
-{date_text} ({weekday}) 
-
-{lunar_text}
-
-{festival_text}
-
-八点正请安 
-
-6:00am~完成佛台工作
-整理佛台: 
-{format_people_inline(arranged["整理佛台"])}
-
-{build_master_table_section(arranged)}
-
-6:00am~完成卫生工作 
-佛堂卫生: {format_people_inline(arranged["佛堂卫生"])}
-二楼卫生: {format_people_inline(arranged["二楼卫生"])}
-楼梯卫生: {format_people_inline(arranged["楼梯卫生"], sep="/")}
-每日卫生义工请注意：清理完卫生之后，请把卫生用具包括吸尘机放回原位（活动中心store里面的小房间）
-
-8:00am~10:00am
-每个岗位1位师兄
-观音堂:
-{format_shift_block(arranged["绿观音堂"])}
-活动中心:
-{format_shift_block(arranged["绿活动中心"])}
-
-10:00am~2:00pm 
-🔴 观音堂: 
-{format_shift_block(arranged["橙观音堂"])}
-🔴 活动中心: 
-{format_shift_block(arranged["橙活动中心"])}
-
-2:00pm~6:00pm 
-🟡 观音堂: 
-{format_shift_block(arranged["黄观音堂"])}
-🟡 活动中心: 
-{format_shift_block(arranged["黄活动中心"])}
-
-观音堂早晚香
-由值班义工带领上香。
-
-观音堂续香
-佛友可以续香（黑色无烟香），但是要跟着请安词，必须燃烧完了一支香才续香。如有多位佛友要续香，请先让给先到达观音堂的佛友，轮流续香。
-
-值班义工请注意
-1）下雨天记得关上烧送小房子的窗口。
-2）在离开观音堂之前，请确保把所有的窗口关上。
-3）观音堂第一架的冷气坚决不能调。第二架和第三架可以轮流。
-
-另外，请大家多留意义工群信息，以便大家能够团结一致的护持好观音堂。佛子齐心，普度众生。
-
-义工报名请点击以下链接：
-{VOLUNTEER_SIGNUP_URL}
-
-{remove_notice}非常感恩大家！
-大家功德无量！
-🙏🙏🙏
-"""
-    return _compact_whatsapp_message(msg)
+    return _build_unified_roster_message(date_obj, arranged, special_info, remove_info, "festival")
 
 
 def main():
@@ -3516,6 +2927,17 @@ def merge_and_publish_2200_atomic(target_date, proposed_rows=None):
     return {'date': target, 'status': 'published', 'inserted': len(additions)}
 
 
+def _capture_2200_baseline_in_transaction(cur, target):
+    """首次快照与自动发布同事务提交；失败则自动发布整体回滚。"""
+    import json
+    from schedule.services.whatsapp_morning_summary import _assignments, _key
+    cur.execute('SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))',
+                ('gyt_morning_baseline', target))
+    rows = _assignments(cur, target)
+    cur.execute('''INSERT INTO whatsapp_morning_snapshots(target_date, baseline)
+        VALUES (%s, %s::jsonb) ON CONFLICT(target_date) DO NOTHING''',
+        (target, json.dumps([list(_key(r)) for r in rows], ensure_ascii=False)))
+
 # 22:00 complete automatic scheduling, atomic with publishing.
 # The calculation is shared with the admin "重新自动排班" button.
 def publish_full_schedule_2200_atomic(target_date):
@@ -3602,6 +3024,7 @@ def publish_full_schedule_2200_atomic(target_date):
                 WHERE flag_date=%s AND coalesce(is_published,false)=false''', (target,))
             if cur.rowcount != 1:
                 raise RuntimeError('22:00 发布状态冲突，事务回滚')
+            _capture_2200_baseline_in_transaction(cur, target)
         conn.commit()
     return {'status':'published','date':target,'inserted':len(rows)}
 
@@ -3674,6 +3097,7 @@ def _publish_existing_2200_atomic(target, proposed_rows):
                 WHERE flag_date=%s AND coalesce(is_published,false)=false""", (target,))
             if cur.rowcount != 1:
                 raise RuntimeError('22:00 发布状态冲突，事务回滚')
+            _capture_2200_baseline_in_transaction(cur, target)
         conn.commit()
     return {'status': 'published_preserving_existing', 'date': target,
             'inserted': len(additions)}

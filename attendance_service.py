@@ -198,9 +198,9 @@ def get_eligible_signin_roles(volunteer, raw_id, assignments=None):
     assignments = assignments if assignments is not None else load_today_assignments_for_volunteer(volunteer, raw_id)
     roles = set()
 
-    # 严格智能筛选：当天有值班排班或对应岗位有效报名才显示。
-    # 不受负责人旧版「报名后才能签到」开关关闭的影响。
-    if any(a.get("role") == "值班" for a in assignments):
+    # 值班试用期：关闭排班限制时，允许无排班的义工现场测试签到。
+    # 其他岗位仍按各自报名／固定名单规则筛选。
+    if not REQUIRE_ASSIGNMENT_FOR_SIGNIN or any(a.get("role") == "值班" for a in assignments):
         roles.add("值班")
     for role in ("卫生", "膳食"):
         if has_active_signup_for_role(volunteer, raw_id, role):
@@ -246,7 +246,10 @@ def get_eligible_signin_roles(volunteer, raw_id, assignments=None):
         if work:
             roles.update(fixed_roles.intersection(("供花", "供果")))
 
-    return [role for role in ROLES if role in roles]
+    completed = db_query("""SELECT DISTINCT role FROM attendance WHERE date=%s AND volunteer_id=%s""",
+                         (today.isoformat(), volunteer["编号"]), fetchall=True) or []
+    done = {r["role"] for r in completed}
+    return [role for role in ROLES if role in roles and role not in done]
 
 
 def _altar_cutoff_minutes(duty_date):
@@ -273,6 +276,21 @@ def eligible_duty_assignment_ids(assignments):
     return [int(a["id"]) for a in duty if _duty_group_signin_allowed(duty, a)]
 
 
+def _close_previous_roles(cur, volunteer_id, new_role):
+    cur.execute("""SELECT * FROM attendance WHERE date=%s AND volunteer_id=%s
+                   AND (end_time IS NULL OR end_time='') FOR UPDATE""", (now_date_str(), volunteer_id))
+    now = malaysia_now()
+    minute = now.hour * 60 + now.minute
+    for row in cur.fetchall() or []:
+        old = row.get("role")
+        # Preserve existing parallel duty/offering-table permission.
+        if {old, new_role} == {"值班", "供台"}:
+            continue
+        cutoff = _role_cutoff_minutes(cur, row)
+        _close_attendance_row(cur, row, min(minute, cutoff) if cutoff is not None else minute,
+                              "系统转换岗位自动结束")
+
+
 def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignment_id=None) -> tuple[bool, str]:
     raw_id = str(volunteer_id or "").strip()
     role = str(role or "").strip()
@@ -294,29 +312,11 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
     if role not in ROLES:
         return False, "请选择正确岗位。"
 
-    # 卫生一天只允许签到一次（包括已签退记录），不影响其他岗位。
-    if role == "卫生":
-        cleaning_done = db_query("""
-            select id from attendance
-            where date=%s and volunteer_id=%s and role='卫生'
-            limit 1
-        """, (now_date_str(), volunteer["编号"]), fetchone=True)
-        if cleaning_done:
-            return False, (f"{volunteer['姓名']} 今天已经签到过卫生。"
-                           "卫生每天只允许签到一次；如今天还有值班安排，请返回选择『值班』。")
-
-    # 仅允许值班和供台两种不同岗位并行；同岗位不可重复签到。
-    opened = db_query("""
-        select id, role from attendance
-        where date=%s and volunteer_id=%s
-          and (end_time is null or end_time='')
-        order by id desc
-    """, (now_date_str(), volunteer["编号"]), fetchall=True) or []
-    open_roles = {str(r.get("role") or "") for r in opened}
-    if role in open_roles:
-        return False, f"{volunteer['姓名']} 的{role}尚未签退，请勿重复签到。"
-    if open_roles and not (role in ("值班", "供台") and open_roles <= ({"值班", "供台"} - {role})):
-        return False, f"{volunteer['姓名']} 已有其他岗位尚未签退，请先完成该岗位。"
+    # Every role can be checked in only once per day.
+    existing = db_query("""SELECT 1 FROM attendance WHERE date=%s AND volunteer_id=%s AND role=%s LIMIT 1""",
+                        (now_date_str(), volunteer["编号"], role), fetchone=True)
+    if existing:
+        return False, f"{volunteer['姓名']} 今天已经签到过{role}。"
 
     assignments = load_today_assignments_for_volunteer(volunteer, raw_id)
 
@@ -377,7 +377,8 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
         job_text = "；".join(format_assignment_for_attendance(a) for a in group)
         # 同一事务写入实际签到及各段排班日志；避免只写入其中一张表。
         with get_conn() as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                _close_previous_roles(cur, volunteer["编号"], role)
                 cur.execute("""
                     insert into attendance
                     (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
@@ -399,7 +400,7 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
                     False, "按排班签到（同岗位连续时段）"
                 ) for segment in group])
 
-        return True, f"{volunteer['姓名']} 已签到\n\n岗位：{role}\n安排：{job_text}\n\n同岗位连续换地点无需重新签到；完成后请签退。"
+        return True, f"{volunteer['姓名']} 已签到\n\n岗位：{role}\n安排：{job_text}\n\n同岗位连续换地点无需重新签到；系统将按岗位结束时间自动签退。"
 
     # 固定佛台不写普通 assignments：依有效固定名单判断正式签到。
     fixed_altar = role == "佛台" and is_fixed_buddha_volunteer(
@@ -414,7 +415,8 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
         return False, "今天没有排班记录，请选择实际协助岗位。"
 
     with get_conn() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            _close_previous_roles(cur, volunteer["编号"], role)
             cur.execute("""
                 insert into attendance
                 (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
@@ -433,8 +435,8 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
                 fallback_walk_in, fallback_remark
             ))
     if fixed_altar:
-        return True, f"{volunteer['姓名']} 已按固定佛台安排签到\n\n岗位：佛台\n\n完成后请记得签退。"
-    return True, f"{volunteer['姓名']} 已签到\n\n今天没有正式排班记录。\n已登记：{role}\n\n完成后请记得签退。"
+        return True, f"{volunteer['姓名']} 已按固定佛台安排签到\n\n岗位：佛台\n\n系统将按岗位结束时间自动签退。"
+    return True, f"{volunteer['姓名']} 已签到\n\n今天没有正式排班记录。\n已登记：{role}\n\n系统将按岗位结束时间自动签退。"
 
 
 def sign_out(volunteer_id: str, pin: str, assignment_id=None, role=None, attendance_id=None) -> tuple[bool, str]:
@@ -461,6 +463,17 @@ def sign_out(volunteer_id: str, pin: str, assignment_id=None, role=None, attenda
             """, (now_date_str(), volunteer["编号"]))
             open_rows = cur.fetchall() or []
             if not open_rows:
+                cur.execute("""
+                    select role, end_time, remark from attendance
+                    where date=%s and volunteer_id=%s
+                      and remark like '%%系统自动签退%%'
+                    order by id desc limit 1
+                """, (now_date_str(), volunteer["编号"]))
+                auto_closed = cur.fetchone()
+                if auto_closed:
+                    return False, (f"{volunteer['姓名']} 今天的{auto_closed['role']}已由系统自动签退。"
+                                   f"\n服务记录截止时间：{auto_closed['end_time']}。"
+                                   "\n原因：超过签退宽限时间，无需重复签退。")
                 return False, f"{volunteer['姓名']} 今天没有未签退记录。"
             if attendance_id is not None:
                 # 快捷签退必须精确匹配点击的记录，不能误签退同岗位的另一笔。
@@ -769,6 +782,80 @@ def _assignment_ids_from_remark(remark):
     return []
 
 
+def _role_cutoff_minutes(cur, row):
+    """Return today's scheduled service end; no guessed checkout for unknown shifts."""
+    role = str(row.get("role") or "").strip()
+    day = row["date"]
+    if role == "值班":
+        return _scheduled_end_minutes(cur, row)[0]
+    if role == "佛台":
+        return _altar_cutoff_minutes(day)
+    if role == "卫生":
+        return 8 * 60 if _altar_cutoff_minutes(day) == 8 * 60 else 10 * 60
+    if role == "供花":
+        return 12 * 60 + 30
+    if role == "供果":
+        cur.execute("SELECT icon FROM flower_fruit_work_days WHERE work_date=%s LIMIT 1", (day,))
+        work = cur.fetchone()
+        if not work:
+            return None
+        return 13 * 60 if work.get("icon") == "👉" else (11 * 60 if work.get("icon") == "💧" else None)
+    if role == "膳食":
+        return 14 * 60
+    if role == "佛学班":
+        d = day if isinstance(day, datetime.date) else datetime.date.fromisoformat(str(day))
+        return 18 * 60 if d.weekday() == 5 else (14 * 60 + 30 if d.weekday() == 6 else None)
+    if role == "供台":
+        # Distinguish setup vs removal using the actual manager's assigned list.
+        cur.execute("SELECT setup_people, remove_people FROM schedule_day_flags WHERE flag_date=%s", (day,))
+        flags = cur.fetchone() or {}
+        name = str(row.get("name") or "").strip()
+        setup = name in str(flags.get("setup_people") or "").splitlines()
+        removal = name in str(flags.get("remove_people") or "").splitlines()
+        if setup and not removal:
+            return 8 * 60
+        if removal and not setup:
+            return 14 * 60
+        # Same person may do both; use sign-in clock to determine session.
+        start = time_to_minutes(row.get("start_time"))
+        if start is not None:
+            return 8 * 60 if start < 10 * 60 else 14 * 60
+    return None
+
+
+def _close_attendance_row(cur, row, cutoff, reason):
+    """Close attendance and its log in the same transaction."""
+    start = time_to_minutes(row.get("start_time"))
+    if start is None:
+        return False
+    end = max(start, cutoff)
+    role = str(row.get("role") or "")
+    # Duty credited from assigned start, not early arrival.
+    if role == "值班":
+        ids = _assignment_ids_from_remark(row.get("remark"))
+        if ids:
+            cur.execute("SELECT min(start_time) AS start FROM volunteer_schedule_assignments WHERE id=any(%s)", (ids,))
+            shift = cur.fetchone() or {}
+            scheduled_start = time_to_minutes(shift.get("start"))
+            if scheduled_start is not None:
+                start = max(start, scheduled_start)
+    hours = round(max(0, end - start) / 60, 2)
+    end_text = f"{end // 60:02d}:{end % 60:02d}"
+    remark = str(row.get("remark") or "") + "｜" + reason
+    cur.execute("UPDATE attendance SET end_time=%s, hours=%s, remark=%s WHERE id=%s AND (end_time IS NULL OR end_time='')", (end_text, hours, remark, row["id"]))
+    ids = _assignment_ids_from_remark(row.get("remark"))
+    if ids:
+        cur.execute("""UPDATE volunteer_attendance_logs SET check_out_time=now(), remarks=concat_ws('｜',nullif(remarks,''),%s)
+                       WHERE assignment_id=any(%s) AND volunteer_id=%s AND attendance_date=%s AND check_out_time IS NULL""",
+                    (reason, ids, row["volunteer_id"], row["date"]))
+    else:
+        cur.execute("""UPDATE volunteer_attendance_logs SET check_out_time=now(), remarks=concat_ws('｜',nullif(remarks,''),%s)
+                       WHERE id=(SELECT id FROM volunteer_attendance_logs WHERE volunteer_id=%s AND attendance_date=%s
+                                 AND actual_role=%s AND assignment_id IS NULL AND check_out_time IS NULL ORDER BY id DESC LIMIT 1)""",
+                    (reason, row["volunteer_id"], row["date"], role))
+    return True
+
+
 def _scheduled_end_minutes(cur, row):
     """Only scheduled attendance can be capped/auto-closed."""
     ids = _assignment_ids_from_remark(row.get("remark"))
@@ -788,69 +875,20 @@ def _scheduled_end_minutes(cur, row):
 
 
 def auto_signout_unfinished_today():
-    """Close scheduled shifts 30 min after their end; no fake actual checkout time.
-
-    Called on normal web requests (no background scheduler required).  The
-    attendance end_time is the *credited cutoff*, clearly marked as automatic;
-    log check_out_time is the actual time the system processed the closure.
-    """
+    """Close each role at its scheduled end when a web request processes it."""
     if not ENABLE_AUTO_SIGNOUT:
         return {"ok": False, "msg": "自动签退功能未开启", "count": 0}
-
     now = malaysia_now()
-    today = now.date().isoformat()  # attendance.date 是 text，不能传 Python date
-    now_minutes = now.hour * 60 + now.minute
+    today = now.date().isoformat()
+    minute = now.hour * 60 + now.minute
     count = 0
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                select * from attendance
-                where date=%s and (end_time is null or end_time='')
-                for update skip locked
-            """, (today,))
+            cur.execute("""SELECT * FROM attendance WHERE date=%s AND (end_time IS NULL OR end_time='')
+                           FOR UPDATE SKIP LOCKED""", (today,))
             for row in cur.fetchall() or []:
-                cutoff, ids = _scheduled_end_minutes(cur, row)
-                # 佛台：普通日 11:00、大日子 09:00 自动签退；不影响其他岗位。
-                altar_fallback = cutoff is None and str(row.get("role") or "").strip() == "佛台"
-                if altar_fallback:
-                    cutoff = _altar_cutoff_minutes(today)
-                    auto_at = cutoff + 60
-                else:
-                    auto_at = cutoff + 30 if cutoff is not None else None
-                if auto_at is None or now_minutes < auto_at:
-                    continue
-                credited_end = f"{cutoff // 60:02d}:{cutoff % 60:02d}"
-                start_min = time_to_minutes(row.get("start_time"))
-                # 不得自动写入早于签到的签退时间；保留异常记录供负责人核查。
-                if start_min is not None and cutoff < start_min:
-                    continue
-                hours = round(max(0, cutoff - start_min) / 60, 2) if start_min is not None else None
-                remark = str(row.get("remark") or "") + "｜系统自动签退（忘记签退；服务计至排班结束）"
-                cur.execute("""
-                    update attendance set end_time=%s, hours=%s, remark=%s
-                    where id=%s
-                """, (credited_end, hours, remark, row["id"]))
-                if altar_fallback:
-                    # 只关闭本人最新一笔尚未签退的佛台现场签到日志。
-                    cur.execute("""
-                        update volunteer_attendance_logs
-                        set check_out_time=now(),
-                            remarks=concat_ws('｜', nullif(remarks, ''), '系统自动签退；佛台服务计至' || %s)
-                        where id = (
-                            select id from volunteer_attendance_logs
-                            where volunteer_id=%s and attendance_date=%s
-                              and actual_role='佛台' and assignment_id is null
-                              and check_out_time is null
-                            order by id desc limit 1
-                        )
-                    """, (credited_end, row["volunteer_id"], today))
-                else:
-                    cur.execute("""
-                        update volunteer_attendance_logs
-                        set check_out_time=now(),
-                            remarks=concat_ws('｜', nullif(remarks, ''), '系统自动签退；服务计至排班结束')
-                        where assignment_id=any(%s) and volunteer_id=%s
-                          and attendance_date=%s and check_out_time is null
-                    """, (ids, row["volunteer_id"], today))
-                count += 1
+                cutoff = _role_cutoff_minutes(cur, row)
+                if cutoff is not None and minute >= cutoff:
+                    if _close_attendance_row(cur, row, cutoff, "系统自动签退（服务计至岗位结束）"):
+                        count += 1
     return {"ok": True, "msg": f"自动签退完成：{count} 位", "count": count}

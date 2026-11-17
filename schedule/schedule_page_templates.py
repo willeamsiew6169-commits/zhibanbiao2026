@@ -179,7 +179,7 @@ button{cursor:pointer}.primary{background:#187c71;color:white;border:0;padding:1
 </style></head><body><div class="wrap">
 <a href="/schedule/management/fixed">← 返回佛台及固定岗位管理</a>
 <h1>👥 固定岗位人员管理</h1>
-<p class="muted">管理供花、供果、佛学班、膳食组及整理佛台每星期固定轮值；此页面不会直接修改已发布排班或签到记录。</p>
+<p class="muted">管理供花、供果、佛学班及整理佛台每星期固定轮值；此页面不会直接修改已发布排班或签到记录。</p>
 {% with messages = get_flashed_messages(with_categories=true) %}{% for category,msg in messages %}
 <div class="notice {{ 'error' if category == 'error' else '' }}">{{ msg }}</div>
 {% endfor %}{% endwith %}
@@ -187,7 +187,6 @@ button{cursor:pointer}.primary{background:#187c71;color:white;border:0;padding:1
 <button type="button" class="tab active" data-role="供花">🌸 供花（{{ members['供花']|length }}）</button>
 <button type="button" class="tab" data-role="供果">🍎 供果（{{ members['供果']|length }}）</button>
 <button type="button" class="tab" data-role="佛学班">📖 佛学班（{{ members['佛学班']|length }}）</button>
-<button type="button" class="tab" data-role="膳食">🍱 膳食组（{{ members['膳食']|length }}）</button>
 <button type="button" class="tab" data-role="佛台">🪷 整理佛台</button>
 </div></div>
 <div class="card"><h2>➕ 加入固定成员</h2>
@@ -206,7 +205,7 @@ button{cursor:pointer}.primary{background:#187c71;color:white;border:0;padding:1
 </form></div>
 {% for role in roles %}
 <div class="card role-panel {{ 'active' if role == '供花' else '' }}" data-panel="{{ role }}">
-<h2>{{ '🌸' if role == '供花' else ('🍎' if role == '供果' else ('🍱' if role == '膳食' else '📖')) }} {{ role }}（{{ members[role]|length }} 人）</h2>
+<h2>{{ '🌸' if role == '供花' else ('🍎' if role == '供果' else '📖') }} {{ role }}（{{ members[role]|length }} 人）</h2>
 {% if members[role] %}<table><thead><tr><th>编号</th><th>姓名</th><th>操作</th></tr></thead><tbody>
 {% for member in members[role] %}<tr><td>{{ member.volunteer_id }}</td><td>{{ member.name }}</td>
 <td><form method="post" onsubmit="return confirm('确定从{{ role }}移除 {{ member.name }}？');">
@@ -367,6 +366,8 @@ function showSpecial(id) {
 </script>
 
 <style>
+/* 仅调整负责人首页及今日安排的页面底色；卡片和按钮保持原样 */
+body { background-color: #f5f1fc !important; }
 /* 今日提醒：电脑双栏、手机单栏 */
 .reminder-stack {
     display: grid;
@@ -632,6 +633,7 @@ html {
         <!-- 未安排提醒 -->
         <div class="alert alert-error">
             <h3 style="margin-top:0;">🔴 未安排提醒</h3>
+            <div style="font-weight:700; margin-bottom:8px;">明日：{{ pending_tomorrow_label }}</div>
             今日：<b>{{ pending_counts.today }}</b> 人　
             明日：<b>{{ pending_counts.tomorrow }}</b> 人　
             本月：<b>{{ pending_counts.month }}</b> 人
@@ -645,7 +647,7 @@ html {
                         <tbody>
                         {% for p in pending_details %}
                         <tr style="border-top:1px solid #efb5b5;">
-                            <td style="padding:8px;white-space:nowrap;">{{ p.signup_date }}</td>
+                            <td style="padding:8px;white-space:nowrap;">{{ p.signup_date }}（{{ "一二三四五六日"[p.signup_date.weekday()] }}）</td>
                             <td style="padding:8px;">{{ p.name or p.volunteer_id or '—' }}</td>
                             <td style="padding:8px;">{{ p.role or '—' }}</td>
                             <td style="padding:8px;white-space:nowrap;">{{ p.start_time or '—' }} ～ {{ p.end_time or '—' }}</td>
@@ -666,7 +668,7 @@ html {
             {% for item in supply_alerts %}
             <div style="margin-bottom:14px;">
                 <b>
-                    {{ item.date.strftime("%m/%d") }}
+                    {{ item.date_weekday }}
                     {{ item.festival_label }}
                 </b><br>
 

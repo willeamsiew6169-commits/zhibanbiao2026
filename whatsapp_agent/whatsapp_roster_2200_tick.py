@@ -45,17 +45,20 @@ def main():
 
     endpoint = url + '/schedule/api/whatsapp-agent/roster-2200/tick'
     try:
-        response = requests.post(endpoint, json={}, headers={'Authorization': 'Bearer ' + token}, timeout=30)
+        response = requests.post(endpoint, json={}, headers={'Authorization': 'Bearer ' + token}, timeout=(10, 75))  # 连接10秒、云端处理最多75秒；Sender外层限时100秒
         print('HTTP:', response.status_code, flush=True)
         print('Result:', response.text[:3000], flush=True)
         response.raise_for_status()
         data = response.json()
-        if data.get('status') in ('db_write_guard_off', 'busy', 'not_published', 'outside_window'):
-            print('22:00 roster not queued; retry required.', file=sys.stderr, flush=True)
-            return 1
-        if data.get('status') == 'disabled':
-            print('22:00 automation disabled by settings.', flush=True)
-        return 0
+        status = data.get('status')
+        if status in ('queued', 'already_queued', 'published_no_message', 'disabled'):
+            if status == 'disabled':
+                print('22:00 automation disabled by settings.', flush=True)
+            return 0
+        # 其他结果一律不视为完成；由 Sender 在22:00窗口内安全重试。
+        print('22:00 roster not confirmed; retry required. status=' + str(status),
+              file=sys.stderr, flush=True)
+        return 1
     except (requests.RequestException, ValueError) as exc:
         print('Request failed:', str(exc), file=sys.stderr)
         return 1

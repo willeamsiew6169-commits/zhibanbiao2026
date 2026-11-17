@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from db import db_query
 
-CUTOVER = date(2026, 12, 1)
+CUTOVER = date(2026, 11, 15)
 
 
 def _period(year, month=None):
@@ -32,7 +32,7 @@ def load_attendance_rows(year, month=None):
                remarks, 'history' AS data_source
         FROM public.volunteer_attendance_history
         WHERE attendance_date >= %s AND attendance_date < %s
-          AND attendance_date < DATE '2026-12-01'
+          AND attendance_date < DATE '2026-11-15'
         UNION ALL
         SELECT l.volunteer_id, v.name AS volunteer_name,
                l.attendance_date AS day, l.actual_role AS role,
@@ -47,7 +47,7 @@ def load_attendance_rows(year, month=None):
         FROM public.volunteer_attendance_logs l
         LEFT JOIN public.volunteers v ON v.id = l.volunteer_id
         WHERE l.attendance_date >= %s AND l.attendance_date < %s
-          AND l.attendance_date >= DATE '2026-12-01'
+          AND l.attendance_date >= DATE '2026-11-15'
           AND l.check_in_time IS NOT NULL
         ORDER BY day, volunteer_id, start_time NULLS LAST
     ''', (start, end, start, end), fetchall=True) or []
@@ -75,7 +75,8 @@ def load_attendance_rows(year, month=None):
 def load_volunteers():
     """只读取报表核对所需的稳定基础字段，不推断历史编号。"""
     return db_query('''
-        SELECT id, name, status, branch, phone, member_id
+        SELECT id, name, status, branch, phone, member_id,
+               is_volunteer, is_member, remark
         FROM public.volunteers ORDER BY name, id
     ''', fetchall=True) or []
 

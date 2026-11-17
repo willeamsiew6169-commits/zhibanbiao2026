@@ -5,14 +5,14 @@ import pandas as pd
 
 from io import BytesIO
 from signin_policy import get_signin_policies, set_signin_policy
-from db import db_query
+from db import db_query, get_conn
 from utils import get_text
 from openpyxl import Workbook
 from datetime import date, datetime
 from utils import now_date_str, get_text
 from utils import get_display_today_code
 from psycopg2.extras import RealDictCursor
-from attendance_service import auto_signout_unfinished_today
+from attendance_service import auto_signout_unfinished_today, _assignment_ids_from_remark
 from utils import MY_TZ, get_today_code, now_date_str, calc_hours
 from flask import Blueprint, request, redirect, url_for, render_template_string, flash, send_file, session
 from attendance_service import (
@@ -738,6 +738,21 @@ def admin_report():
     margin-top: 8px;
     line-height: 1.5;
 }
+.admin-home-float {
+    position: fixed;
+    right: 18px;
+    bottom: 22px;
+    z-index: 1000;
+    display: inline-block;
+    padding: 12px 18px;
+    border-radius: 14px;
+    background: #6b7280;
+    color: white;
+    text-decoration: none;
+    font-size: 18px;
+    font-weight: bold;
+    box-shadow: 0 3px 12px #0002;
+}
 </style>
 </head>
 
@@ -819,12 +834,7 @@ def admin_report():
         {% endfor %}
     </div>
 
-    <div class="card">
-        <a class="btn-tool btn-secondary"
-           href="/">
-            {{ t["back_home"] }}
-        </a>
-    </div>
+    <a class="admin-home-float" href="/">🏠 {{ t["back_home"] }}</a>
 
 </div>
 
@@ -1841,12 +1851,54 @@ def history_delete(kind, record_id):
     if kind not in ("attendance", "reading"):
         return "无效类型", 400
     pin = request.form["pin"]
-    row = db_query(f"SELECT date FROM {kind} WHERE id=%s", (record_id,), fetchone=True)
-    if not row:
-        return "找不到记录", 404
-    day = str(row["date"])
-    db_query(f"DELETE FROM {kind} WHERE id=%s", (record_id,))
-    flash("记录已删除", "ok")
+    if kind == "reading":
+        row = db_query("SELECT date FROM reading WHERE id=%s", (record_id,), fetchone=True)
+        if not row:
+            return "找不到记录", 404
+        day = str(row["date"])
+        db_query("DELETE FROM reading WHERE id=%s", (record_id,))
+        flash("记录已删除", "ok")
+        return _history_redirect(kind, day, pin)
+
+    # 签到会同时写 attendance 和 volunteer_attendance_logs。
+    # 两表主键互不对应；只允许确定唯一关联时在同一事务删除。
+    from psycopg2.extras import RealDictCursor
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM attendance WHERE id=%s FOR UPDATE", (record_id,))
+            row = cur.fetchone()
+            if not row:
+                return "找不到记录", 404
+            day = str(row["date"])
+            volunteer_id = str(row.get("volunteer_id") or "")
+            role = str(row.get("role") or "")
+            aids = _assignment_ids_from_remark(row.get("remark"))
+            if aids:
+                cur.execute("""
+                    SELECT id, assignment_id FROM volunteer_attendance_logs
+                    WHERE volunteer_id=%s AND attendance_date=%s
+                      AND assignment_id=ANY(%s) FOR UPDATE
+                """, (volunteer_id, day, aids))
+                logs = cur.fetchall()
+                # 连续值班可能对应多段日志，必须每段恰好一笔。
+                if len(logs) != len(set(aids)) or {x['assignment_id'] for x in logs} != set(aids):
+                    return "无法唯一对应排班签到日志，未删除；请先核对数据。", 409
+            else:
+                cur.execute("""
+                    SELECT id FROM volunteer_attendance_logs
+                    WHERE volunteer_id=%s AND attendance_date=%s
+                      AND actual_role=%s AND assignment_id IS NULL
+                    FOR UPDATE
+                """, (volunteer_id, day, role))
+                logs = cur.fetchall()
+                # 同一日同岗位多次签到时没有关联键，不能猜测删除哪一笔。
+                if len(logs) > 1:
+                    return "同日同岗位有多笔日志，无法确定对应关系；未删除。", 409
+            if logs:
+                cur.execute("DELETE FROM volunteer_attendance_logs WHERE id=ANY(%s)",
+                            ([x['id'] for x in logs],))
+            cur.execute("DELETE FROM attendance WHERE id=%s", (record_id,))
+    flash("签到记录及可确认对应的日志已同步删除", "ok")
     return _history_redirect(kind, day, pin)
 
 

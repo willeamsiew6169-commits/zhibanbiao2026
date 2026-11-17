@@ -280,7 +280,7 @@ def volunteer_home():
         prebook_year = today.year
         prebook_month = today.month + 1
 
-    if now.hour >= 18:
+    if now.hour >= 19:
         default_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
         schedule_label = "明日值班报名情况"
     else:
@@ -2497,7 +2497,7 @@ def volunteer_today_schedule():
 
     now = malaysia_now()
 
-    if now.hour >= 18:
+    if now.hour >= 19:
         target_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     else:
         target_date = now.strftime("%Y-%m-%d")
@@ -2512,7 +2512,10 @@ def volunteer_day_schedule():
     """义工只读电子通告；复用现有正式值班表来源，不修改排班或发送。"""
     from html import escape
 
-    signup_date = request.args.get("date", "").strip() or str(malaysia_today())
+    # 未指定日期时，19:00 后默认查看明天；明确选择的日期保持不变。
+    now = malaysia_now()
+    default_schedule_date = (now.date() + timedelta(days=1)) if now.hour >= 19 else now.date()
+    signup_date = request.args.get("date", "").strip() or str(default_schedule_date)
     try:
         selected_day = datetime.strptime(signup_date, "%Y-%m-%d").date()
         if selected_day.year < 2020 or selected_day.year > 2100:
@@ -2591,61 +2594,121 @@ def volunteer_day_schedule():
                     start = str(r.get("start_time") or "")
                     end = str(r.get("end_time") or "")
                     task = str(r.get("supply_task") or "")
+                    if role == "供台":
+                        task = {"setup": "设供台", "remove": "收供台"}.get(task, task)
                     lines.append(" ".join(x for x in (name, task, f"{start}～{end}" if start and end else "") if x))
                 entries.append(lines)
         if not entries:
             entries = [["目前尚无报名资料"]]
+
+    # 单张通告：完整保留正式 WhatsApp 文案的换行与空行；
+    # 只消除农历行开头的多余缩进，不更改原始 WhatsApp 文案。
+    if published:
+        display_text = message.replace("\r\n", "\n")
+        display_text = "\n".join(
+            line.lstrip() if line.lstrip().startswith(("（农历", "(农历")) else line
+            for line in display_text.split("\n")
+        )
+    else:
+        display_text = "\n\n".join("\n".join(str(x) for x in group) for group in entries)
+
+    # 只影响义工网页显示：文字原样保留，按岗位给标题柔和着色。
+    import html
+    from markupsafe import Markup
+    import re as _re
+    _role_colors = {
+        "卫生": "clean", "打扫卫生": "clean", "佛台": "altar", "整理佛台": "altar",
+        "供花": "flower", "供果": "fruit", "膳食": "meal", "派餐": "meal",
+        "供台": "offering", "设供台": "offering", "收供台": "offering",
+        "佛学班": "classroom", "值班": "duty",
+    }
+    def _line_class(line):
+        stripped = line.strip().replace("［", "[").replace("］", "]").replace("〔", "[").replace("〕", "]")
+        if not stripped:
+            return ""
+        if "观音堂:" in stripped or "观音堂：" in stripped:
+            return "place-temple"
+        if "活动中心:" in stripped or "活动中心：" in stripped:
+            return "place-center"
+        for label, cls in _role_colors.items():
+            if stripped.startswith((f"[{label}]", f"【{label}】", f"[{label}：", f"【{label}：")):
+                return "role-" + cls
+        if stripped in _role_colors:
+            return "role-" + _role_colors[stripped]
+        for label, cls in _role_colors.items():
+            if stripped.startswith((f"[{label}", f"【{label}", f"{label}：", f"{label}:")):
+                return "role-" + cls
+        return ""
+    styled_lines = []
+    for _line in display_text.split("\n"):
+        _cls = _line_class(_line)
+        _safe = html.escape(_line)
+        styled_lines.append(f'<span class="{_cls}">{_safe}</span>' if _cls else _safe)
+    styled_text = Markup("\n".join(styled_lines))
+    # 星期一到星期日固定轮换；以马来西亚当天为准，不影响查看的排班日期。
+    background_index = malaysia_today().weekday() + 1
 
     return render_template_string("""
     <!doctype html><html lang="zh"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>义工值班安排</title>
     <style>
-    *{box-sizing:border-box}body{margin:0;background:#f3f5f4;color:#293b34;
-      font-family:'Microsoft YaHei','Noto Sans SC',Arial,sans-serif}
-    .page{max-width:830px;margin:24px auto;background:white;padding:34px 42px;
-      border-radius:15px;box-shadow:0 6px 26px #253c2a12}
-    h1{text-align:center;font-size:30px;color:#41674d;margin:4px 0 6px}
-    .sub{text-align:center;color:#69766c;margin:0 0 23px}
-    .toolbar{display:flex;align-items:center;justify-content:center;gap:10px;
-      flex-wrap:wrap;margin:0 0 18px}
-    input[type=date]{font-size:17px;padding:10px;border:1px solid #cbd8ce;border-radius:9px}
-    button,.link{border:0;border-radius:9px;background:#298b56;color:white;
-      padding:11px 17px;font-size:17px;text-decoration:none;cursor:pointer}
-    .status{text-align:center;border-radius:9px;padding:11px;margin:0 0 22px;
-      background:{{ '#e8f5eb' if published else '#fff4dd' }};
-      color:{{ '#237344' if published else '#93620b' }};font-weight:bold}
-    .section{border:1px solid #e2ebe3;border-radius:11px;margin:13px 0;
-      padding:16px 19px;line-height:1.8;overflow-wrap:anywhere}
-    .section-title{font-weight:800;color:#315d41;font-size:20px;margin-bottom:5px}
-    .line{font-size:17px;white-space:pre-wrap}
-    .footer{display:flex;gap:12px;flex-wrap:wrap;justify-content:center;margin-top:25px}
-    .secondary{background:#687a70}
-    @media(max-width:600px){.page{margin:0;padding:22px 14px;border-radius:0;
-      box-shadow:none}h1{font-size:25px}.section{padding:13px 12px}
-      .section-title{font-size:19px}.line{font-size:16px}}
+      *{box-sizing:border-box}
+      body{margin:0;min-height:100vh;color:#344037;
+        font-family:'Microsoft YaHei','Noto Sans SC',Arial,sans-serif;
+        background:#f8f2e7}
+      body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+        background:#f8f2e7}
+      .page{max-width:900px;margin:24px auto;background:rgba(255,251,244,.88);
+        padding:32px 42px 90px;border:1px solid #eee1cb;
+        border-radius:19px;box-shadow:0 8px 28px #6e593014}
+      h1{text-align:center;font-size:30px;color:#77562d;margin:4px 0 6px}
+      .sub{text-align:center;color:#82745f;margin:0 0 23px}
+      .toolbar{display:flex;align-items:center;justify-content:center;gap:10px;
+        flex-wrap:wrap;margin:0 0 18px}
+      input[type=date]{font-size:17px;padding:10px;border:1px solid #d7c6aa;border-radius:9px}
+      button,.link{border:0;border-radius:9px;background:#39845e;color:white;
+        padding:11px 17px;font-size:17px;text-decoration:none;cursor:pointer}
+      .status{text-align:center;border-radius:12px;padding:12px;margin:0 0 22px;
+        background:{{ '#e7f1e7' if published else '#fff0d5' }};
+        color:{{ '#237344' if published else '#93620b' }};font-weight:bold}
+      .notice-sheet{white-space:pre-wrap;overflow-wrap:anywhere;
+        font-size:20px;line-height:1.72;margin:0;padding:22px 24px;
+        border-radius:15px;border:1px solid #ecdfcb;position:relative;isolation:isolate;
+        background:#fff9ee;font-family:inherit;color:#344037}
+      .notice-sheet::before{content:"";position:absolute;inset:0;z-index:-1;
+        border-radius:inherit;pointer-events:none;
+        background-image:linear-gradient(rgba(255,249,238,.93),rgba(255,249,238,.93)),
+          url("{{ url_for('static',filename='images/duty_bg_' ~ background_index ~ '.jpg') }}");
+        background-position:center top;background-size:100% auto;background-repeat:no-repeat}
+      .notice-sheet span[class^="role-"]{font-weight:800;font-size:1.17em;line-height:1.9}
+      .role-clean{color:#087966}.role-altar{color:#6b3fa0}
+      .role-flower{color:#b64e80}.role-fruit{color:#46834a}
+      .role-meal{color:#a6652a}.role-offering{color:#7553a0}
+      .role-classroom{color:#326f9d}.role-duty{color:#b16b30}
+      .place-temple{color:#b55c20;font-weight:800;font-size:1.08em}
+      .place-center{color:#927100;font-weight:800;font-size:1.08em}
+      .footer{position:fixed;right:20px;bottom:20px;z-index:1000;margin:0;display:flex}
+      .secondary{background:#687a70;box-shadow:0 4px 14px #0003}
+      .blessing{text-align:center;color:#927b5d;font-size:15px;margin:22px 0 0}
+      @media(max-width:600px){.page{margin:0;padding:22px 12px 90px;border:0;
+        border-radius:0;box-shadow:none;background:rgba(255,251,244,.82)}
+        h1{font-size:25px}.notice-sheet{font-size:18px;padding:16px 14px}
+        .footer{right:12px;bottom:calc(12px + env(safe-area-inset-bottom))}
+        .footer .link{font-size:15px;padding:10px 13px}}
     </style></head><body><main class="page">
-    <h1>🪷 蕉赖共修会</h1><p class="sub">义工值班安排</p>
-    <form class="toolbar" method="get" action="/volunteer/day_schedule">
-      <input type="date" name="date" value="{{ signup_date }}" aria-label="选择日期">
-      <button type="submit">查看</button>
-    </form>
-    <div class="status">{{ '🟢 正式值班安排（已发布）' if published else '🟡 当天报名情况（尚未正式排班）' }}<br>
-      {{ date_label }}</div>
-    {% for lines in entries %}
-    <section class="section">
-      {% if lines|length > 1 %}
-        <div class="section-title">{{ lines[0] }}</div>
-        {% for line in lines[1:] %}<div class="line">{{ line }}</div>{% endfor %}
-      {% else %}<div class="line">{{ lines[0] }}</div>{% endif %}
-    </section>
-    {% endfor %}
-    <div class="footer"><a class="link" href="/volunteer">🙏 我要报名</a>
-    <a class="link secondary" href="/volunteer">⬅ 返回义工首页</a></div>
+      <h1>🪷 蕉赖共修会</h1><p class="sub">义工值班安排</p>
+      <form class="toolbar" method="get" action="/volunteer/day_schedule">
+        <input type="date" name="date" value="{{ signup_date }}" aria-label="选择日期">
+        <button type="submit">查看</button>
+      </form>
+      <div class="status">{{ '🟢 正式值班安排（已发布）' if published else '🟡 当天报名情况（尚未正式排班）' }}</div>
+      <div class="notice-sheet">{{ styled_text }}</div>
+      <p class="blessing">🪷 感恩每一位义工的发心护持</p>
+      <div class="footer"><a class="link secondary" href="/volunteer">⬅ 返回义工首页</a></div>
     </main></body></html>
-    """, signup_date=signup_date,
-         date_label=f"{selected_day.strftime('%d/%m/%Y')}（星期{'一二三四五六日'[selected_day.weekday()]}）",
-         published=published, entries=entries)
+    """, signup_date=signup_date, published=published, styled_text=styled_text,
+         background_index=background_index)
 
 @schedule_bp.route("/volunteer/monthly_signup_list")
 def volunteer_monthly_signup_list():

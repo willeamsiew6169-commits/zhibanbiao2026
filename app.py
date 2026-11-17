@@ -30,6 +30,7 @@ from library_web import library_bp
 from reading_web import reading_bp
 from xfz_web import xfz_bp
 from donation_web import donation_bp
+from hongfa.routes import hongfa_bp
 
 from finance_v7 import finance_v7_bp
 from finance_web import finance_bp
@@ -128,6 +129,7 @@ app.register_blueprint(admin_bp)
 app.register_blueprint(reports_bp)
 app.register_blueprint(xfz_bp)
 app.register_blueprint(donation_bp)
+app.register_blueprint(hongfa_bp)
 
 
 def get_today_stats():
@@ -351,6 +353,14 @@ PAGE = """
   <link rel="stylesheet" href="{{ url_for('static', filename='css/toolbox.css') }}">
 
   <style>
+    /* 仅签到首页：淡莲花粉，不影响其他页面及按钮 */
+    body.sign-home-page { background: #fff5f7; }
+    .sign-home-page .sign-page > .card:not(.hero-card) {
+      background: #fff9fa;
+      border: 1px solid #f9e7eb;
+    }
+    .sign-home-page .sign-page .form-input { background: #fff; }
+
     .center { text-align:center; }
     .small-note { font-size:16px; color:#666; margin-top:10px; text-align:center; }
     .two-card-grid {
@@ -555,9 +565,10 @@ PAGE = """
 
   }
   </style>
+<style>#signOutDialog,#signOutBtn,#signoutRoleGroup,#listSignoutMask{display:none!important}</style>
 </head>
 
-<body>
+<body class="sign-home-page">
 
 <div class="page sign-page">
 
@@ -641,23 +652,6 @@ PAGE = """
       <summary style="cursor:pointer;font-weight:700;font-size:18px;">👥 {{ '查看今日签到名单' if t.html_lang.startswith('zh') else 'View today’s attendance' }}（<span id="liveListCount">{{ today_count }}</span>）</summary>
       <div id="todayAttendanceList" style="margin-top:12px;">{{ '点击展开后加载名单…' if t.html_lang.startswith('zh') else 'Loading on expand…' }}</div>
     </details>
-  </div>
-
-  <form id="listQuickSignoutForm" method="post" action="{{ url_for('quick_list_signout') }}" style="display:none;">
-    <input type="hidden" name="row_number" id="listSignoutRow">
-    <input type="hidden" name="pin" id="listSignoutPin">
-  </form>
-  <div id="listSignoutMask" class="dialog-mask" style="display:none;">
-    <div class="dialog-card">
-      <h2 class="section-title">{{ '快捷签退' if t.html_lang.startswith('zh') else 'Quick check-out' }}</h2>
-      <p id="listSignoutTarget"></p>
-      <label class="form-label">{{ '请输入本人 PIN' if t.html_lang.startswith('zh') else 'Enter your own PIN' }}</label>
-      <input id="listPinInput" class="form-input" type="password" inputmode="numeric" autocomplete="off">
-      <div class="btn-row" style="margin-top:18px;">
-        <button type="button" class="btn-tool btn-secondary" onclick="closeListSignout()">{{ '取消' if t.html_lang.startswith('zh') else 'Cancel' }}</button>
-        <button type="button" class="btn-tool btn-danger" onclick="confirmListSignout()">{{ '确认签退' if t.html_lang.startswith('zh') else 'Check out' }}</button>
-      </div>
-    </div>
   </div>
 
   {% with messages = get_flashed_messages(with_categories=true) %}
@@ -779,10 +773,6 @@ PAGE = """
 
     </div>
 
-      <div class="form-group" id="signoutRoleGroup" style="display:none;margin:12px 0;">
-        <label class="form-label">{{ '选择签退岗位' if t.html_lang.startswith('zh') else 'Select role to check out' }}</label>
-        <select id="signoutRole" class="form-input" onchange="refreshRoleAction()"></select>
-      </div>
       <div class="btn-row">
         <button id="signInBtn"
                 class="btn-tool btn-success"
@@ -791,24 +781,8 @@ PAGE = """
             {{ t.confirm_checkin }}
         </button>
 
-        <button id="signOutBtn"
-                class="btn-tool btn-danger"
-                type="button"
-                style="display:none;"
-                onclick="submitQuickSignOut();">
-            {{ t.confirm_checkout }}
-        </button>
       </div>
 
-    </form>
-
-    <form id="quickSignOutForm"
-          method="post"
-          action="{{ url_for('do_sign_out') }}">
-      <input type="hidden" id="signout_volunteer_id" name="volunteer_id">
-      <input type="hidden" id="signout_pin" name="pin">
-      <input type="hidden" id="signout_assignment_id" name="assignment_id">
-      <input type="hidden" id="signout_role" name="role">
     </form>
 
     <div class="small-note" id="signinOnlyTip">
@@ -902,6 +876,7 @@ PAGE = """
 
 </div>
 
+  <div style="display:none" aria-hidden="true"><button id="signOutBtn"></button><div id="signoutRoleGroup"></div><select id="signoutRole"></select><div id="listSignoutMask"></div><input id="listPinInput"><input id="listSignoutRow"><input id="listSignoutPin"><div id="listSignoutTarget"></div><form id="listQuickSignoutForm"></form><form id="quickSignOutForm"><input id="signout_volunteer_id"><input id="signout_pin"><input id="signout_assignment_id"><input id="signout_role"></form></div>
 <script>
 const LIST_LANG_ZH = {{ t.html_lang.startswith('zh')|tojson }};
 let listSignoutId = null;
@@ -938,12 +913,8 @@ function renderTodayList(rows) {
       const td=document.createElement('td');td.textContent=safeText(value);td.style.cssText='padding:10px 6px;border-bottom:1px solid #eee;';tr.appendChild(td);
     });
     const td=document.createElement('td');td.style.cssText='padding:10px 6px;border-bottom:1px solid #eee;';
-    if(r.open) {
-      const btn=document.createElement('button');btn.type='button';btn.className='btn-tool btn-danger';btn.style.cssText='width:auto;padding:8px 12px;';btn.textContent=listText('签退','Check out');
-      btn.addEventListener('click',()=>openListSignout(r.id,r.name,r.role_label));td.appendChild(btn);
-    } else {
-      td.textContent='✅ '+listText('已签退','Checked out')+(r.end_time?' · '+formatListTime(r.end_time):'');
-    }
+    if(r.open) { td.textContent=listText('值班中','On duty'); }
+    else { td.textContent='✅ '+listText('已结束','Completed')+(r.end_time?' · '+formatListTime(r.end_time):''); }
     tr.appendChild(td);table.appendChild(tr);
   });
   wrap.appendChild(table);todayList.appendChild(wrap);
@@ -1174,10 +1145,10 @@ async function lookupVolunteer() {
      const outSelect = document.getElementById('signoutRole');
      outSelect.innerHTML = '';
      openRoles.forEach(r => outSelect.add(new Option(ROLE_LABELS[r] || r, r)));
-     document.getElementById('signoutRoleGroup').style.display = openRoles.length ? '' : 'none';
+     document.getElementById('signoutRoleGroup').style.display = 'none';
      updateSigninOnlyVisibility(false);
     if (data.attendance_action === 'signout') {
-      signOutBtn.style.display = '';
+      signOutBtn.style.display = 'none';
       assignmentInput.value = data.current_assignment_id || '';
       html += `<br><hr><b style="color:#198754;">${TXT.currently_checked_in}</b>`;
     } else if (data.attendance_action === 'signin') {
@@ -1275,13 +1246,7 @@ function refreshRoleAction() {
   signout.style.display = 'none';
   assignmentInput.value = '';
   if (!pinValid || !pinEntered) return;
-  const openRoles = data.open_roles || [];
-  if (openRoles.length) signout.style.display = '';
-  // 值班与供台可并行，其余岗位仍须先签退。
   if (!role || !(data.eligible_roles || []).some(item => item.role === role)) return;
-  if (openRoles.includes(role)) return;
-  if (openRoles.length && !(('值班' === role || '供台' === role) &&
-      openRoles.every(r => (r === '值班' || r === '供台') && r !== role))) return;
   // 已完成某一轮值班，不影响同一天其他岗位签到。
   const pending = (data.today_assignments || []).find(a => a.role === role && a.state === 'pending' &&
        (role !== '值班' || (data.eligible_duty_assignment_ids || []).includes(Number(a.id))));
@@ -1850,6 +1815,9 @@ def today_attendance_list():
 
 @app.route("/quick-list-signout", methods=["POST"])
 def quick_list_signout():
+    flash("义工无需手动签退，系统会按岗位时间自动结束。", "bad")
+    return redirect(url_for("index"))
+
     """凭本人 PIN 精确签退所点击的一笔记录；复用原有双表事务。"""
     auto_signout_unfinished_today()
     try:
@@ -1897,6 +1865,9 @@ def do_sign_in():
 
 @app.route("/signout", methods=["POST"])
 def do_sign_out():
+    flash("义工无需手动签退，系统会按岗位时间自动结束。", "bad")
+    return redirect(url_for("index"))
+
     auto_signout_unfinished_today()
     pin = request.form.get("pin", "").strip()
 
@@ -2313,10 +2284,10 @@ def api_volunteer(volunteer_id):
                 a["state"] = "pending"
 
         if actual_open:
-            attendance_action = "signout"
+            attendance_action = "signin"
             current_assignment_id = open_assignment_id
         elif open_assignment_id is not None:
-            attendance_action = "signout"
+            attendance_action = "signin"
             current_assignment_id = open_assignment_id
         elif not today_assignments:
             attendance_action = "walkin"
@@ -2354,7 +2325,7 @@ def api_volunteer(volunteer_id):
         eligible_roles = ([{"role": role, "label": role_label(role)}
                            for role in get_eligible_signin_roles(v, volunteer_id)]
                           if pin_ok else [])
-        if not valid_duty_ids:
+        if REQUIRE_ASSIGNMENT_FOR_SIGNIN and not valid_duty_ids:
             eligible_roles = [item for item in eligible_roles if item["role"] != "值班"]
         # 佛台超过截止时间不再提供新签到；其他岗位及签退不变。
         if eligible_roles:

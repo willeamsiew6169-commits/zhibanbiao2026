@@ -66,24 +66,9 @@ def _time(value):
 
 
 def _message(target, rows):
-    parts = [f'📋 {target} 新增义工安排', '']
-    for role in ROLES:
-        selected = [r for r in rows if r['role'] == role]
-        if not selected:
-            continue
-        parts.append('🧹 卫生' if role == '卫生' else '🧡 值班')
-        by_person = {}
-        for r in selected:
-            by_person.setdefault(_key(r), []).append(r)
-        for entries in by_person.values():
-            first = entries[0]
-            parts.append(f"• {first.get('name') or first.get('volunteer_id') or '义工'}")
-            for r in entries:
-                parts.append(f"  {_time(r['start_time'])}–{_time(r['end_time'])}  {r.get('assigned_place') or role}")
-        parts.append('')
-    parts.append('🙏 感恩各位义工发心护持。')
-    parts.extend(['', '📝 义工报名请点击以下链接：', 'https://gyt-checkin-sg.onrender.com/volunteer'])
-    return '\n'.join(parts)
+    """统一从 WhatsApp 文案中心取格式。"""
+    from schedule.services.whatsapp_message_templates import build_morning_message
+    return build_morning_message(target, rows)
 
 
 def _slot(now):
