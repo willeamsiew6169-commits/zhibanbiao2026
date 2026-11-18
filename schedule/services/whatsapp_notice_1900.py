@@ -1,6 +1,6 @@
 """Configurable Malaysia-time signup notice; queues TEST_GROUP_ONLY only."""
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 from schedule.builders.time_utils import malaysia_now
 from schedule.services.settings_service import is_schedule_setting_on
 from db import get_conn
@@ -46,7 +46,13 @@ def enqueue_tomorrow_signup_notice(build_notice):
             if previous:
                 return {'status': 'already_queued', 'target_date': target,
                         'job_id': previous[0] if not isinstance(previous, dict) else previous['id']}
-            body = build_notice(target)
+            # 19:00 只提醒报名明天；不生成初步值班安排。
+            target_day = date.fromisoformat(target)
+            weekday = ('一', '二', '三', '四', '五', '六', '日')[target_day.weekday()]
+            body = (f'明天义工报名（{target_day:%d/%m/%Y}，星期{weekday}）\n\n'
+                    '义工报名请点击以下链接：\n'
+                    'https://gyt-checkin-sg.onrender.com/volunteer\n\n'
+                    '感恩大家, 功德无量！🙏🙏🙏')
             if not isinstance(body, str) or not body.strip():
                 raise ValueError('Signup notice builder returned an empty message')
             cur.execute("""INSERT INTO whatsapp_notification_jobs

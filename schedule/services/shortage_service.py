@@ -7,106 +7,137 @@ from db import get_db, get_conn
 from lunar_rules import get_special_day_info
 from schedule.builders.schedule_builder import get_duty_targets
 
+def _identity(row):
+    return str(row.get("volunteer_id") or row.get("name") or "").strip()
+
+
+def _minute(value):
+    if hasattr(value, "hour"):
+        return value.hour * 60 + value.minute
+    return time_to_minutes(value)
+
+
+def _clock(value):
+    h, m = divmod(value, 60)
+    return f"{h % 12 or 12}:{m:02d}{'am' if h < 12 else 'pm'}"
+
+
+def _span(start, end):
+    return f"{_clock(start)} ～ {_clock(end)}"
+
+
+def _coverage(rows, signups, published, big_day):
+    places = ("观音堂", "活动中心")
+    periods = ([(480, 600)] if big_day else []) + [(600, 840), (840, 1080)]
+    active_ids = {str(r['id']) for r in signups if r.get('id') is not None}
+    rows = [r for r in rows if r.get('status') != 'cancelled' and
+            (r.get('signup_id') is None or str(r['signup_id']) in active_ids)]
+    cleaning = {_identity(r) for r in rows + signups if r.get('role') == '卫生'} - {''}
+    assigned = []
+    available = []
+    for source, dest in ((rows, assigned), (signups, available)):
+        for r in source:
+            if r.get('role') != '值班' or not _identity(r):
+                continue
+            a, b = _minute(r.get('start_time')), _minute(r.get('end_time'))
+            if a is not None and b is not None and a < b:
+                dest.append((a, b, _identity(r), r.get('assigned_place')))
+    output = []
+    for start, end in periods:
+        points = sorted({start, end} | {t for a,b,_,_ in assigned + available for t in (a,b) if start < t < end})
+        segments = {}
+        for a,b in zip(points, points[1:]):
+            by_place = {p: {i for x,y,i,z in assigned if x <= a and y >= b and z == p} for p in places}
+            if published:
+                needs = [(p, max(0, 1-len(ids)), max(0, 2-len(ids))) for p,ids in by_place.items()]
+            else:
+                # 尚未发布：地点未确定，不把待安排者虚构成某地点的义工。
+                people = set().union(*by_place.values()) | {i for x,y,i,_ in available if x <= a and y >= b}
+                needs = [("地点待安排", max(0, 2-len(people)), max(0, 4-len(people)))]
+            for place, minimum, ideal in needs:
+                if not ideal:
+                    continue
+                key = (place, minimum, ideal)
+                group = segments.setdefault(key, [])
+                if group and group[-1][1] == a:
+                    group[-1] = (group[-1][0], b)
+                else:
+                    group.append((a,b))
+        for (place, minimum, ideal), spans in segments.items():
+            output.extend((place,a,b,minimum,ideal) for a,b in spans)
+    return len(cleaning), output
+
+
+def _load_coverage(date_str, conn=None):
+    if conn is None:
+        with get_conn() as db_conn:
+            return _load_coverage(date_str, db_conn)
+    day = datetime.strptime(date_str, "%Y-%m-%d").date()
+    big_day = get_special_day_info(day)["template_type"] != "normal"
+    rows = load_assigned_places_for_date(date_str, conn=conn)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""SELECT id, volunteer_id, name, role, start_time, end_time
+                       FROM volunteer_schedule_signups WHERE signup_date = %s
+                       AND COALESCE(status, 'pending') <> 'cancelled'""", (date_str,))
+        signups = cur.fetchall()
+        cur.execute("SELECT is_published FROM schedule_day_flags WHERE flag_date = %s", (date_str,))
+        flag = cur.fetchone()
+    return _coverage(rows, signups, bool(flag and flag['is_published']), big_day)
+
+
+def _need_text(minimum, ideal):
+    return f"{minimum}～{ideal}" if 0 < minimum < ideal else str(ideal)
+
+
+def _cleaning_text(count):
+    return {0: "2～3", 1: "1～2", 2: "1"}.get(count, "")
+
+
 def build_shortage_summary_for_admin(date_str, conn=None):
-    msg = build_shortage_notice_from_assignments(date_str, conn=conn) or ""
+    cleaning, gaps = _load_coverage(date_str, conn)
+    # 仅负责人当天提醒：已结束时段不再显示，未来日期仍显示全天。
+    day = datetime.strptime(date_str, "%Y-%m-%d").date()
+    now = datetime.now(timezone(timedelta(hours=8)))
+    cutoff = now.hour * 60 + now.minute if day == now.date() else -1
     lines = []
-    for line in msg.splitlines():
-        if line.startswith(("🧹", "🕗", "🕙", "🕑")):
-            lines.append(line)
+    for place,a,b,minimum,ideal in sorted(gaps, key=lambda g: (not bool(g[3]), g[1], g[0])):
+        if b <= cutoff:
+            continue
+        label = ("🔴 无人值班" if minimum else "🟠 建议增员") if place != "地点待安排" else "🟠 报名不足（地点待安排）"
+        lines.append(f"{label}｜{place}｜{_span(a,b)}｜缺 {_need_text(minimum,ideal)} 位")
+    if cutoff < 600 and _cleaning_text(cleaning):
+        # 大日子卫生 6–8 点，普通日 8–10 点。
+        cleaning_end = 480 if get_special_day_info(day)["template_type"] != "normal" else 600
+        if cutoff < cleaning_end:
+            lines.append(f"🧹 卫生义工　还需要 {_cleaning_text(cleaning)} 位")
     return lines
 
 
 def build_shortage_notice_from_assignments(date_str, conn=None):
-    date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
-    special_day_info = get_special_day_info(date_obj)
-    template_type = special_day_info["template_type"]
-    targets = get_duty_targets(template_type)
-    rows = load_assigned_places_for_date(date_str, conn=conn)
-    # 已排班按地点统计；待安排的有效报名也计入人数，但同一义工不重复计算。
-    counts = {"绿观音堂": set(), "绿活动中心": set(), "橙观音堂": set(), "橙活动中心": set(),
-              "黄观音堂": set(), "黄活动中心": set(), "卫生": set()}
-    assigned_people = {"绿": set(), "橙": set(), "黄": set(), "卫生": set()}
-    for r in rows:
-        role = r.get("role")
-        shift = str(r.get("shift_label") or "").replace("班", "")
-        place = r.get("assigned_place")
-        identity = str(r.get("volunteer_id") or r.get("name") or r.get("signup_id") or "").strip()
-        if not identity:
-            continue
-        if role == "卫生":
-            counts["卫生"].add(identity)
-            assigned_people["卫生"].add(identity)
-        elif role == "值班" and shift in ("绿", "橙", "黄"):
-            key = f"{shift}{place}"
-            if key in counts:
-                counts[key].add(identity)
-                assigned_people[shift].add(identity)
-
-    def _read_signups(db_conn):
-        with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT volunteer_id, name, role, start_time, end_time
-                FROM volunteer_schedule_signups
-                WHERE signup_date = %s
-                  AND COALESCE(status, 'pending') <> 'cancelled'
-            """, (date_str,))
-            return cur.fetchall()
-
-    if conn is None:
-        with get_conn() as db_conn:
-            signups = _read_signups(db_conn)
-    else:
-        signups = _read_signups(conn)
-
-    pending = {"绿": set(), "橙": set(), "黄": set(), "卫生": set()}
-    periods = {"绿": (8 * 60, 10 * 60), "橙": (10 * 60, 14 * 60), "黄": (14 * 60, 18 * 60)}
-    for r in signups:
-        identity = str(r.get("volunteer_id") or r.get("name") or "").strip()
-        if not identity:
-            continue
-        if r.get("role") == "卫生":
-            if identity not in assigned_people["卫生"]:
-                pending["卫生"].add(identity)
-        elif r.get("role") == "值班":
-            start = time_to_minutes(r.get("start_time"))
-            end = time_to_minutes(r.get("end_time"))
-            if start is None or end is None:
-                continue
-            for shift, (shift_start, shift_end) in periods.items():
-                if start <= shift_start and end >= shift_end and identity not in assigned_people[shift]:
-                    pending[shift].add(identity)
-
-    def _need(shift, places):
-        # 已安排的按各地点最低人数计算；未安排者可补其中一个缺额。
-        missing = sum(max(0, targets.get(f"{shift}{place}", 0) - len(counts[f"{shift}{place}"]))
-                      for place in places)
-        return max(0, missing - len(pending[shift]))
-
-    early_need = _need("绿", ("观音堂", "活动中心")) if template_type != "normal" else 0
-    morning_need = _need("橙", ("观音堂", "活动中心"))
-    afternoon_need = _need("黄", ("观音堂", "活动中心"))
-    cleaning_need = max(0, targets["卫生"] - len(counts["卫生"]) - len(pending["卫生"]))
+    cleaning, gaps = _load_coverage(date_str, conn)
+    day = datetime.strptime(date_str, "%Y-%m-%d").date()
     today = malaysia_today()
-    if date_obj == today:
-        day_text = "今日"
-    elif date_obj == today + timedelta(days=1):
-        day_text = "明日"
-    else:
-        day_text = f"{date_obj.month}月{date_obj.day}日"
-    date_text = f"{date_obj.month}月{date_obj.day}日"
-    if early_need == 0 and morning_need == 0 and afternoon_need == 0 and cleaning_need == 0:
-        return f"✅ {day_text}义工已足够，无需发送通知。"
-    msg = "师兄们，大家好！🙏\n\n" + f"📅 {day_text}（{date_text}）义工尚需\n\n"
-    if day_text != "今日" and cleaning_need > 0:
-        msg += f"🧹 卫生义工　{cleaning_need} 位\n"
-    if early_need > 0:
-        msg += f"🕗 8:00am ～ 10:00am　{early_need} 位\n"
-    if morning_need > 0:
-        msg += f"🕙 10:00am ～ 2:00pm　{morning_need} 位\n"
-    if afternoon_need > 0:
-        msg += f"🕑 2:00pm ～ 6:00pm　{afternoon_need} 位\n"
-    msg += "\n欢迎有空的师兄随喜报名护持。\n\n感恩大家 🙏🙏🙏"
-    return msg
+    day_text = "今日" if day == today else "明日" if day == today + timedelta(days=1) else f"{day.month}月{day.day}日"
+    lines = []
+    if day != today and _cleaning_text(cleaning):
+        lines.append(f"🧹 卫生义工　{_cleaning_text(cleaning)} 位")
+    # 群通知不区分地点：把同一时段各地点的缺额相加，再合并连续时段。
+    points = sorted({t for _,a,b,_,_ in gaps for t in (a,b)})
+    merged = []
+    for a,b in zip(points, points[1:]):
+        minimum = sum(m for _,x,y,m,n in gaps if x <= a and y >= b)
+        ideal = sum(n for _,x,y,m,n in gaps if x <= a and y >= b)
+        if not ideal:
+            continue
+        if merged and merged[-1][1] == a and merged[-1][2:] == (minimum,ideal):
+            merged[-1] = (merged[-1][0],b,minimum,ideal)
+        else:
+            merged.append((a,b,minimum,ideal))
+    lines.extend(f"🕒 {_span(a,b)}　{_need_text(m,n)} 位" for a,b,m,n in merged)
+    if not lines:
+        return f"✅ {day_text}没有需要发送的缺义工通知。"
+    return (f"师兄们，大家好！🙏\n\n📅 {day_text}（{day.month}月{day.day}日）义工尚需\n\n"
+            + "\n".join(lines) + "\n\n欢迎有空的师兄随喜报名护持。\n\n感恩大家 🙏🙏🙏")
 
 
 def build_signup_shortage_notice(date_str):
@@ -141,9 +172,9 @@ def build_signup_shortage_notice(date_str):
             if s <= 10 * 60 and e >= 18 * 60:
                 full_day_count += 1
     notices = []
-    if cleaning_count < 2:
-        need = 2 - cleaning_count
-        notices.append(f"🧹 卫生 可以多加 {need} 位义工。")
+    if cleaning_count < 3:
+        need_text = "2～3" if cleaning_count == 0 else ("1～2" if cleaning_count == 1 else "1")
+        notices.append(f"🧹 卫生 还需要 {need_text} 位义工。")
     total_duty = morning_count + afternoon_count
     if total_duty < 6:
         notices.append("🏠 全日值班 可以多加 2~4 位义工。")

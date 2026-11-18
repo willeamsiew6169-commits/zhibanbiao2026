@@ -927,6 +927,14 @@ def auto_patch_new_signup_to_assignment(signup_id):
 
 
 def build_signup_notice_whatsapp(date_str):
+    # 19:00 手动预览与自动通知统一：只提醒明天报名，不显示初步排班。
+    target_day = date.fromisoformat(date_str)
+    weekday = '一二三四五六日'[target_day.weekday()]
+    return (f'明天义工报名（{target_day:%d/%m/%Y}，星期{weekday}）\n\n'
+            '义工报名请点击以下链接：\n'
+            'https://gyt-checkin-sg.onrender.com/volunteer\n\n'
+            '感恩大家, 功德无量！🙏🙏🙏')
+
 
     date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
 
@@ -3764,6 +3772,38 @@ def schedule_late_signup_notice_confirm():
     return redirect(url_for("schedule.schedule_late_signup_notice", date=date_str))
 
 
+def _notice_center_roster_ready(date_str):
+    """22:00 (MYT) 以后且该日期正式发布成功，才显示正式值班表。"""
+    try:
+        target_day = date.fromisoformat(date_str)
+    except (ValueError, TypeError):
+        return False
+    deadline = datetime.combine(target_day - timedelta(days=1),
+                                datetime.min.time(),
+                                tzinfo=ZoneInfo('Asia/Kuala_Lumpur')) + timedelta(hours=22)
+    return malaysia_now() >= deadline and is_schedule_published(date_str)
+
+
+@schedule_bp.route('/schedule/notice_center/roster_status')
+def notice_center_roster_status():
+    if not session.get('schedule_login'):
+        return jsonify({'error': 'unauthorized'}), 401
+    date_str = request.args.get('date', '')
+    return jsonify({'ready': _notice_center_roster_ready(date_str)})
+
+
+@schedule_bp.route('/schedule/notice_center/official_roster')
+def notice_center_official_roster():
+    if not session.get('schedule_login'):
+        return redirect(url_for('schedule.schedule_admin'))
+    date_str = request.args.get('date', '')
+    if not _notice_center_roster_ready(date_str):
+        return redirect(url_for('schedule.schedule_notice_center', date=date_str))
+    # 仅展示/复制；不触发重新排班、发布、重发或清除更新提醒。
+    output = build_whatsapp_from_assigned(date_str)
+    return render_template_string(DAY_OUTPUT_HTML, output=output)
+
+
 @schedule_bp.route("/schedule/notice_center")
 def schedule_notice_center():
     
@@ -3779,6 +3819,7 @@ def schedule_notice_center():
 
     date_str = request.args.get("date") or default_date
     republish_info = get_schedule_republish_info(date_str)
+    official_roster_ready = _notice_center_roster_ready(date_str)
     return_section = request.args.get("return_section", "")
     if return_section not in ("management", "today"):
         return_section = ""
@@ -3927,13 +3968,33 @@ line-height:1.8;
 </div>
 {% endif %}
 
-<a class="notice-btn blue"
-   href="/schedule/signup_notice?date={{ date_str }}">
-
-    📢 报名通知<br>
-    <small>🕖 晚上 7:00 发群</small>
-
+<a id="mainNoticeButton" class="notice-btn {{ 'green' if official_roster_ready else 'blue' }}"
+   href="{{ '/schedule/notice_center/official_roster?date=' ~ date_str if official_roster_ready else '/schedule/signup_notice?date=' ~ date_str }}">
+    <span id="mainNoticeTitle">{{ '📋 正式值班表' if official_roster_ready else '📢 报名通知' }}</span><br>
+    <small id="mainNoticeTime">{{ '🕙 晚上 10:00 发群' if official_roster_ready else '🕖 晚上 7:00 发群' }}</small>
 </a>
+<script>
+(function () {
+  const dateStr = {{ date_str | tojson }};
+  const button = document.getElementById('mainNoticeButton');
+  async function refreshNoticeButton() {
+    try {
+      const response = await fetch('/schedule/notice_center/roster_status?date=' + encodeURIComponent(dateStr),
+                                   {cache: 'no-store'});
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data.ready) {
+        button.classList.remove('blue');
+        button.classList.add('green');
+        button.href = '/schedule/notice_center/official_roster?date=' + encodeURIComponent(dateStr);
+        document.getElementById('mainNoticeTitle').textContent = '📋 正式值班表';
+        document.getElementById('mainNoticeTime').textContent = '🕙 晚上 10:00 发群';
+      }
+    } catch (e) { /* 网络异常时保持原状态，不误切换 */ }
+  }
+  setInterval(refreshNoticeButton, 30000);
+})();
+</script>
 
 <a class="notice-btn purple"
    href="/schedule/late_signup_notice?date={{ date_str }}">
@@ -3962,7 +4023,8 @@ line-height:1.8;
 </body>
 </html>
 """, date_str=date_str, republish_info=republish_info,
-        late_notice_count=late_notice_count, return_section=return_section)
+        late_notice_count=late_notice_count, return_section=return_section,
+        official_roster_ready=official_roster_ready)
 
 
 @schedule_bp.route("/schedule/signup_notice")

@@ -361,6 +361,17 @@ PAGE = """
     }
     .sign-home-page .sign-page .form-input { background: #fff; }
 
+    /* 签到岗位：手机整行大按钮，查询成功后直接显示。 */
+    .signin-role-list{display:grid;gap:14px;margin:12px 0 18px}
+    .signin-role-button{display:block;width:100%;min-height:86px;padding:16px 20px;
+      border:3px solid #198754;border-radius:18px;background:#e7f8ef;color:#145b37;
+      font-size:23px;font-weight:900;line-height:1.5;text-align:left;cursor:pointer;
+      box-shadow:0 4px 12px rgba(0,0,0,.10)}
+    .signin-role-button:active{transform:scale(.99)}
+    .signin-role-button:focus-visible{outline:4px solid #ffb703;outline-offset:3px}
+    .signin-role-button .role-time{display:block;font-size:17px;font-weight:700;color:#345}
+    .signin-role-button .role-action{display:block;font-size:19px;color:#087b3e}
+    @media(max-width:700px){.signin-role-button{min-height:104px;font-size:26px;padding:19px 17px}}
     .center { text-align:center; }
     .small-note { font-size:16px; color:#666; margin-top:10px; text-align:center; }
     .two-card-grid {
@@ -656,13 +667,22 @@ PAGE = """
 
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, message in messages %}
-      <div class="alert {{ 'alert-success' if category == 'ok' else 'alert-danger' }}">
-        {{ message }}
+      {% if category == 'signin_ok' %}
+      <div id="signinSuccessNotice" class="card" role="status" aria-live="polite"
+           style="background:#e8f9ee;border:3px solid #16844a;text-align:center;padding:30px 18px;">
+        <div style="font-size:54px;">✅</div>
+        <h2 style="color:#126b39;font-size:32px;margin:8px 0;">{{ '签到成功！' if t.html_lang.startswith('zh') else 'Check-in successful!' }}</h2>
+        <div style="font-size:22px;line-height:1.8;white-space:pre-line;overflow-wrap:anywhere;">{{ message }}</div>
+        <p style="font-size:18px;color:#126b39;">{{ '感恩您的发心！无需重复签到。' if t.html_lang.startswith('zh') else 'Thank you! No need to check in again.' }}</p>
+        <p id="signinSuccessCountdown" style="font-size:17px;color:#555;">{{ '10 秒后自动返回签到首页' if t.html_lang.startswith('zh') else 'Returning to the check-in page in 10 seconds' }}</p>
       </div>
+      {% else %}
+      <div class="alert {{ 'alert-success' if category == 'ok' else 'alert-danger' }}">{{ message }}</div>
+      {% endif %}
     {% endfor %}
   {% endwith %}
 
-  <div class="card">
+  <div class="card" id="signinFormCard">
     <h2 class="section-title">✅ {{ t.check_in }}</h2>
 
     <form method="post"
@@ -742,8 +762,10 @@ PAGE = """
                 {{ t.role }}
             </label>
 
+            <div id="signinRoleButtons" class="signin-role-list" aria-live="polite"></div>
             <select
                 class="form-input"
+                style="display:none"
                 name="role"
                 id="role"
                 onchange="toggleCardNo(); refreshRoleAction()">
@@ -1033,6 +1055,7 @@ function invalidateLookup() {
   const roleSelect = document.getElementById('role');
   roleSelect.innerHTML = '';
   roleSelect.add(new Option(TXT.lookup_placeholder, ''));
+  document.getElementById('signinRoleButtons').replaceChildren();
 }
 async function lookupVolunteer() {
   invalidateLookup();
@@ -1138,6 +1161,7 @@ async function lookupVolunteer() {
         : TXT.verify_pin_first;
       roleSelect.appendChild(option);
     }
+     renderSigninRoleButtons(data, !!(pin && data.volunteer.pin_ok));
     toggleCardNo();
     // 空 PIN 仅查看排班；填写 PIN 时必须验证正确才能操作。
     verifiedLookupKey = (pin && data.volunteer.pin_ok) ? lookupKey : null;
@@ -1184,6 +1208,49 @@ async function lookupVolunteer() {
     window.lastAttendanceLookup = null;
     box.innerHTML = `${TXT.not_found_id}：${finalId}`;
   }
+}
+
+function roleSortMinutes(value) {
+  const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+  if (!match) return 9999;
+  let hour = Number(match[1]);
+  if (match[3]) hour = hour % 12 + (match[3].toLowerCase() === 'pm' ? 12 : 0);
+  return hour * 60 + Number(match[2]);
+}
+function renderSigninRoleButtons(data, verified) {
+  const holder = document.getElementById('signinRoleButtons');
+  holder.replaceChildren();
+  if (!verified) return;
+  const roles = (data.eligible_roles || []).map((item, index) => {
+    const shifts = (data.today_assignments || []).filter(a => a.role === item.role && a.state === 'pending');
+    const shift = shifts.sort((a,b) => roleSortMinutes(a.start_time) - roleSortMinutes(b.start_time))[0];
+    const defaultStarts = {'卫生':'08:00','佛台':'08:00','供花':'08:00','供果':'08:00','供台':'06:00','膳食':'08:00','佛学班':'10:00'};
+    return {...item, index, shift, sortTime:shift ? roleSortMinutes(shift.start_time) : roleSortMinutes(defaultStarts[item.role])};
+  }).sort((a,b) => a.sortTime - b.sortTime || a.index - b.index);
+  roles.forEach(item => {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'signin-role-button';
+    const title = document.createElement('span');
+    title.textContent = ({'卫生':'🧹 ','佛台':'🙏 ','值班':'🏠 ','供台':'🌸 ','供花':'💐 ','供果':'🍎 ','膳食':'🍽️ ','佛学班':'📖 '}[item.role] || '✅ ') + item.label;
+    button.appendChild(title);
+    if (item.shift) {
+      const time = document.createElement('span'); time.className='role-time';
+      time.textContent = [item.shift.assigned_place, [item.shift.start_time,item.shift.end_time].filter(Boolean).join(' ～ ')].filter(Boolean).join(' · ');
+      button.appendChild(time);
+    }
+    const action = document.createElement('span'); action.className='role-action';
+    action.textContent = LIST_LANG_ZH ? '👆 点击此岗位签到' : '👆 Tap to check in';
+    button.appendChild(action);
+    button.addEventListener('click', () => {
+      if (verifiedLookupKey !== currentLookupKey()) {alert(TXT.lookup_required_alert);return;}
+      document.getElementById('role').value = item.role;
+      toggleCardNo(); refreshRoleAction();
+      const form = document.getElementById('role').closest('form');
+      if (form) form.requestSubmit();
+    });
+    holder.appendChild(button);
+  });
+  if (!roles.length) holder.textContent = TXT.no_eligible_role;
 }
 
 function updateClock(){
@@ -1362,6 +1429,22 @@ function toggleDialogPin(cb) {
   input.type = cb.checked ? "text" : "password";
 }
 
+const signinSuccessNotice = document.getElementById('signinSuccessNotice');
+if (signinSuccessNotice) {
+  document.getElementById('signinFormCard').style.display = 'none';
+  signinSuccessNotice.scrollIntoView({block:'center'});
+  let secondsLeft = 10;
+  const countdown = document.getElementById('signinSuccessCountdown');
+  const countdownTimer = setInterval(() => {
+    secondsLeft -= 1;
+    if (secondsLeft <= 0) {
+      clearInterval(countdownTimer);
+      window.location.replace({{ url_for('index')|tojson }});
+      return;
+    }
+    countdown.textContent = LIST_LANG_ZH ? `${secondsLeft} 秒后自动返回签到首页` : `Returning to the check-in page in ${secondsLeft} seconds`;
+  }, 1000);
+}
 setTimeout(() => {
   document.querySelectorAll('.alert-success').forEach(el => {
     if (el.id !== 'personBox') {
@@ -1856,7 +1939,7 @@ def do_sign_in():
     )
 
     if ok:
-        flash(f"{msg}｜签到时间：{now_time_str()}", "ok")
+        flash(f"{msg}\n签到时间：{now_time_str()}", "signin_ok")
     else:
         flash(msg, "bad")
 

@@ -31,180 +31,144 @@ ADMIN_PIN = "8888"
 
 @admin_bp.route("/admin_add_record", methods=["GET", "POST"])
 def admin_add_record():
+    """管理员补录历史出席；保留原 URL 和管理员 PIN 校验。"""
+    from attendance_service import ROLES
+    from utils import calc_hours
+    from datetime import date as date_type
 
     pin = request.args.get("pin") or request.form.get("pin")
-
     if pin != ADMIN_PIN:
-        return "无权限"
-
-    if request.method == "POST":
-        date = request.form.get("date")
-        vid = request.form.get("id")
-        name = request.form.get("name")
-        role = request.form.get("role")
-        start = request.form.get("start")
-        end = request.form.get("end")
-        remark = request.form.get("remark")
-
-        hours = ""
-        if start and end:
-            hours = calc_hours(start, end)
-
-        db_query("""
-            insert into attendance
-            (date, volunteer_id, name, role, start_time, end_time, hours, remark)
-            values (%s,%s,%s,%s,%s,%s,%s,%s)
-        """, (date, vid, name, role, start, end, hours, remark))
-
-        return redirect(url_for("admin.admin_add_record", pin=pin))
+        return "无权限", 403
 
     volunteers = db_query(
         "select id, name from volunteers where status='在册' order by id",
         fetchall=True
-    )
+    ) or []
+    chosen_date = request.form.get("date") or now_date_str()
+    chosen_id = request.form.get("id", "").strip()
+    records = []
+    if chosen_id and chosen_date:
+        records = db_query("""
+            select id, role, start_time, end_time, hours, remark
+            from attendance where date=%s and volunteer_id=%s order by id
+        """, (chosen_date, chosen_id), fetchall=True) or []
 
+    if request.method == "POST" and request.form.get("action") == "save":
+        role = request.form.get("role", "").strip()
+        start = request.form.get("start", "").strip()
+        end = request.form.get("end", "").strip()
+        reason = request.form.get("reason", "").strip()
+        try:
+            duty_date = date_type.fromisoformat(chosen_date)
+            if duty_date > date_type.fromisoformat(now_date_str()):
+                raise ValueError("不能补录未来日期")
+            if role not in ROLES or not chosen_id or not reason:
+                raise ValueError("请选择义工、岗位并填写补录原因")
+            if not start or not end:
+                raise ValueError("请填写实际开始和结束时间")
+            from datetime import datetime as dt
+            def parse_clock(s):
+                for fmt in ("%H:%M", "%I:%M%p", "%I:%M %p"):
+                    try: return dt.strptime(s.strip(), fmt).strftime("%H:%M")
+                    except ValueError: pass
+                raise ValueError("时间格式不正确")
+            start24, end24 = parse_clock(start), parse_clock(end)
+            if end24 <= start24:
+                raise ValueError("结束时间必须晚于开始时间")
+            hours = round((int(end24[:2])*60+int(end24[3:]) - int(start24[:2])*60-int(start24[3:]))/60, 2)
+            if hours <= 0 or hours > 18:
+                raise ValueError("实际时数不合理，请核对")
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("select id, name from volunteers where id=%s and status='在册'", (chosen_id,))
+                    volunteer = cur.fetchone()
+                    if not volunteer:
+                        raise ValueError("找不到在册义工，请重新选择")
+                    cur.execute("""select * from attendance where date=%s and volunteer_id=%s
+                                   and role=%s order by id for update""", (chosen_date, chosen_id, role))
+                    existing = cur.fetchall() or []
+                    if len(existing) > 1:
+                        raise ValueError("当天此岗位有多笔记录，请先到历史记录核对，不能自动补录")
+                    if existing and existing[0].get('end_time'):
+                        raise ValueError("当天此岗位已有完成记录，请到历史记录修改，不重复新增")
+                    note = "管理员补录｜原因：" + reason
+                    if existing:
+                        old = existing[0]
+                        note = str(old.get('remark') or '') + '｜' + note + '｜补签退'
+                        cur.execute("""update attendance set start_time=%s,end_time=%s,hours=%s,remark=%s
+                                       where id=%s""", (start24,end24,hours,note,old['id']))
+                    else:
+                        cur.execute("""insert into attendance
+                                       (date,volunteer_id,name,signup,signin,role,start_time,end_time,hours,remark)
+                                       values (%s,%s,%s,1,1,%s,%s,%s,%s,%s)""",
+                                    (chosen_date,chosen_id,volunteer['name'],role,start24,end24,hours,note))
+                    # 值班可有多个合法排班分段日志；不能因为多笔日志而撤销补录。
+                    # 已有日志属于既有签到/排班，不擅自覆盖或另造重复日志。
+                    cur.execute("""select id, check_in_time, check_out_time
+                                   from volunteer_attendance_logs
+                                   where volunteer_id=%s and attendance_date=%s and actual_role=%s
+                                   order by id for update""", (chosen_id, chosen_date, role))
+                    logs = cur.fetchall() or []
+                    if not logs:
+                        # 仅完全没有对应岗位日志时，新增一笔真实历史时间的补录日志。
+                        cur.execute("""insert into volunteer_attendance_logs
+                                       (assignment_id,volunteer_id,name,attendance_date,actual_role,actual_place,
+                                        walk_in,remarks,check_in_time,check_out_time)
+                                       values (null,%s,%s,%s,%s,%s,true,%s,
+                                               %s::date + %s::time, %s::date + %s::time)""",
+                                    (chosen_id,volunteer['name'],chosen_date,role,role,note,
+                                     chosen_date,start24,chosen_date,end24))
+                    elif existing and len(logs) == 1 and logs[0]['check_out_time'] is None:
+                        # 只有明确一笔未签退日志且 attendance 原本未签退时才补日志签退。
+                        cur.execute("""update volunteer_attendance_logs
+                                       set check_out_time=%s::date + %s::time,
+                                           remarks=concat_ws('｜', nullif(remarks,''), %s)
+                                       where id=%s and check_out_time is null""",
+                                    (chosen_date,end24,note,logs[0]['id']))
+                    # 多笔值班分段日志或已签退日志：保留原状，不误改、不重复新增。
+            flash("补录成功；若该月份已生成报表，请重新生成月报。", "ok")
+            return redirect(url_for("admin.admin_add_record", pin=pin, date=chosen_date, id=chosen_id))
+        except (ValueError, TypeError) as exc:
+            flash(str(exc), "bad")
+        except Exception:
+            flash("保存失败，数据库未完成写入；请检查日志。", "bad")
+
+    chosen_date = request.args.get("date") or chosen_date
+    chosen_id = request.args.get("id") or chosen_id
+    if chosen_id:
+        records = db_query("""select id,role,start_time,end_time,hours from attendance
+                              where date=%s and volunteer_id=%s order by id""",
+                           (chosen_date,chosen_id),fetchall=True) or []
     return render_template_string("""
-    <!doctype html>
-    <html lang="zh">
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>补录签到</title>
-
-        <link rel="stylesheet"
-              href="{{ url_for('static', filename='css/toolbox.css') }}">
-    </head>
-
-    <body>
-
-    <div class="page">
-
-        <div class="card">
-
-            <h1 class="page-title">🛠 补录签到</h1>
-            <div class="page-subtitle">
-                手动新增义工签到记录
-            </div>
-
-            <form method="post">
-
-                <input type="hidden" name="pin" value="{{ pin }}">
-
-                <div class="form-group">
-                    <label class="form-label">日期</label>
-                    <input
-                        class="form-input"
-                        type="date"
-                        name="date"
-                        value="{{ today }}"
-                        required
-                    >
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">选择义工</label>
-                    <select
-                        class="form-input"
-                        name="id"
-                        id="vol_id"
-                        onchange="fillName()"
-                        required
-                    >
-                        <option value="">请选择义工</option>
-                        {% for v in volunteers %}
-                            <option value="{{ v.id }}">
-                                {{ v.name }}（{{ v.id }}）
-                            </option>
-                        {% endfor %}
-                    </select>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">姓名</label>
-                    <input
-                        class="form-input"
-                        type="text"
-                        name="name"
-                        id="vol_name"
-                        required
-                    >
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">岗位</label>
-                    <input
-                        class="form-input"
-                        type="text"
-                        name="role"
-                        placeholder="例如：值班 / 卫生 / 佛台"
-                    >
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">开始时间</label>
-                    <input
-                        class="form-input"
-                        type="text"
-                        name="start"
-                        value="{{ now }}"
-                        placeholder="例如：10:00am"
-                    >
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">结束时间</label>
-                    <input
-                        class="form-input"
-                        type="text"
-                        name="end"
-                        placeholder="例如：2:00pm"
-                    >
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">备注</label>
-                    <input
-                        class="form-input"
-                        type="text"
-                        name="remark"
-                        placeholder="可留空"
-                    >
-                </div>
-
-                <div class="btn-row">
-                    <button class="btn-tool btn-success" type="submit">
-                        添加记录
-                    </button>
-
-                    <a class="btn-tool btn-secondary"
-                       href="{{ url_for('admin.admin_report', pin=pin) }}">
-                        返回
-                    </a>
-                </div>
-
-            </form>
-
-        </div>
-
-    </div>
-
-    <script>
-    function fillName() {
-        const sel = document.getElementById("vol_id");
-        const text = sel.options[sel.selectedIndex].text;
-        const name = text.split("（")[0].trim();
-        document.getElementById("vol_name").value = name;
-    }
-    </script>
-
-    </body>
-    </html>
-    """,
-    pin=pin,
-    today=now_date_str(),
-    now=datetime.now(MY_TZ).strftime("%I:%M%p").lower(),
-    volunteers=volunteers
-    )
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>补录签到</title><link rel="stylesheet" href="{{ url_for('static', filename='css/toolbox.css') }}">
+<style>.backfill-input{min-height:52px;font-size:19px}.backfill-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:600px){.backfill-grid{grid-template-columns:1fr}}</style></head><body><div class="page"><div class="card">
+<h1 class="page-title">📝 管理员补录签到</h1><p>可补录过去任何日期；同岗位已有记录时不重复新增。</p>
+{% with messages=get_flashed_messages(with_categories=true) %}{% for category,msg in messages %}
+<div class="alert {{ 'alert-success' if category=='ok' else 'alert-danger' }}">{{ msg }}</div>
+{% endfor %}{% endwith %}
+<form method="get" id="lookupForm"><input type="hidden" name="pin" value="{{ pin }}">
+<div class="form-group"><label class="form-label">日期</label><input class="form-input backfill-input" type="date" name="date" value="{{ chosen_date }}" max="{{ today }}" required></div>
+<div class="form-group"><label class="form-label">义工编号／姓名</label>
+<select class="form-input backfill-input" name="id" required onchange="document.getElementById('lookupForm').submit()">
+<option value="">请选择义工</option>{% for v in volunteers %}<option value="{{ v.id }}" {{ 'selected' if v.id==chosen_id else '' }}>{{ v.name }}（{{ v.id }}）</option>{% endfor %}
+</select></div><button class="btn-tool btn-primary" type="submit">🔎 查询当天记录</button></form>
+{% if chosen_id %}<h2>📋 当天已有记录</h2>
+{% if records %}{% for r in records %}<div class="alert alert-success">{{ r.role }}：{{ r.start_time or '未签到' }} ～ {{ r.end_time or '未签退' }}（{{ r.hours or 0 }}小时）</div>{% endfor %}
+{% else %}<p>当天没有签到记录。</p>{% endif %}
+<form method="post"><input type="hidden" name="pin" value="{{ pin }}"><input type="hidden" name="action" value="save"><input type="hidden" name="date" value="{{ chosen_date }}"><input type="hidden" name="id" value="{{ chosen_id }}">
+<div class="form-group"><label class="form-label">补录岗位</label><select class="form-input backfill-input" name="role" required>
+{% for r in roles %}<option value="{{ r }}">{{ '整理佛台' if r=='佛台' else r }}</option>{% endfor %}</select></div>
+<div class="backfill-grid"><div class="form-group"><label class="form-label">实际开始</label><input class="form-input backfill-input" type="time" name="start" required></div>
+<div class="form-group"><label class="form-label">实际结束</label><input class="form-input backfill-input" type="time" name="end" required></div></div>
+<div class="form-group"><label class="form-label">补录原因</label><select class="form-input backfill-input" name="reason" required>
+<option value="忘记签到">忘记签到</option><option value="忘记签退">忘记签退</option><option value="不会操作">不会操作</option><option value="负责人核实补录">负责人核实补录</option></select></div>
+<button class="btn-tool btn-success" type="submit" onclick="return confirm('确认按填写时间补录这笔实际出席？')">✅ 确认补录</button></form>{% endif %}
+<p><a class="btn-tool btn-secondary" href="{{ url_for('admin.admin_report',pin=pin) }}">返回管理员页面</a></p>
+</div></div></body></html>
+""", pin=pin, today=now_date_str(), chosen_date=chosen_date, chosen_id=chosen_id,
+       volunteers=volunteers, records=records, roles=ROLES)
 
 @admin_bp.route("/admin_today_open")
 def admin_today_open():
