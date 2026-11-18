@@ -132,15 +132,7 @@ def publish_schedule_for_date(
         logging.getLogger(__name__).exception(
             '负责人发布成功，但首次排班快照建立失败：%s', target_date)
 
-    # 手动发布不受22:00窗口限制；已发布的排班也能接续建立基准与入队。
-    # 失败只记录，不回滚已成功的负责人发布；可安全再次按发布重试。
-    import logging
-    try:
-        from schedule.services.whatsapp_publish_2200 import finalize_published_roster
-        finalize_published_roster(str(target_date))
-    except Exception:
-        logging.getLogger(__name__).exception(
-            '负责人发布成功，但 WhatsApp 快照/正式表入队失败：%s', target_date)
+    # 手动发布只建立首次快照；正式通知由 22:00 tick 负责。
 
 
 def unpublish_schedule_for_date(target_date):

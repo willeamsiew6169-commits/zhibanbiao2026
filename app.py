@@ -754,6 +754,24 @@ PAGE = """
            style="display:none;">
       </div>
 
+        <div
+            class="form-group form-col"
+            id="card_no_group" style="display:none;">
+
+            <label class="form-label">
+                {{ t.card_no_duty_only }}
+            </label>
+
+            <input
+                class="form-input"
+                type="text"
+                name="card_no"
+                id="card_no"
+                placeholder="{{ t.card_no_duty_placeholder }}">
+
+            <div id="cardNoWarning" role="alert" style="display:none;color:#b02a37;font-weight:700;margin-top:8px;">{{ '⚠️ 请先填写义工卡号' if t.html_lang.startswith('zh') else 'Please enter your volunteer card number.' }}</div>
+        </div>
+
       <div class="form-row" id="signinOnlyFields">
 
         <div class="form-group form-col">
@@ -776,34 +794,9 @@ PAGE = """
 
         </div>
 
-        <div
-            class="form-group form-col"
-            id="card_no_group">
-
-            <label class="form-label">
-                {{ t.card_no_duty_only }}
-            </label>
-
-            <input
-                class="form-input"
-                type="text"
-                name="card_no"
-                id="card_no"
-                placeholder="{{ t.card_no_duty_placeholder }}">
-
-        </div>
 
     </div>
 
-      <div class="btn-row">
-        <button id="signInBtn"
-                class="btn-tool btn-success"
-                type="submit"
-                style="display:none;">
-            {{ t.confirm_checkin }}
-        </button>
-
-      </div>
 
     </form>
 
@@ -1047,7 +1040,6 @@ function currentLookupKey() {
 function invalidateLookup() {
   verifiedLookupKey = null;
   window.lastAttendanceLookup = null;
-  document.getElementById('signInBtn').style.display = 'none';
   document.getElementById('signOutBtn').style.display = 'none';
   document.getElementById('signoutRoleGroup').style.display = 'none';
   document.getElementById('assignment_id').value = '';
@@ -1056,6 +1048,8 @@ function invalidateLookup() {
   roleSelect.innerHTML = '';
   roleSelect.add(new Option(TXT.lookup_placeholder, ''));
   document.getElementById('signinRoleButtons').replaceChildren();
+  document.getElementById('card_no').value = '';
+  toggleCardNo();
 }
 async function lookupVolunteer() {
   invalidateLookup();
@@ -1072,7 +1066,6 @@ async function lookupVolunteer() {
   }
 
   const box = document.getElementById('personBox');
-  const btn = document.getElementById('signInBtn');
 
   if (!id) {
     box.style.display = 'block';
@@ -1135,10 +1128,8 @@ async function lookupVolunteer() {
       html += `<br><hr><b style="color:#b02a37;">${TXT.no_formal_duty}</b>`;
     }
 
-    const signInBtn = document.getElementById('signInBtn');
     const signOutBtn = document.getElementById('signOutBtn');
     const assignmentInput = document.getElementById('assignment_id');
-    signInBtn.style.display = 'none';
     signOutBtn.style.display = 'none';
     assignmentInput.value = '';
 
@@ -1176,31 +1167,24 @@ async function lookupVolunteer() {
       assignmentInput.value = data.current_assignment_id || '';
       html += `<br><hr><b style="color:#198754;">${TXT.currently_checked_in}</b>`;
     } else if (data.attendance_action === 'signin') {
-      signInBtn.style.display = '';
       assignmentInput.value = data.current_assignment_id || '';
       html += `<br><hr><b style="color:#0d6efd;">${TXT.currently_can_checkin}：${data.current_assignment_text || ''}</b>`;
     } else if (data.attendance_action === 'completed') {
       html += `<br><hr><b style="color:#198754;">✅ ${TXT.formal_duty_finished}</b>`;
-    } else {
-      // 试用期：没有正式排班时仍保留现场签到。
-      signInBtn.style.display = '';
     }
 
     box.innerHTML = html;
     refreshRoleAction();
     if (!pin) {
-      signInBtn.style.display = 'none';
       signOutBtn.style.display = 'none';
       html += `<br><span style="color:#666;">${TXT.pin_search_again}</span>`;
       box.innerHTML = html;
     }
     if (pin && !data.volunteer.pin_ok) {
-      signInBtn.style.display = 'none';
       signOutBtn.style.display = 'none';
       html += `<br><b style="color:#842029;">${TXT.pin_wrong}</b>`;
       box.innerHTML = html;
     }
-    btn.disabled = false;
 
   } else {
     box.className = 'alert alert-danger';
@@ -1306,10 +1290,8 @@ function refreshRoleAction() {
   const role = document.getElementById('role').value;
   const pinEntered = !!document.getElementById('pin').value.trim();
   const pinValid = !pinEntered || (verifiedLookupKey === currentLookupKey() && data.volunteer.pin_ok);
-  const signin = document.getElementById('signInBtn');
   const signout = document.getElementById('signOutBtn');
   const assignmentInput = document.getElementById('assignment_id');
-  signin.style.display = 'none';
   signout.style.display = 'none';
   assignmentInput.value = '';
   if (!pinValid || !pinEntered) return;
@@ -1318,20 +1300,21 @@ function refreshRoleAction() {
   const pending = (data.today_assignments || []).find(a => a.role === role && a.state === 'pending' &&
        (role !== '值班' || (data.eligible_duty_assignment_ids || []).includes(Number(a.id))));
   if (pending && pending.id && !pending.display_only) assignmentInput.value = pending.id;
-  signin.style.display = '';
 }
 
 function toggleCardNo() {
     // 岗位改变后，不沿用另一岗位的排班编号。
     document.getElementById("assignment_id").value = "";
-    const role = document.getElementById("role").value;
+    const data = window.lastAttendanceLookup;
+    const hasDuty = data && data.volunteer && data.volunteer.pin_ok && (data.eligible_roles || []).some(item => item.role === "值班");
     const group = document.getElementById("card_no_group");
 
-    if (role === "值班") {
+    if (hasDuty) {
         group.style.display = "block";
     } else {
         group.style.display = "none";
     }
+    document.getElementById("cardNoWarning").style.display = "none";
 
 }
 
@@ -1356,6 +1339,14 @@ function quickSignIn() {
     alert(TXT.enter_pin);
     return false;
   }
+
+  const card = document.getElementById('card_no');
+  if (document.getElementById('role').value === '值班' && !card.value.trim()) {
+    document.getElementById('cardNoWarning').style.display = 'block';
+    card.focus();
+    return false;
+  }
+  if (document.getElementById('role').value !== '值班') card.value = '';
 
   const idInput = document.getElementById("volunteer_id");
   const rawId = idInput.value.trim();
@@ -1475,6 +1466,9 @@ window.addEventListener("load", function() {
   if (adminPin) adminPin.value = "";
 
   toggleCardNo();
+  document.getElementById('card_no').addEventListener('input', function() {
+    if (this.value.trim()) document.getElementById('cardNoWarning').style.display = 'none';
+  });
 });
 </script>
 
@@ -1928,6 +1922,9 @@ def do_sign_in():
 
     volunteer_id = request.form.get("volunteer_id", "").strip()
     role = request.form.get("role", "").strip()
+    if role == "值班" and not request.form.get("card_no", "").strip():
+        flash("请先填写义工卡号。" if request.cookies.get("lang", "zh") != "en" else "Please enter your volunteer card number.", "bad")
+        return redirect(url_for("index"))
     # 三种岗位限制由 attendance_service.sign_in() 统一判断。
     # 不在路由重复检查，以免卫生报名被错误要求正式排班。
     ok, msg = sign_in(

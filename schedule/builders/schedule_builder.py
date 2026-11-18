@@ -2604,7 +2604,7 @@ def format_shift_block(items):
 
     lines = []
     for (start_txt, end_txt), names in sorted(
-        groups.items(), key=lambda entry: (_time_order(entry[0][0]), _time_order(entry[0][1]))
+        groups.items(), key=lambda entry: (_time_order(entry[0][0]), _time_order(entry[0][1])[0], -_time_order(entry[0][1])[1])
     ):
         lines.append("、".join(names))
         if start_txt and end_txt:

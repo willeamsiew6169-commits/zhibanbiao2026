@@ -78,9 +78,10 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
         {% if not is_volunteer %}<p><a href="/hongfa/dashboard">🏠 返回弘法管理首页</a></p>{% endif %}
         <p class="hf-muted">{% if is_volunteer %}已绑定今日签到，可登记本组结缘书籍。{% else %}负责人可扣书、点货及调整库存。{% endif %}</p>
         {% if error %}<p class="warn">{{error}}</p>{% endif %}{% if message %}<p style="color:#16854e">{{message}}</p>{% endif %}
+        {% if not is_volunteer %}<p><a class="btn" id="hb-manage-link" href="{{url_for('hongfa.books_manage')}}">⚙️ 管理书籍</a></p>{% endif %}
         {% if not teams %}<p>秘书可查看原有库存页面；本页面需要负责人组别权限。</p>{% else %}
         <label>弘法组</label><select id="hb-team" onchange="hbCart={};hbDraw()">{% for t in teams %}<option value="{{t.id}}">{{t.name}}</option>{% endfor %}</select>
-        {% if not is_volunteer %}<p><a class="btn" href="{{url_for('hongfa.books_add')}}" style="font-size:19px;font-weight:750">➕ 新增书籍</a></p>{% endif %}
+        {% if not is_volunteer and (who.secretary or who.leader_team_ids) %}<p><a class="btn" href="{{url_for('hongfa.books_add')}}" style="font-size:19px;font-weight:750">➕ 新增书籍</a></p>{% endif %}
         <div class="hb-tabs"><button id="hb-out-btn" class="on" onclick="hbTab('out')">📖 结缘扣书</button>{% if not is_volunteer %}<button id="hb-stock-btn" onclick="hbTab('stock')">📦 点货／补货</button>{% endif %}</div>
         <div id="hb-out-note" class="hf-muted">仅允许登记本组今天已发布且尚未结束的弘法活动；一次可选多种书。</div>
         <input id="hb-search" placeholder="🔍 输入书名立即搜索" oninput="hbDraw()">
@@ -93,13 +94,15 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
         let hbCart={},hbView='out',hbFilter='常用',hbBusy=false;
         const hbEl=id=>document.getElementById(id);
         function hbCategory(name,id){const saved=hbCategories.find(x=>x.item_id===id);if(saved)return saved.category;if(name.includes('佛言佛语'))return '佛言佛语';if(name.includes('白话佛法'))return '白话佛法';if(/手册|指南|小本|入门/.test(name))return '手册／小本';if(/[\u4e00-\u9fff]/.test(name))return '其他中文';return '英文';}
-        function hbTab(v){hbView=v;hbCart={};hbFilter='常用';hbEl('hb-out-btn').classList.toggle('on',v==='out');hbEl('hb-stock-btn').classList.toggle('on',v==='stock');hbEl('hb-out-note').classList.toggle('hb-hidden',v!=='out');hbEl('hb-bottom').classList.toggle('hb-hidden',v!=='out');hbDraw();}
+        function hbTab(v){hbView=v;hbCart={};hbFilter='常用';hbEl('hb-out-btn').classList.toggle('on',v==='out');hbEl('hb-stock-btn')?.classList.toggle('on',v==='stock');hbEl('hb-out-note').classList.toggle('hb-hidden',v!=='out');hbDraw();}
         function hbSetFilter(v){hbFilter=v;hbDraw();}
         function hbChange(id,d){hbCart[id]=Math.max(0,(hbCart[id]||0)+d);if(!hbCart[id])delete hbCart[id];hbDraw();}
         function hbDraw(){if(!hbEl('hb-team'))return;const t=hbEl('hb-team').value,q=hbEl('hb-search').value.trim().toLowerCase();
-          const filters=['常用','全部','佛言佛语','白话佛法','手册／小本','其他中文','英文'];
-          hbEl('hb-filters').innerHTML=filters.map(f=>`<button type="button" class="${hbFilter===f?'on':''}" onclick="hbSetFilter('${f}')">${f==='常用'?'⭐ ':''}${f}</button>`).join('');
-          const recent=JSON.parse(localStorage.getItem('hongfa_books_recent_'+t)||'[]');
+          const filters=[...new Set(['常用','全部','佛言佛语','白话佛法','手册／小本','其他中文','英文',...hbCategories.map(x=>x.category)])];
+          const box=hbEl('hb-filters');box.replaceChildren();
+          for(const f of filters){const b=document.createElement('button');b.type='button';b.className=hbFilter===f?'on':'';b.textContent=(f==='常用'?'⭐ ':'')+f;b.onclick=()=>hbSetFilter(f);box.appendChild(b);}
+          const fav=hbFavorites.filter(x=>String(x.team_id)===t).map(x=>x.item_id);
+          const manage=hbEl('hb-manage-link');if(manage)manage.href={{url_for('hongfa.books_manage')|tojson}}+'?team_id='+encodeURIComponent(t);
           let arr=hbItems.filter(x=>q?x.title.toLowerCase().includes(q):(hbFilter==='全部'||hbCategory(x.title,x.id)===hbFilter||hbFilter==='常用'));
           if(!q&&hbFilter==='常用'){arr=arr.filter(x=>fav.includes(x.id));if(!arr.length)arr=hbItems.slice(0,12);else arr.sort((a,b)=>fav.indexOf(a.id)-fav.indexOf(b.id));}
           arr.sort((a,b)=>(hbCart[b.id]||0)-(hbCart[a.id]||0));
@@ -108,7 +111,7 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
           hbEl('hb-books').querySelectorAll('.hb-name').forEach((e,i)=>e.textContent=arr[i].title);
           const chosen=hbItems.filter(x=>hbCart[x.id]>0);hbEl('hb-picked').innerHTML=chosen.length?'<div class="hb-picked"><b>✅ 已选书籍</b><div id="hb-picked-list"></div></div>':'';
           if(chosen.length){hbEl('hb-picked-list').textContent=chosen.map(x=>x.title+' × '+hbCart[x.id]).join('；');}
-          const sum=Object.values(hbCart).reduce((a,b)=>a+b,0);hbEl('hb-submit').textContent='确认结缘（'+sum+'本）';hbEl('hb-submit').disabled=!sum||hbBusy;
+          const sum=Object.values(hbCart).reduce((a,b)=>a+b,0);hbEl('hb-submit').textContent=hbView==='stock'?'保存点货数量':'确认结缘（'+sum+'本）';hbEl('hb-submit').disabled=!sum||hbBusy;
           if(hbView==='stock')hbEl('hb-out-note').classList.add('hb-hidden');
         }
         function hbSubmit(){if(hbBusy)return;const t=hbEl('hb-team').value,lines=Object.entries(hbCart).filter(x=>x[1]>0).map(x=>({item_id:Number(x[0]),quantity:x[1]}));if(!lines.length)return;
@@ -213,6 +216,7 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
         error = ''
         if request.method == 'POST':
             action = request.form.get('action')
+            if action in ('category','rename') and not (who['secretary'] or who.get('leader_team_ids')): abort(403)
             item_id = request.form.get('item_id', type=int)
             if not db_query('SELECT id FROM hongfa_items WHERE id=%s AND active=true', (item_id,), fetchone=True):
                 abort(400)
@@ -243,8 +247,8 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
                                 cur.execute('UPDATE hongfa_book_favorites SET sort_order=%s WHERE team_id=%s AND item_id=%s', (n,selected,i))
             elif action == 'category':
                 category=' '.join((request.form.get('category') or '').split())
-                if not 1<=len(category)<=40:
-                    error='分类名称须为1至40字。'
+                if not 1<=len(category)<=40 or category in ('常用','全部'):
+                    error='分类名称须为1至40字，不能使用常用或全部。'
                 else:
                     db_query('''INSERT INTO hongfa_book_categories(item_id,category) VALUES (%s,%s)
                         ON CONFLICT (item_id) DO UPDATE SET category=EXCLUDED.category''', (item_id,category))
@@ -271,7 +275,7 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
             x['category']=cmap.get(x['id']) or ('佛言佛语' if '佛言佛语' in x['title'] else '白话佛法' if '白话佛法' in x['title'] else '手册／小本' if any(k in x['title'] for k in ('手册','指南','小本','入门')) else '其他中文' if any('\u4e00'<=c<='\u9fff' for c in x['title']) else '英文')
             x['fav_order']=fids.get(x['id'])
         return render('''<div class="card"><h2>⚙️ 管理书籍</h2>
-          <p><a href="{{url_for('hongfa.books')}}">← 返回快速扣书</a>　<a href="{{url_for('hongfa.books_add')}}">➕ 新增书籍</a></p>
+          <p><a href="{{url_for('hongfa.books')}}">← 返回快速扣书</a>　{% if can_catalog %}<a href="{{url_for('hongfa.books_add')}}">➕ 新增书籍</a>{% endif %}</p>
           <p class="hf-muted">书名和分类三组共用；⭐ 常用及顺序只影响所选组。修改不会改变库存。</p>
           {% if error %}<p class="warn">{{error}}</p>{% endif %}{% if request_saved %}<p style="color:green">✅ 已保存</p>{% endif %}
           <label>选择弘法组（设置常用）</label><select onchange="location.href='?team_id='+this.value">{% for t in teams %}<option value="{{t.id}}" {% if t.id==selected %}selected{% endif %}>{{t.name}}</option>{% endfor %}</select>
@@ -281,16 +285,16 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
             <div style="display:flex;flex-wrap:wrap;gap:5px;margin:8px 0">
             <form method="post"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="team_id" value="{{selected}}"><input type="hidden" name="item_id" value="{{x.id}}"><input type="hidden" name="action" value="favorite"><button style="padding:8px">{{'取消常用' if x.fav_order else '⭐ 设为常用'}}</button></form>
             {% if x.fav_order %}{% for a,label in [('up','⬆️'),('down','⬇️')] %}<form method="post"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="team_id" value="{{selected}}"><input type="hidden" name="item_id" value="{{x.id}}"><button name="action" value="{{a}}" style="padding:8px">{{label}}</button></form>{% endfor %}{% endif %}</div>
-            <form method="post" style="display:flex;gap:6px;align-items:center"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="team_id" value="{{selected}}"><input type="hidden" name="item_id" value="{{x.id}}"><input type="hidden" name="action" value="category"><input name="category" value="{{x.category}}" maxlength="40" aria-label="分类" style="min-width:0;flex:1"><button style="white-space:nowrap">保存分类</button></form>
-            <form method="post" style="display:flex;gap:6px;align-items:center"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="team_id" value="{{selected}}"><input type="hidden" name="item_id" value="{{x.id}}"><input type="hidden" name="action" value="rename"><input name="title" value="{{x.title}}" maxlength="150" aria-label="书籍名称" style="min-width:0;flex:1"><button style="white-space:nowrap">改书名</button></form>
+            {% if can_catalog %}<form method="post" style="display:flex;gap:6px;align-items:center"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="team_id" value="{{selected}}"><input type="hidden" name="item_id" value="{{x.id}}"><input type="hidden" name="action" value="category"><input name="category" value="{{x.category}}" maxlength="40" aria-label="分类" style="min-width:0;flex:1"><button style="white-space:nowrap">保存分类</button></form>
+            <form method="post" style="display:flex;gap:6px;align-items:center"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="team_id" value="{{selected}}"><input type="hidden" name="item_id" value="{{x.id}}"><input type="hidden" name="action" value="rename"><input name="title" value="{{x.title}}" maxlength="150" aria-label="书籍名称" style="min-width:0;flex:1"><button style="white-space:nowrap">改书名</button></form>{% endif %}
           </div>{% endfor %}</div></div>
-          <script>function hbManageFilter(){var q=document.getElementById('hb-manage-search').value.trim().toLowerCase();document.querySelectorAll('.hb-manage-row').forEach(function(r){r.style.display=r.dataset.title.includes(q)?'':'none';});}</script>''',csrf=csrf_token(),teams=teams,selected=selected,items=items,error=error,request_saved=request.args.get('saved')=='1')
+          <script>function hbManageFilter(){var q=document.getElementById('hb-manage-search').value.trim().toLowerCase();document.querySelectorAll('.hb-manage-row').forEach(function(r){r.style.display=r.dataset.title.includes(q)?'':'none';});}</script>''',csrf=csrf_token(),teams=teams,selected=selected,items=items,error=error,can_catalog=bool(who['secretary'] or who.get('leader_team_ids')),request_saved=request.args.get('saved')=='1')
 
     @bp.route('/books/add', methods=['GET', 'POST'])
     @guard
     def books_add(who):
         # 只有负责人或秘书可维护共用书籍目录；签到义工不能新增。
-        if who.get('book_volunteer') or not (who['secretary'] or who['team_ids']):
+        if who.get('book_volunteer') or not (who['secretary'] or who.get('leader_team_ids')):
             abort(403)
         error = ''
         if request.method == 'POST':

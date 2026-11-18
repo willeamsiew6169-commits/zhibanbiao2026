@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from flask import Blueprint, abort, redirect, render_template_string, request, session, url_for
 from attendance_service import find_volunteer, verify_pin_for_volunteer
-from db import db_query
+from db import db_query, get_conn
 
 hongfa_bp = Blueprint('hongfa', __name__, url_prefix='/hongfa')
 TZ = ZoneInfo('Asia/Kuala_Lumpur')
@@ -52,11 +52,16 @@ def actor():
     # 权限每次从数据库读取，撤销后即时失效。
     roles = db_query('''SELECT role,team_id FROM hongfa_roles
         WHERE volunteer_id=%s AND active=true''', (vid,), fetchall=True) or []
-    if not roles:
+    admins = db_query("SELECT a.team_id FROM hongfa_team_admins a JOIN hongfa_teams t ON t.id=a.team_id WHERE a.volunteer_id=%s AND t.active=true", (vid,), fetchall=True) or []
+    secretary = any(x['role']=='secretary' for x in roles)
+    leaders = {x['team_id'] for x in roles if x['role']=='leader' and x['team_id'] is not None}
+    teams = leaders | {x['team_id'] for x in admins}
+    if not secretary and not teams:
         session.pop('hongfa_volunteer_id', None)
         return None
-    return {'id':vid,'secretary':any(r['role']=='secretary' for r in roles),
-            'team_ids':sorted({r['team_id'] for r in roles if r['role']=='leader' and r['team_id'] is not None})}
+    return {'id':vid,'secretary':secretary,'leader_team_ids':sorted(leaders),
+            'team_ids':sorted(teams),'small_admin':bool(teams and not leaders and not secretary)}
+
 
 
 def require_login(fn):
@@ -94,7 +99,7 @@ def index():
         {% if e.maps_url %}<br><a href="{{e.maps_url}}" rel="noopener noreferrer" target="_blank">📍 地图导航</a>{% endif %}</div>
         {% else %}<p>未来六天暂无已发布的弘法活动。</p>{% endfor %}
         <p class="hf-muted">未来活动仅供查看，活动当天才会出现签到入口。</p></div>
-        <a class="btn hf-floating-login" href="{{url_for('hongfa.login')}}">🔐 负责人／秘书登录</a>''',
+        <a class="btn hf-floating-login" href="{{url_for('hongfa.login')}}">🔐 负责人／小管理员／秘书登录</a>''',
         current=current, upcoming=upcoming)
 
 
@@ -119,10 +124,10 @@ def login():
                 error = '编号或 PIN 不正确。'
             else:
                 vid = str(vol['编号'])
-                roles = db_query('SELECT 1 FROM hongfa_roles WHERE volunteer_id=%s AND active=true LIMIT 1',
-                                 (vid,),fetchone=True)
+                roles = db_query('SELECT 1 FROM hongfa_roles WHERE volunteer_id=%s AND active=true UNION ALL SELECT 1 FROM hongfa_team_admins a JOIN hongfa_teams t ON t.id=a.team_id WHERE a.volunteer_id=%s AND t.active=true LIMIT 1',
+                                 (vid,vid),fetchone=True)
                 if not roles:
-                    error = '此编号尚未获得弘法负责人／秘书权限。'
+                    error = '此编号尚未获得弘法管理权限。'
                 else:
                     # 只设置弘法身份，不清空其他独立系统的 Session。
                     session['hongfa_volunteer_id'] = vid
@@ -164,7 +169,7 @@ def dashboard():
     if not display_name:
         display_name = {'CHE-50':'俊达师兄','CHE-69':'Alex师兄','CHE-228':'诗霞师兄'}.get(who['id'], who['id'])
     team_names = db_query('SELECT name FROM hongfa_teams WHERE id=ANY(%s) ORDER BY id', (who['team_ids'],), fetchall=True) or []
-    role_label = '弘法秘书' if who['secretary'] else '、'.join(t['name'] for t in team_names) + '负责人'
+    role_label = '弘法秘书' if who['secretary'] else '、'.join(t['name'] for t in team_names) + ('小管理员' if who['small_admin'] else '负责人')
     today = datetime.now(TZ).date()
     today_events = db_query('''SELECT e.id,t.name AS team_name,l.name AS location_name FROM hongfa_events e
         JOIN hongfa_teams t ON t.id=e.team_id LEFT JOIN hongfa_locations l ON l.id=e.location_id
@@ -174,9 +179,9 @@ def dashboard():
     return render('''<div class="card"><div style="font-size:27px;font-weight:800;line-height:1.4">👤 {{display_name}}</div>
         <div style="font-size:21px;font-weight:700;margin-top:6px">{{role_label}}</div>
         <p style="color:#63746a">编号：{{who.id}}</p>
-        <p>身份：{{'秘书（跨组查看）' if who.secretary else '负责人（仅自己的组）'}}</p>
+        <p>身份：{{'秘书（跨组查看）' if who.secretary else ('小管理员（仅自己的组）' if who.small_admin else '负责人（仅自己的组）')}}</p>
         {% for e in today_events %}<p><a class="btn" href="{{url_for('hongfa.event_code',event_id=e.id)}}">🔐 生成今日签到码｜{{e.team_name}}</a></p>{% endfor %}
-        <h2>📅 弘法安排</h2>
+        {% if who.secretary or who.leader_team_ids %}<p><a class="btn" href="{{url_for('hongfa.team_admins')}}">👥 小管理员设置</a></p>{% endif %}<h2>📅 弘法安排</h2>
         {% for e in rows %}<p>{{e.event_date}}｜{{e.team_name}}｜{{e.location_name or 'Off'}}｜{{e.status}}</p>
         {% else %}<p>暂无安排。</p>{% endfor %}
         <p><a class="btn" href="/hongfa/plans">📅 活动提交／审核</a> <a class="btn" href="/hongfa/week">📋 每周表</a> <a class="btn" href="/hongfa/locations">📍 地点</a> <a class="btn" href="/hongfa/attendance">👥 出席</a> <a class="btn" href="/hongfa/books">📚 快速扣书／点货</a> <a class="btn" href="/hongfa/stock">📚 原库存</a> <a class="btn" href="/hongfa/report">📊 报表</a> {% if who.secretary %}<a class="btn" href="/hongfa/items">📖 经书目录</a>{% endif %}</p><small>第三批本地测试中，请勿直接用于正式签到。</small></div>
@@ -201,3 +206,52 @@ register_phase3(hongfa_bp, actor, render, csrf_token, valid_csrf)
 # 经书快速登记独立模块：保留原库存及报表逻辑。
 from .hongfa_books import register_books
 register_books(hongfa_bp, actor, render, csrf_token, valid_csrf)
+
+
+@hongfa_bp.route('/team-admins', methods=['GET','POST'])
+@require_login
+def team_admins():
+    who = actor()
+    teams = db_query('SELECT id,name FROM hongfa_teams WHERE active=true ORDER BY id',fetchall=True) or []
+    teams = [t for t in teams if who['secretary'] or t['id'] in who['leader_team_ids']]
+    if not teams: abort(403)
+    allowed = {t['id'] for t in teams}
+    selected = request.values.get('team_id',type=int)
+    if selected is None: selected = teams[0]['id']
+    if selected not in allowed: abort(403)
+    error = ''; candidate = None
+    if request.method=='POST':
+        if not valid_csrf(): abort(400)
+        action = request.form.get('action')
+        if action in ('lookup','add'):
+            branch=request.form.get('branch','CHE'); number=request.form.get('number','').strip()
+            if branch not in ('CHE','STW') or not number.isascii() or not number.isdigit() or not 1<=len(number)<=6 or int(number)==0:
+                error='编号格式不正确。'
+            else:
+                n=int(number); vid=str(n) if branch=='CHE' and 800<=n<=899 else f'{branch}-{n}'
+                v=find_volunteer(vid)
+                if not v or str(v.get('编号','')).strip().upper()!=vid.upper() or v.get('状态') not in ('在册','',None) or not str(v.get('PIN') or '').strip():
+                    error='找不到有效在册义工，或尚未设置 PIN。'
+                elif db_query("SELECT 1 FROM hongfa_roles WHERE volunteer_id=%s AND active=true LIMIT 1",(vid,),fetchone=True):
+                    error='此义工已有负责人或秘书身份。'
+                elif action=='lookup':
+                    candidate={'id':vid,'name': admin_name(v,vid),'branch':branch,'number':n}
+                else:
+                    db_query("INSERT INTO hongfa_team_admins(team_id,volunteer_id,created_by) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",(selected,vid,who['id']))
+                    return redirect(url_for('hongfa.team_admins',team_id=selected))
+        elif action=='remove':
+            db_query('DELETE FROM hongfa_team_admins WHERE team_id=%s AND volunteer_id=%s',(selected,request.form.get('vid','')))
+            return redirect(url_for('hongfa.team_admins',team_id=selected))
+        else: abort(400)
+    rows=db_query('SELECT volunteer_id FROM hongfa_team_admins WHERE team_id=%s ORDER BY volunteer_id',(selected,),fetchall=True) or []
+    for row in rows: row['name']=admin_name(find_volunteer(row['volunteer_id']) or {},row['volunteer_id'])
+    return render('''<div class="card"><h2>👥 小管理员设置</h2><p><a href="{{url_for('hongfa.dashboard')}}">🏠 返回管理首页</a></p>
+    <label>弘法组</label><select onchange="location.href='?team_id='+this.value">{% for t in teams %}<option value="{{t.id}}" {% if t.id==selected %}selected{% endif %}>{{t.name}}</option>{% endfor %}</select>
+    {% if error %}<p class="warn">{{error}}</p>{% endif %}
+    <form method="post"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="team_id" value="{{selected}}"><div class="hf-id-row"><input type="hidden" id="ha-branch" name="branch" value="CHE"><button type="button" class="hf-branch-toggle che" onclick="var i=document.getElementById('ha-branch');i.value=i.value==='CHE'?'STW':'CHE';this.textContent=i.value;this.className='hf-branch-toggle '+i.value.toLowerCase()">CHE</button><input name="number" required inputmode="numeric" pattern="[0-9]+" maxlength="6" placeholder="义工编号（数字）"></div><button name="action" value="lookup">查询义工</button></form>
+    {% if candidate %}<form method="post"><p><b>{{candidate.name}}｜{{candidate.id}}</b></p><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="team_id" value="{{selected}}"><input type="hidden" name="branch" value="{{candidate.branch}}"><input type="hidden" name="number" value="{{candidate.number}}"><button name="action" value="add">➕ 添加小管理员</button></form>{% endif %}
+    <h3>现有小管理员</h3>{% for row in rows %}<form method="post" class="hf-event" onsubmit="return confirm('确认解除权限？')"><b>{{row.name}}｜{{row.volunteer_id}}</b><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="team_id" value="{{selected}}"><input type="hidden" name="vid" value="{{row.volunteer_id}}"><button name="action" value="remove" style="background:#a33">解除权限</button></form>{% else %}<p>暂无小管理员。</p>{% endfor %}</div>''', teams=teams,selected=selected,rows=rows,error=error,candidate=candidate,csrf=csrf_token())
+
+
+def admin_name(v,vid):
+    return next((str(v[k]).strip() for k in ('中文姓名','姓名','名字','name') if v.get(k)),vid)

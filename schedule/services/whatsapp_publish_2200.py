@@ -142,7 +142,7 @@ def _execute_locked(target, marker, auto_publish, send_roster):
 
 
 def finalize_published_roster(target):
-    '''首次发布后建立不可覆盖的基准并入队正式表；可由自动或手动发布调用。
+    '''仅在22:00窗口内建立正式基准并入队正式表。
 
     快照和通知 Job 同一事务提交；相同日期的重复调用不会重复发送。
     仅限现有 TEST_GROUP_ONLY 测试模式及已开启的自动正式表通知。
@@ -151,6 +151,11 @@ def finalize_published_roster(target):
     from schedule.services.whatsapp_service import build_whatsapp_from_assigned
     from schedule.services.whatsapp_morning_summary import _assignments, _key
     import json
+
+    now = malaysia_now()
+    if not (now.hour == 22 and now.minute < 20
+            and str(target) == (now.date() + timedelta(days=1)).isoformat()):
+        return {'status': 'outside_window', 'target_date': target}
 
     if not is_schedule_published(target):
         return {'status': 'not_published', 'target_date': target}
@@ -165,24 +170,12 @@ def finalize_published_roster(target):
 
     # 先核对实际值班时间覆盖，避免将不完整的值班表发送出去。
     _validate_coverage(target)
-    body = build_whatsapp_from_assigned(target)
-    if not isinstance(body, str) or not body.strip() or body.lstrip().startswith('❌'):
-        raise RuntimeError('正式值班表文案生成失败；停止通知')
 
     marker = 'auto_roster_2200:' + target  # 沿用旧标记，防止重复发送。
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute('SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))',
                         ('gyt_morning_baseline', target))
-            # 在同一事务内建立基准和 Job，防止只建快照却未入队。
-            # 首次基准不可覆盖；发布后新增报名只在早上汇总通知。
-            cur.execute('SELECT baseline FROM whatsapp_morning_snapshots WHERE target_date=%s', (target,))
-            previous_snapshot = cur.fetchone()
-            if not previous_snapshot:
-                rows = _assignments(cur, target)
-                cur.execute('''INSERT INTO whatsapp_morning_snapshots(target_date, baseline)
-                    VALUES (%s, %s::jsonb) ON CONFLICT(target_date) DO NOTHING''',
-                    (target, json.dumps([list(_key(r)) for r in rows], ensure_ascii=False)))
             cur.execute('''SELECT id FROM whatsapp_notification_jobs
                 WHERE created_by=%s AND target_date=%s ORDER BY id LIMIT 1''', (marker, target))
             existing = cur.fetchone()
@@ -190,6 +183,18 @@ def finalize_published_roster(target):
                 job_id = existing['id'] if isinstance(existing, dict) else existing[0]
                 result = {'status': 'already_queued', 'target_date': target, 'job_id': job_id}
             else:
+                # 文案生成前后核对实际名单；有并发变动则停止并由 tick 重试。
+                rows = _assignments(cur, target)
+                body = build_whatsapp_from_assigned(target)
+                if not isinstance(body, str) or not body.strip() or body.lstrip().startswith('❌'):
+                    raise RuntimeError('正式值班表文案生成失败；停止通知')
+                if rows != _assignments(cur, target):
+                    raise RuntimeError('排班正在变动，稍后重试正式通知')
+                # 仅首次正式入队时更新早期发布快照，和 Job 一起提交。
+                cur.execute('''INSERT INTO whatsapp_morning_snapshots(target_date, baseline)
+                    VALUES (%s, %s::jsonb) ON CONFLICT(target_date) DO UPDATE
+                    SET baseline=EXCLUDED.baseline''',
+                    (target, json.dumps([list(_key(r)) for r in rows], ensure_ascii=False)))
                 cur.execute('''INSERT INTO whatsapp_notification_jobs
                     (message_type, target_date, destination, body, status, created_by)
                     VALUES ('test', %s, 'TEST_GROUP_ONLY', %s, 'pending', %s)

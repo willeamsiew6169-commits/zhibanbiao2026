@@ -186,6 +186,20 @@ def build_whatsapp_from_assigned(date_str):
             for i, item in enumerate(original) if i not in hidden
         ]
 
+    # 仅调整显示顺序：开始早优先，同一开始时间结束晚优先。
+    # 无法解析的时段保留在原位置；完全相同时维持原顺序。
+    def _display_key(item):
+        begin, finish = _minute(item[1]), _minute(item[2])
+        return (begin, -finish) if begin is not None and finish is not None and finish > begin else None
+
+    for duty_key in ("绿观音堂", "绿活动中心", "橙观音堂", "橙活动中心",
+                     "黄观音堂", "黄活动中心"):
+        items = arranged[duty_key]
+        valid = iter(sorted((item for item in items if _display_key(item) is not None),
+                            key=_display_key))
+        arranged[duty_key] = [next(valid) if _display_key(item) is not None else item
+                              for item in items]
+
     if template_type == "normal":
         return build_normal_message(
             date_obj,

@@ -148,11 +148,29 @@ def library_permission_denied():
     <!doctype html><html lang="zh"><head>
     <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <link rel="stylesheet" href="/static/css/toolbox.css">
-    <title>没有权限</title></head><body><div class="page"><div class="card">
+    <title>没有权限</title><style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+</head><body><div class="page"><div class="card">
     <h1 class="page-title">🔒 没有权限</h1>
     <p class="page-subtitle">你的负责人账号没有这个功能的权限。</p>
-    <div class="btn-row"><a class="btn-tool btn-secondary" href="/library/admin/home">返回负责人专区</a></div>
-    </div></div></body></html>
+    <div class="btn-row"></div>
+    </div></div><a class="library-floating-back" href="/library/admin/home">↩ 返回</a>
+</body></html>
     """), 403
 
 def get_library_out_volunteer():
@@ -578,7 +596,24 @@ def library_upload():
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>上传藏经阁库存</title>
         <link rel="stylesheet" href="/static/css/toolbox.css">
-    </head>
+    <style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+</head>
     <body>
     <div class="page">
 
@@ -610,16 +645,15 @@ def library_upload():
                         上传并更新库存
                     </button>
 
-                    <a class="btn-tool btn-secondary" href="/library">
-                        返回
-                    </a>
+                    
                 </div>
 
             </form>
         </div>
 
     </div>
-    </body>
+    <a class="library-floating-back" href="/library/admin/home">↩ 返回</a>
+</body>
     </html>
     """, message=message, error=error)
 
@@ -840,7 +874,24 @@ def library_search():
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>法物查询</title>
         <link rel="stylesheet" href="/static/css/toolbox.css">
-    </head>
+    <style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+</head>
 
     <body>
     <div class="page">
@@ -866,9 +917,7 @@ def library_search():
                         🔎 搜索
                     </button>
 
-                    <a class="btn-tool btn-secondary" href="/library">
-                        返回
-                    </a>
+                    
                 </div>
             </form>
         </div>
@@ -942,7 +991,8 @@ def library_search():
         {% endif %}
 
     </div>
-    </body>
+    <a class="library-floating-back" href="/library">↩ 返回</a>
+</body>
     </html>
     """, keyword=keyword, items=items)
 
@@ -1005,7 +1055,24 @@ def library_item_detail(item_code):
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>{{ item.name }}</title>
         <link rel="stylesheet" href="/static/css/toolbox.css">
-    </head>
+    <style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+</head>
 
     <body>
     <div class="page">
@@ -1064,10 +1131,7 @@ def library_item_detail(item_code):
                     📥 入库
                 </a>
 
-                <a class="btn-tool btn-secondary"
-                   href="/library/search">
-                    返回查询
-                </a>
+                
             </div>
         </div>
 
@@ -1122,7 +1186,8 @@ def library_item_detail(item_code):
         </div>
 
     </div>
-    </body>
+    <a class="library-floating-back" href="/library/search">↩ 返回</a>
+</body>
     </html>
     """, item=item, records=records)
 
@@ -1190,7 +1255,24 @@ def library_out():
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <link rel="stylesheet" href="/static/css/toolbox.css">
     <title>义工领取法物</title>
-    </head>
+    <style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+</head>
 
     <body>
 
@@ -1251,11 +1333,7 @@ def library_out():
     继续领取
     </button>
 
-    <a
-    href="/library"
-    class="btn-tool btn-secondary">
-    返回首页
-    </a>
+    
 
     </div>
 
@@ -1284,7 +1362,8 @@ function toggleBranch() {
 }
 </script>
 
-    </body>
+    <a class="library-floating-back" href="/library">↩ 返回</a>
+</body>
     </html>
     """, error=error)
 
@@ -1380,6 +1459,23 @@ def library_admin():
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>藏经阁负责人专区</title>
 <link rel="stylesheet" href="/static/css/toolbox.css">
+<style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
 </head><body><div class="page"><div class="card">
 <h1 class="page-title">⚙️ 负责人专区</h1>
 
@@ -1410,9 +1506,10 @@ def library_admin():
 
 <div class="btn-row">
 <button class="btn-tool btn-warning" type="submit">登入</button>
-<a class="btn-tool btn-secondary" href="/library">返回</a>
+
 </div></form>
-</div></div></body></html>
+</div></div><a class="library-floating-back" href="/library">↩ 返回</a>
+</body></html>
 """, error=error, bootstrap=bootstrap)
 
 @library_bp.route("/admin/home")
@@ -1445,7 +1542,24 @@ def library_admin_home():
     return render_template_string("""
 <!doctype html><html lang="zh"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>藏经阁负责人</title><link rel="stylesheet" href="/static/css/toolbox.css"></head><body>
+<title>藏经阁负责人</title><link rel="stylesheet" href="/static/css/toolbox.css"><style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+</head><body>
 <div class="page"><div class="card">
 <h1 class="page-title">📚 藏经阁负责人</h1>
 <p class="page-subtitle">{{ admin.volunteer_name or admin.volunteer_id }} · {{ role_label }} · {{ admin.email }}</p>
@@ -1479,9 +1593,10 @@ def library_admin_home():
 {% if can_manage_permissions %}<a class="btn-tool" style="background:#0d9488;color:white;" href="/library/admin/users">👥 负责人权限</a>{% endif %}
 </div>
 <hr style="margin:35px 0;"><div class="btn-row">
-<a class="btn-tool btn-secondary" href="/library">返回藏经阁首页</a>
+
 <a class="btn-tool btn-danger" href="/library/admin/logout">退出负责人专区</a>
-</div></div></div></body></html>
+</div></div></div><a class="library-floating-back" href="/library">↩ 返回</a>
+</body></html>
 """,
         admin=admin,
         role_label=library_role_label(admin),
@@ -1685,6 +1800,23 @@ def library_admin_users():
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>负责人权限</title>
 <link rel="stylesheet" href="/static/css/toolbox.css">
+<style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
 </head>
 <body>
 <div class="page">
@@ -1703,7 +1835,7 @@ def library_admin_users():
     {% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
     {% if success %}<div class="alert alert-success">{{ success }}</div>{% endif %}
 
-    <a class="btn-tool btn-secondary" href="/library/admin/home">← 返回负责人专区</a>
+    
 </div>
 
 <div class="card">
@@ -1824,6 +1956,7 @@ def library_admin_users():
 {% endfor %}
 
 </div>
+<a class="library-floating-back" href="/library/admin/home">↩ 返回</a>
 </body>
 </html>
 """,
@@ -1872,16 +2005,34 @@ def library_admin_audit():
 
     return render_template_string("""
 <!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>操作日志</title><link rel="stylesheet" href="/static/css/toolbox.css"></head><body><div class="page">
+<title>操作日志</title><link rel="stylesheet" href="/static/css/toolbox.css"><style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+</head><body><div class="page">
 <div class="card"><h1 class="page-title">🧾 操作日志</h1><p class="page-subtitle">负责人做过的入库、调整、撤销、资料修改和权限修改都会留下记录。</p>
 <form method="get"><div class="form-group"><label class="form-label">搜索</label><input class="form-input" name="q" value="{{ q }}" placeholder="姓名 / Email / 法物 / 编号 / 备注"></div>
 <div class="form-group"><label class="form-label">操作类型</label><select class="form-input" name="action"><option value="">全部</option>{% for a in actions %}<option value="{{ a }}" {% if a==action %}selected{% endif %}>{{ a }}</option>{% endfor %}</select></div>
-<div class="btn-row"><button class="btn-tool btn-primary">搜索</button><a class="btn-tool btn-secondary" href="/library/admin/home">返回负责人专区</a></div></form></div>
+<div class="btn-row"><button class="btn-tool btn-primary">搜索</button></div></form></div>
 <div class="card"><div class="table-responsive"><table class="record-table"><thead><tr><th>时间</th><th>负责人</th><th>操作</th><th>法物</th><th>变化</th><th>库存</th><th>详情</th></tr></thead><tbody>
 {% for r in rows %}<tr><td>{{ r.created_at_my }}</td><td>{{ r.volunteer_name or r.volunteer_id or '-' }}<br><small>{{ r.user_email or '' }}</small></td><td>{{ r.action }}</td>
 <td>{{ r.item_name or '-' }}{% if r.item_code %}<br><small>{{ r.item_code }}</small>{% endif %}</td><td>{% if r.quantity_change is not none %}{{ '%+d'|format(r.quantity_change) }}{% else %}-{% endif %}</td>
 <td>{% if r.balance_before is not none %}{{ r.balance_before }} → {{ r.balance_after }}{% else %}-{% endif %}</td><td>{{ r.detail or '-' }}</td></tr>{% endfor %}
-</tbody></table></div>{% if not rows %}<div class="empty-state">没有操作日志</div>{% endif %}</div></div></body></html>
+</tbody></table></div>{% if not rows %}<div class="empty-state">没有操作日志</div>{% endif %}</div></div><a class="library-floating-back" href="/library/admin/home">↩ 返回</a>
+</body></html>
 """, rows=rows, q=keyword, action=action, actions=["LOGIN","LOGOUT","ADMIN_BOOTSTRAP","ADMIN_CREATE","ADMIN_EDIT","BATCH_IN","SINGLE_IN","STOCKTAKE_ADJUST","CANCEL_TRANSACTION","ITEM_EDIT"])
 
 @library_bp.route("/items")
@@ -1943,6 +2094,23 @@ def library_items():
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>法物管理</title>
 <link rel="stylesheet" href="/static/css/toolbox.css">
+<style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
 </head>
 
 <body>
@@ -1971,9 +2139,7 @@ value="{{ request.args.get('q','') }}">
 搜索
 </button>
 
-<a class="btn-tool btn-secondary" href="/library/admin/home">
-返回负责人专区
-</a>
+
 </div>
 
 </form>
@@ -2008,6 +2174,7 @@ href="/library/items/edit/{{ item.item_code }}">
 
 </div>
 </div>
+<a class="library-floating-back" href="/library/admin/home">↩ 返回</a>
 </body>
 </html>
 """,
@@ -2099,6 +2266,23 @@ def library_records():
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>进出记录</title>
 <link rel="stylesheet" href="/static/css/toolbox.css">
+<style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
 </head>
 
 <body>
@@ -2129,9 +2313,7 @@ value="{{ request.args.get('q','') }}">
 搜索
 </button>
 
-<a class="btn-tool btn-secondary" href="/library/admin/home">
-返回负责人专区
-</a>
+
 
 </div>
 
@@ -2258,6 +2440,7 @@ style="color:#999;text-decoration:line-through;background:#f8f8f8;"
 
 </div>
 </div>
+<a class="library-floating-back" href="/library/admin/home">↩ 返回</a>
 </body>
 </html>
 """,
@@ -2299,7 +2482,24 @@ def library_low_stock():
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>库存不足</title>
         <link rel="stylesheet" href="/static/css/toolbox.css">
-    </head>
+    <style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+</head>
 
     <body>
     <div class="page">
@@ -2311,9 +2511,7 @@ def library_low_stock():
             </p>
 
             <div class="btn-row">
-                <a class="btn-tool btn-secondary" href="{{ url_for('library.library_admin_home') }}">
-                    ← 返回负责人专区
-                </a>
+                
             </div>
         </div>
 
@@ -2385,7 +2583,8 @@ def library_low_stock():
         </div>
 
     </div>
-    </body>
+    <a class="library-floating-back" href="{{ url_for('library.library_admin_home') }}">↩ 返回</a>
+</body>
     </html>
     """, items=items)
 
@@ -2456,6 +2655,23 @@ href="/static/css/toolbox.css">
 
 <title>法物入库</title>
 
+<style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
 </head>
 
 <body>
@@ -2497,13 +2713,7 @@ class="btn-tool btn-primary">
 
 </button>
 
-<a
-class="btn-tool btn-secondary"
-href="/library/admin/home">
 
-返回负责人专区
-
-</a>
 
 </div>
 
@@ -2576,6 +2786,7 @@ style="margin-top:20px;">
 
 </div>
 
+<a class="library-floating-back" href="/library/admin/home">↩ 返回</a>
 </body>
 
 </html>
@@ -2705,6 +2916,23 @@ href="/static/css/toolbox.css">
 
 <title>法物入库</title>
 
+<style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
 </head>
 
 <body>
@@ -2827,13 +3055,7 @@ class="btn-tool btn-success">
 
 </button>
 
-<a
-class="btn-tool btn-secondary"
-href="/library/in">
 
-返回搜索
-
-</a>
 
 </div>
 
@@ -2843,6 +3065,7 @@ href="/library/in">
 
 </div>
 
+<a class="library-floating-back" href="/library/in">↩ 返回</a>
 </body>
 
 </html>
@@ -2949,6 +3172,23 @@ def library_item_edit(item_code):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>编辑法物</title>
 <link rel="stylesheet" href="/static/css/toolbox.css">
+<style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
 </head>
 
 <body>
@@ -3012,9 +3252,7 @@ def library_item_edit(item_code):
 保存
 </button>
 
-<a class="btn-tool btn-secondary" href="/library/items">
-返回法物管理
-</a>
+
 
 <a class="btn-tool btn-primary" href="/library/item/{{ item.item_code }}">
 查看详情
@@ -3026,6 +3264,7 @@ def library_item_edit(item_code):
 
 </div>
 </div>
+<a class="library-floating-back" href="/library/items">↩ 返回</a>
 </body>
 </html>
 """,
@@ -3114,6 +3353,23 @@ def library_out_search():
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/static/css/toolbox.css">
 <title>领取法物</title>
+<style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
 </head>
 
 <body>
@@ -3322,6 +3578,7 @@ type="submit">
 
 </div>
 
+<a class="library-floating-back" href="/library" {% if cart %}onclick="return confirm('领取清单尚未提交，确定返回首页吗？清单将保留。')"{% endif %}>↩ 返回</a>
 </body>
 </html>
 """,
@@ -3623,7 +3880,24 @@ def library_out_confirm():
 
         print("library_out_confirm error:", e)
 
-        return render_template_string("""
+        return render_template_string("""<style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+
 <link rel="stylesheet" href="/static/css/toolbox.css">
 
 <div class="page">
@@ -3635,12 +3909,12 @@ def library_out_confirm():
 {{ error or "系统错误，请稍后再试" }}
 </div>
 
-<a class="btn-tool btn-secondary" href="/library/out/search">
-返回领取页面
-</a>
+
 
 </div>
 </div>
+
+<a class="library-floating-back" href="/library/out/search">↩ 返回</a>
 """, error=error)
     
     session["library_last_receipt"] = {
@@ -3669,7 +3943,24 @@ def library_out_success():
 
     success_items = receipt.get("items", [])
 
-    return render_template_string("""
+    return render_template_string("""<style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+
 <link rel="stylesheet" href="/static/css/toolbox.css">
 
 <div class="page">
@@ -3702,14 +3993,14 @@ def library_out_success():
 继续领取
 </a>
 
-<a class="btn-tool btn-secondary" href="/library">
-返回首页
-</a>
+
 
 </div>
 
 </div>
 </div>
+
+<a class="library-floating-back" href="/library">↩ 返回</a>
 """,
 volunteer=volunteer,
 success_items=success_items
@@ -3886,7 +4177,24 @@ def library_stocktake():
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>上传盘点 Excel</title>
         <link rel="stylesheet" href="/static/css/toolbox.css">
-    </head>
+    <style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+</head>
 
     <body>
     <div class="page">
@@ -3898,9 +4206,7 @@ def library_stocktake():
             </p>
 
             <div class="btn-row">
-                <a class="btn-tool btn-secondary" href="{{ url_for('library.library_admin_home') }}">
-                    ← 返回负责人专区
-                </a>
+                
             </div>
         </div>
 
@@ -3983,7 +4289,8 @@ def library_stocktake():
         {% endif %}
 
     </div>
-    </body>
+    <a class="library-floating-back" href="{{ url_for('library.library_admin_home') }}">↩ 返回</a>
+</body>
     </html>
     """, preview_rows=preview_rows, error=error)
 
@@ -4032,7 +4339,24 @@ def library_quick_out(item_code):
                     <meta name="viewport" content="width=device-width, initial-scale=1">
                     <title>找不到法物</title>
                     <link rel="stylesheet" href="/static/css/toolbox.css">
-                </head>
+                <style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+</head>
                 <body>
                 <div class="page">
                     <div class="card">
@@ -4040,13 +4364,12 @@ def library_quick_out(item_code):
                         <p class="page-subtitle">这个 QR Code 对应的法物不存在。</p>
 
                         <div class="btn-row">
-                            <a class="btn-tool btn-secondary" href="/library/out">
-                                返回登记领取
-                            </a>
+                            
                         </div>
                     </div>
                 </div>
-                </body>
+                <a class="library-floating-back" href="/library/out">↩ 返回</a>
+</body>
                 </html>
                 """)
 
@@ -4115,7 +4438,24 @@ def library_quick_out(item_code):
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>快速领取</title>
         <link rel="stylesheet" href="/static/css/toolbox.css">
-    </head>
+    <style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+</head>
 
     <body>
     <div class="page">
@@ -4127,9 +4467,7 @@ def library_quick_out(item_code):
             </p>
 
             <div class="btn-row">
-                <a class="btn-tool btn-secondary" href="/library/out">
-                    返回登记领取
-                </a>
+                
             </div>
         </div>
 
@@ -4219,7 +4557,8 @@ def library_quick_out(item_code):
         </div>
 
     </div>
-    </body>
+    <a class="library-floating-back" href="/library/out">↩ 返回</a>
+</body>
     </html>
     """, item=item, error=error, success=success)
 
@@ -4256,7 +4595,24 @@ def library_scan(item_code):
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <link rel="stylesheet" href="/static/css/toolbox.css">
             <title>找不到法物</title>
-        </head>
+        <style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+</head>
 
         <body>
         <div class="page">
@@ -4267,13 +4623,12 @@ def library_scan(item_code):
                 </p>
 
                 <div class="btn-row">
-                    <a class="btn-tool btn-secondary" href="/library">
-                        返回首页
-                    </a>
+                    
                 </div>
             </div>
         </div>
-        </body>
+        <a class="library-floating-back" href="/library">↩ 返回</a>
+</body>
         </html>
         """)
 
@@ -4285,7 +4640,24 @@ def library_scan(item_code):
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <link rel="stylesheet" href="/static/css/toolbox.css">
         <title>{{ item.name }}</title>
-    </head>
+    <style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
+</head>
 
     <body>
     <div class="page">
@@ -4345,7 +4717,8 @@ def library_scan(item_code):
         </div>
 
     </div>
-    </body>
+    <a class="library-floating-back" href="/library/search">↩ 返回</a>
+</body>
     </html>
     """, item=item)
 
@@ -4384,6 +4757,23 @@ video {
     letter-spacing:1px;
 }
 </style>
+<style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
 </head>
 
 <body>
@@ -4396,9 +4786,7 @@ video {
         </p>
 
         <div class="btn-row">
-            <a class="btn-tool btn-secondary" href="/library">
-                返回首页
-            </a>
+            
         </div>
     </div>
 
@@ -4551,6 +4939,7 @@ async function startCamera() {
 startCamera();
 </script>
 
+<a class="library-floating-back" href="/library">↩ 返回</a>
 </body>
 </html>
 """)
@@ -4654,6 +5043,23 @@ def library_batch_in():
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>批量入库</title>
     <link rel="stylesheet" href="/static/css/toolbox.css">
+<style>
+.library-floating-back {
+    position: fixed; right: 20px; bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    z-index: 9999; display: inline-flex; align-items: center;
+    justify-content: center; min-height: 46px; padding: 10px 20px;
+    box-sizing: border-box; border-radius: 28px; background: #374151;
+    color: #fff !important; text-decoration: none !important;
+    font-size: 18px; font-weight: 600; line-height: 1.3;
+    box-shadow: 0 4px 12px rgba(0,0,0,.20);
+}
+.library-floating-back:hover { background: #1f2937; }
+body { padding-bottom: 90px !important; }
+@media (max-width: 600px) {
+    .library-floating-back { right: 14px; font-size: 16px; }
+}
+</style>
 </head>
 <body>
 
@@ -4754,9 +5160,7 @@ def library_batch_in():
                 ✅ 确认全部入库
             </button>
 
-            <a class="btn-tool btn-secondary" href="/library/admin/home">
-                ⬅ 返回负责人专区
-            </a>
+            
 
         </form>
     </div>
@@ -5019,6 +5423,7 @@ window.onload = function() {
 };
 </script>
 
+<a class="library-floating-back" href="/library/admin/home" onclick="if (Object.keys(batch).length && !confirm('尚有未提交的入库清单，确定返回吗？')) return false;">↩ 返回</a>
 </body>
 </html>
 """, admin_label=library_admin_label(admin))

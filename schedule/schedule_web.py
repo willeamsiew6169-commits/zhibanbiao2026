@@ -509,7 +509,6 @@ def edit_assigned_place(assignment_id):
     except ValueError:
         return_date = ""
 
-    shift_options = ["绿", "橙", "黄"]
     place_options = [
         "观音堂",
         "活动中心",
@@ -553,83 +552,165 @@ def edit_assigned_place(assignment_id):
                 return redirect("/schedule/signups")
 
             if request.method == "POST":
-                shift_label = request.form.get("shift_label", "").strip()
-                # 数据库统一保存「绿／橙／黄」，兼容旧页面可能传入的「绿班」。
-                shift_label = shift_label.removesuffix("班")
                 assigned_place = request.form.get("assigned_place", "").strip()
                 start_time = request.form.get("start_time", "").strip()
                 end_time = request.form.get("end_time", "").strip()
-
-                # 报名时段与排班时段分别保存；只更新当前排班所关联的报名。
                 signup_start = request.form.get("signup_start_time", "").strip()
                 signup_end = request.form.get("signup_end_time", "").strip()
+
+                def _minutes(value):
+                    raw = str(value or "").lower().replace(" ", "")
+                    for fmt in ("%I:%M%p", "%I%p", "%H:%M", "%H:%M:%S"):
+                        try:
+                            t = datetime.strptime(raw, fmt)
+                            return t.hour * 60 + t.minute
+                        except ValueError:
+                            pass
+                    return None
+
+                def _clock(value):
+                    h, m = divmod(value, 60)
+                    return f"{h % 12 or 12}:{m:02d}{'am' if h < 12 else 'pm'}"
+
+                def _shift(value):
+                    return "绿" if value < 600 else ("橙" if value < 840 else "黄")
+
+
+                if assigned_place not in place_options:
+                    return "❌ 地点无效", 400
+                a_start, a_end = _minutes(start_time), _minutes(end_time)
+                if a_start is None or a_end is None or a_start >= a_end:
+                    return "❌ 排班时段无效", 400
+
+                cur.execute("SELECT assignment_date FROM volunteer_schedule_assignments WHERE id=%s", (assignment_id,))
+                date_row = cur.fetchone()
+                if not date_row:
+                    return "❌ 找不到排班记录", 404
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("duty:" + str(date_row["assignment_date"]),))
                 cur.execute("""
-                    select assignment_date, signup_id
-                    from volunteer_schedule_assignments
-                    where id = %s
-                    for update
+                    SELECT * FROM volunteer_schedule_assignments
+                    WHERE id=%s FOR UPDATE
                 """, (assignment_id,))
-
                 assignment_info = cur.fetchone()
-
                 if not assignment_info:
-                    return "❌ 找不到排班记录<br><a href='/schedule/signups'>返回</a>"
-
+                    return "❌ 找不到排班记录", 404
                 assignment_date = assignment_info["assignment_date"]
                 signup_id = assignment_info.get("signup_id")
+                role = assignment_info.get("role")
+                old_signup_start = old_signup_end = None
+                siblings = []
                 if signup_id is not None:
-                    # 禁止空值或无法识别的时段写入原始报名。
-                    def _minutes(value):
-                        raw = value.lower().replace(" ", "")
-                        for fmt in ("%I:%M%p", "%I%p", "%H:%M", "%H:%M:%S"):
-                            try:
-                                t = datetime.strptime(raw, fmt)
-                                return t.hour * 60 + t.minute
-                            except ValueError:
-                                pass
-                        return None
-
-                    begin, finish = _minutes(signup_start), _minutes(signup_end)
-                    if begin is None or finish is None or begin >= finish:
-                        return "❌ 报名时段无效：请填写正确的开始和结束时间（例如 10:00am、2:00pm）", 400
+                    s_start, s_end = _minutes(signup_start), _minutes(signup_end)
+                    if s_start is None or s_end is None or s_start >= s_end:
+                        return "❌ 报名时段无效", 400
+                    if a_start < s_start or a_end > s_end:
+                        if role == "值班" and (a_start, a_end) == (_minutes(assignment_info["start_time"]), _minutes(assignment_info["end_time"])):
+                            a_start, a_end = max(a_start, s_start), min(a_end, s_end)
+                            if a_start >= a_end:
+                                return "❌ 当前排班完全超出新报名，请先调整当前排班时间", 400
+                            start_time, end_time = _clock(a_start), _clock(a_end)
+                        else:
+                            return "❌ 实际排班必须在报名时间范围内，请同时调整排班时间", 400
                     cur.execute("""
-                        select id from volunteer_schedule_signups
-                        where id=%s and coalesce(status,'pending') <> 'cancelled'
-                        for update
+                        SELECT start_time, end_time FROM volunteer_schedule_signups
+                        WHERE id=%s AND COALESCE(status,'pending') <> 'cancelled' FOR UPDATE
                     """, (signup_id,))
-                    if not cur.fetchone():
-                        return "❌ 关联报名不存在或已取消，未保存任何修改", 400
+                    signup_row_for_update = cur.fetchone()
+                    if not signup_row_for_update:
+                        return "❌ 关联报名不存在或已取消", 400
+                    old_signup_start = _minutes(signup_row_for_update["start_time"])
+                    old_signup_end = _minutes(signup_row_for_update["end_time"])
+                    cur.execute("""
+                        SELECT * FROM volunteer_schedule_assignments
+                        WHERE signup_id=%s AND id<>%s
+                          AND COALESCE(status,'assigned') <> 'cancelled'
+                        ORDER BY id FOR UPDATE
+                    """, (signup_id, assignment_id))
+                    siblings = cur.fetchall()
+                    # 已锁定的其他排班不能被静默缩短或删除。
+                    for sibling in siblings:
+                        x, y = _minutes(sibling.get('start_time')), _minutes(sibling.get('end_time'))
+                        if x is None or y is None:
+                            return "❌ 其他排班时间无法识别", 400
+                        if role == "值班" and max(x, s_start, a_start) < min(y, s_end, a_end):
+                            return "❌ 与同一义工另一笔排班重叠，请先调整该时段", 400
+                        if sibling.get('locked_by_admin') and (x < s_start or y > s_end):
+                            return "❌ 其他时段已由负责人锁定，请先单独调整该时段", 400
 
+                # 无需手选班别：根据实际排班开始时间自动确定。
                 cur.execute("""
-                    update volunteer_schedule_assignments
-                    set
-                        shift_label = %s,
-                        assigned_place = %s,
-                        start_time = %s,
-                        end_time = %s,
-                        remarks = '负责人调整排班',
-                        assignment_source = 'admin',
-                        locked_by_admin = true
-                    where id = %s
-                """, (
-                    shift_label or None,
-                    assigned_place,
-                    start_time or None,
-                    end_time or None,
-                    assignment_id
-                ))
+                    UPDATE volunteer_schedule_assignments
+                    SET shift_label=%s, assigned_place=%s, start_time=%s, end_time=%s,
+                        remarks='负责人调整排班', assignment_source='admin', locked_by_admin=true
+                    WHERE id=%s
+                """, (_shift(a_start) if role == "值班" else assignment_info.get("shift_label"), assigned_place, start_time, end_time, assignment_id))
 
                 if signup_id is not None:
                     cur.execute("""
-                        update volunteer_schedule_signups
-                        set start_time=%s, end_time=%s
-                        where id=%s
+                        UPDATE volunteer_schedule_signups SET start_time=%s, end_time=%s WHERE id=%s
                     """, (signup_start, signup_end, signup_id))
+                    if role == '值班':
+                        # 缩短报名：仅修剪同一报名的未锁定时段；其他义工完全不动。
+                        for sibling in siblings:
+                            x, y = _minutes(sibling.get('start_time')), _minutes(sibling.get('end_time'))
+                            if x is None or y is None or sibling.get('locked_by_admin'):
+                                continue
+                            nx, ny = max(x, s_start), min(y, s_end)
+                            if nx >= ny:
+                                cur.execute("DELETE FROM volunteer_schedule_assignments WHERE id=%s", (sibling['id'],))
+                            elif nx != x or ny != y:
+                                cur.execute("""
+                                    UPDATE volunteer_schedule_assignments
+                                    SET start_time=%s, end_time=%s, shift_label=%s WHERE id=%s
+                                """, (_clock(nx), _clock(ny), _shift(nx), sibling['id']))
+
+                        # 延长报名：只补旧报名边界以外的新增时段，不重排既有记录。
+                        if old_signup_start is not None and old_signup_end is not None:
+                            extensions = []
+                            if s_start < old_signup_start:
+                                extensions.append((s_start, min(old_signup_start, s_end)))
+                            if s_end > old_signup_end:
+                                extensions.append((max(old_signup_end, s_start), s_end))
+                            occupied = [(a_start, a_end)]
+                            for sibling in siblings:
+                                x, y = _minutes(sibling.get('start_time')), _minutes(sibling.get('end_time'))
+                                if x is not None and y is not None:
+                                    occupied.append((max(x, s_start), min(y, s_end)))
+                            if extensions:
+                                from schedule.builders.duty_v2 import plan
+                                from schedule.builders.schedule_builder import _dry_run_2200_gaps
+                                from schedule.services.smart_assignment_engine import load_place_history_cache
+                                cur.execute("""
+                                    SELECT volunteer_id, assigned_place, start_time, end_time
+                                    FROM volunteer_schedule_assignments
+                                    WHERE assignment_date=%s AND role='值班'
+                                      AND COALESCE(status,'assigned') <> 'cancelled'
+                                """, (assignment_date,))
+                                existing = list(cur.fetchall())
+                                history = load_place_history_cache(target_date=str(assignment_date))
+                                for ext_start, ext_end in extensions:
+                                    for gx, gy in _dry_run_2200_gaps(ext_start, ext_end, occupied):
+                                        person = dict(signup_id=signup_id, volunteer_id=assignment_info['volunteer_id'],
+                                                      name=assignment_info['name'], start_time=_clock(gx), end_time=_clock(gy))
+                                        planned = plan([person], existing=existing, history=history)
+                                        intervals = [(_minutes(item['start_time']), _minutes(item['end_time'])) for _, item in planned]
+                                        if not planned or _dry_run_2200_gaps(gx, gy, intervals):
+                                            raise ValueError('新增时段未完整补排，取消保存')
+                                        for key, item in planned:
+                                            cur.execute("""
+                                                INSERT INTO volunteer_schedule_assignments
+                                                (signup_id, volunteer_id, name, assignment_date, role,
+                                                 shift_label, assigned_place, start_time, end_time,
+                                                 status, remarks, assignment_source, locked_by_admin)
+                                                VALUES (%s,%s,%s,%s,'值班',%s,%s,%s,%s,'assigned',
+                                                        '负责人延长报名后自动补排','system',false)
+                                            """, (signup_id, person['volunteer_id'], person['name'], assignment_date,
+                                                  key[0], key[1:], item['start_time'], item['end_time']))
+                                            existing.append(dict(item, assigned_place=key[1:]))
+                                        occupied.extend(intervals)
 
                 conn.commit()
-
                 mark_schedule_need_republish(assignment_date)
-
                 if return_date and return_date == str(assignment_date):
                     return redirect(url_for("schedule.schedule_view_assigned", date=return_date))
                 return redirect("/schedule/signups")
@@ -721,16 +802,6 @@ p { font-size:22px; }
     <p style="color:#805b15;">此排班没有关联报名记录，只能调整排班。</p>
     {% endif %}
 
-    <label>班别</label>
-    <select name="shift_label">
-        <option value="">无</option>
-        {% for s in shift_options %}
-        <option value="{{ s }}" {% if row.shift_label == s %}selected{% endif %}>
-            {{ s }}
-        </option>
-        {% endfor %}
-    </select>
-
     <label>地点</label>
     <select name="assigned_place" required>
         {% for p in place_options %}
@@ -815,7 +886,6 @@ p { font-size:22px; }
 """,
         row=row,
         signup_row=signup_row,
-        shift_options=shift_options,
         place_options=place_options,
         return_date=return_date
     )

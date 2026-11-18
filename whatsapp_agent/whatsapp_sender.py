@@ -5,6 +5,7 @@ TEST_GROUP_ONLY。不能发送正式群。发送动作不自动重试。
 注意：DOM 中出现自己发出的消息不等于 WhatsApp 服务器或群成员已送达。
 """
 import logging
+import re
 import atexit
 import msvcrt
 import os
@@ -118,18 +119,18 @@ def outgoing_snapshot(page, message):
         for (const node of main.querySelectorAll('[data-id]')) {
             const container = node.matches('[data-testid="msg-container"]')
                 ? node : node.querySelector('[data-testid="msg-container"]');
-            if (!container) continue;
+            const bubble = container || node.closest('.message-out') || node.querySelector('.message-out') || node;
             const outgoing = node.classList.contains('message-out') ||
                 !!node.closest('.message-out') ||
                 !!node.querySelector('.message-out') ||
-                container.classList.contains('message-out') ||
+                bubble.classList.contains('message-out') ||
                 !!node.querySelector('[aria-label="你："]');
             if (!outgoing) continue;
             const id = node.getAttribute('data-id') || '';
             if (!id || ids.includes(id)) continue;
             total++;
             ids.push(id);
-            const all = Array.from(container.querySelectorAll('[data-testid="selectable-text"]'));
+            const all = Array.from(bubble.querySelectorAll('[data-testid="selectable-text"], .selectable-text, .copyable-text span[dir]'));
             const top = all.filter(el => !el.parentElement?.closest('[data-testid="selectable-text"]'));
             const variants = [];
             for (const el of top) {
@@ -208,7 +209,8 @@ def send_test(page, message):
     try:
         editor.press('Enter')
         if AUTO:
-            deadline = time.monotonic() + 12
+            deadline = time.monotonic() + 30
+            expanded_ids = set()
             while time.monotonic() < deadline:
                 page.wait_for_timeout(500)
                 check_header(page)
@@ -218,6 +220,19 @@ def send_test(page, message):
                          [(x['id'], x.get('mode')) for x in after['matched']][-3:])
                 if newly_visible_outgoing(before, after):
                     return 'sent', '自动检测到测试群聊天区新增本人消息（仅本地界面确认，非送达回执）'
+                # 长消息可能被 WhatsApp 折叠；只展开本次新增本人消息。
+                for msg_id in set(after['ids']) - set(before['ids']) - expanded_ids:
+                    # 用 DOM 属性精确定位，不拼接 CSS 字符串。
+                    nodes = page.locator('#main [data-id]')
+                    for j in range(nodes.count()):
+                        node = nodes.nth(j)
+                        if node.get_attribute('data-id') != msg_id:
+                            continue
+                        more = node.get_by_text(re.compile(r'^(Read more|阅读更多|查看更多|展开全文|显示更多|继续阅读|阅读全文|Baca lagi)\s*$', re.I))
+                        if more.count() == 1 and more.is_visible():
+                            more.click(timeout=2000)
+                            expanded_ids.add(msg_id)
+                        break
             LOG.warning('未匹配到新增本人消息；发送后正文样本=%s', after['samples'][-5:])
             return 'uncertain', '已按 Enter，但未能确认新增本人消息；禁止自动重试'
         page.wait_for_timeout(1500)
