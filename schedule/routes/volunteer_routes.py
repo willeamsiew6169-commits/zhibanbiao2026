@@ -885,6 +885,25 @@ def volunteer_signup():
         </div>
         """
 
+    # 报名成功页：复用确认报名的日期资料，不影响已提交的报名。
+    signup_weekday = ""
+    signup_lunar = ""
+    signup_festivals = ""
+    try:
+        success_date = datetime.strptime(signup_date, "%Y-%m-%d").date()
+        signup_weekday = "星期" + "一二三四五六日"[success_date.weekday()]
+        success_info = get_special_day_info(success_date)
+        lunar = str(success_info.get("lunar_text") or "")
+        names = [str(n) for n in (success_info.get("special_names") or []) if n]
+        if success_info.get("template_type") == "lunar_1_15" and not names:
+            names.append("十五" if "十五" in lunar else "初一" if "初一" in lunar else "初一 / 十五")
+        signup_lunar = lunar if lunar.startswith("农历") else ("农历" + lunar if lunar else "")
+        signup_festivals = "、".join(names)
+    except Exception:
+        # 日期附加显示失败时仍正常呈现报名成功页。
+        signup_lunar = ""
+        signup_festivals = ""
+
     # =========================
     # 膳食报名成功页
     # =========================
@@ -1004,7 +1023,7 @@ def volunteer_signup():
             <h1>🍱 素食结缘报名成功</h1>
 
             <div class="info">
-                <div><b>日期：</b>{{ signup_date }}</div>
+                <div><b>日期：</b>{{ signup_date }}　<span style="color:#b91c1c;font-weight:bold;font-size:0.85em;">{{ signup_weekday }}</span>{% if signup_lunar %}<br><span style="font-size:0.85em;color:#8b5a2b;">🌙 {{ signup_lunar }}</span>{% endif %}{% if signup_festivals %}<br><span style="font-size:0.85em;color:#b91c1c;font-weight:bold;">🪷 {{ signup_festivals }}</span>{% endif %}</div>
                 <div><b>开放堂食：</b>11:00am</div>
             </div>
 
@@ -1033,6 +1052,9 @@ def volunteer_signup():
         </html>
         """,
         signup_date=signup_date,
+        signup_weekday=signup_weekday,
+        signup_lunar=signup_lunar,
+        signup_festivals=signup_festivals,
         my_no=my_no,
         my_meal_role=my_meal_role,
         lines=lines,
@@ -1204,7 +1226,7 @@ def volunteer_signup():
                 🙏 感恩发心护持观音堂<br><br>
 
                 义工：{{ name }}<br>
-                日期：{{ signup_date }}<br>
+                日期：{{ signup_date }}　<span style="color:#b91c1c;font-weight:bold;font-size:0.85em;">{{ signup_weekday }}</span>{% if signup_lunar %}<br><span style="font-size:0.85em;color:#8b5a2b;">🌙 {{ signup_lunar }}</span>{% endif %}{% if signup_festivals %}<br><span style="font-size:0.85em;color:#b91c1c;font-weight:bold;">🪷 {{ signup_festivals }}</span>{% endif %}<br>
                 岗位：{{ role }}
 
                 {% if role == "值班" %}
@@ -1255,6 +1277,9 @@ def volunteer_signup():
     result_title=result_title,
     name=name,
     signup_date=signup_date,
+    signup_weekday=signup_weekday,
+    signup_lunar=signup_lunar,
+    signup_festivals=signup_festivals,
     role=role,
     start_time=start_time,
     end_time=end_time,

@@ -1340,6 +1340,25 @@ async function openSignupConfirm(event) {
         console.warn("查询义工资料失败：", error);
     }
 
+    // 日期资料只用于确认弹窗，沿用服务器现有佛日规则。
+    const weekday = "星期" + "日一二三四五六"[new Date(signupDate + "T00:00:00Z").getUTCDay()];
+    const escapeDateText = value => String(value || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+    let lunarHtml = "";
+    try {
+        const response = await fetch("/volunteer/day_info?date=" + encodeURIComponent(signupDate), {cache:"no-store"});
+        if (!response.ok) throw new Error("day_info unavailable");
+        const info = await response.json();
+        if (!info.ok) throw new Error("day_info invalid");
+        const lunar = String(info.lunar_text || "");
+        const names = Array.isArray(info.special_names) ? info.special_names.filter(Boolean) : [];
+        if (info.template_type === "lunar_1_15" && !names.length) names.push(lunar.includes("十五") ? "十五" : lunar.includes("初一") ? "初一" : "初一 / 十五");
+        if (lunar) lunarHtml += `<br><span style="font-size:0.85em;color:#8b5a2b;">🌙 ${escapeDateText(lunar.startsWith("农历") ? lunar : "农历" + lunar)}</span>`;
+        if (names.length) lunarHtml += `<br><span style="font-size:0.85em;color:#b91c1c;font-weight:bold;">🪷 ${escapeDateText(names.join("、"))}</span>`;
+    } catch (error) {
+        lunarHtml = '<br><span style="font-size:0.75em;color:#777;">农历资料暂时无法读取</span>';
+    }
+    if (dateInput.value !== signupDate) return false;
+
     let confirmHtml = `
         <p>
             <b>义工：</b><br>
@@ -1348,7 +1367,7 @@ async function openSignupConfirm(event) {
 
         <p>
             <b>日期：</b><br>
-            ${signupDate}
+            ${signupDate}　<span style="color:#b91c1c;font-weight:bold;font-size:0.85em;">${weekday}</span>${lunarHtml}
         </p>
 
         <p>

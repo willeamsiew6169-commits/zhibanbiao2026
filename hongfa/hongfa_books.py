@@ -75,13 +75,13 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
         .hb-area{padding-bottom:85px}.hb-hidden{display:none!important}
         @media(max-width:520px){.hb-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hb-name{font-size:15px;min-height:54px}.hb-step button{width:37px}}
         </style><div class="card hb-area"><h2>📚 弘法书籍｜快速登记</h2>
-        {% if not is_volunteer %}<p><a href="/hongfa/dashboard">🏠 返回弘法管理首页</a></p>{% endif %}
+        {% if not is_volunteer %}<p><a href="/hongfa/book-menu">⬅ 返回书籍管理</a></p>{% endif %}
         <p class="hf-muted">{% if is_volunteer %}已绑定今日签到，可登记本组结缘书籍。{% else %}负责人可扣书、点货及调整库存。{% endif %}</p>
         {% if error %}<p class="warn">{{error}}</p>{% endif %}{% if message %}<p style="color:#16854e">{{message}}</p>{% endif %}
         {% if not is_volunteer %}<p><a class="btn" id="hb-manage-link" href="{{url_for('hongfa.books_manage')}}">⚙️ 管理书籍</a></p>{% endif %}
         {% if not teams %}<p>秘书可查看原有库存页面；本页面需要负责人组别权限。</p>{% else %}
         <label>弘法组</label><select id="hb-team" onchange="hbCart={};hbDraw()">{% for t in teams %}<option value="{{t.id}}">{{t.name}}</option>{% endfor %}</select>
-        {% if not is_volunteer and (who.secretary or who.leader_team_ids) %}<p><a class="btn" href="{{url_for('hongfa.books_add')}}" style="font-size:19px;font-weight:750">➕ 新增书籍</a></p>{% endif %}
+        {% if not is_volunteer and (who.secretary or who.team_ids) %}<p><a class="btn" href="{{url_for('hongfa.books_add')}}" style="font-size:19px;font-weight:750">➕ 新增书籍</a></p>{% endif %}
         <div class="hb-tabs"><button id="hb-out-btn" class="on" onclick="hbTab('out')">📖 结缘扣书</button>{% if not is_volunteer %}<button id="hb-stock-btn" onclick="hbTab('stock')">📦 点货／补货</button>{% endif %}</div>
         <div id="hb-out-note" class="hf-muted">仅允许登记本组今天已发布且尚未结束的弘法活动；一次可选多种书。</div>
         <input id="hb-search" placeholder="🔍 输入书名立即搜索" oninput="hbDraw()">
@@ -210,13 +210,14 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
         teams = db_query('SELECT id,name FROM hongfa_teams WHERE active=true ORDER BY id', fetchall=True) or []
         if not who['secretary']:
             teams = [t for t in teams if t['id'] in who['team_ids']]
-        selected = request.values.get('team_id', type=int)
+        selected = (request.form if request.method == 'POST' else request.args).get('team_id', type=int)
         if selected not in [t['id'] for t in teams]:
+            if request.method == 'POST' and selected is not None: abort(403)
             selected = teams[0]['id'] if teams else None
         error = ''
         if request.method == 'POST':
             action = request.form.get('action')
-            if action in ('category','rename') and not (who['secretary'] or who.get('leader_team_ids')): abort(403)
+            if action in ('category','rename') and not (who['secretary'] or who.get('team_ids')): abort(403)
             item_id = request.form.get('item_id', type=int)
             if not db_query('SELECT id FROM hongfa_items WHERE id=%s AND active=true', (item_id,), fetchone=True):
                 abort(400)
@@ -288,13 +289,13 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
             {% if can_catalog %}<form method="post" style="display:flex;gap:6px;align-items:center"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="team_id" value="{{selected}}"><input type="hidden" name="item_id" value="{{x.id}}"><input type="hidden" name="action" value="category"><input name="category" value="{{x.category}}" maxlength="40" aria-label="分类" style="min-width:0;flex:1"><button style="white-space:nowrap">保存分类</button></form>
             <form method="post" style="display:flex;gap:6px;align-items:center"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="team_id" value="{{selected}}"><input type="hidden" name="item_id" value="{{x.id}}"><input type="hidden" name="action" value="rename"><input name="title" value="{{x.title}}" maxlength="150" aria-label="书籍名称" style="min-width:0;flex:1"><button style="white-space:nowrap">改书名</button></form>{% endif %}
           </div>{% endfor %}</div></div>
-          <script>function hbManageFilter(){var q=document.getElementById('hb-manage-search').value.trim().toLowerCase();document.querySelectorAll('.hb-manage-row').forEach(function(r){r.style.display=r.dataset.title.includes(q)?'':'none';});}</script>''',csrf=csrf_token(),teams=teams,selected=selected,items=items,error=error,can_catalog=bool(who['secretary'] or who.get('leader_team_ids')),request_saved=request.args.get('saved')=='1')
+          <script>function hbManageFilter(){var q=document.getElementById('hb-manage-search').value.trim().toLowerCase();document.querySelectorAll('.hb-manage-row').forEach(function(r){r.style.display=r.dataset.title.includes(q)?'':'none';});}</script>''',csrf=csrf_token(),teams=teams,selected=selected,items=items,error=error,can_catalog=bool(who['secretary'] or who.get('team_ids')),request_saved=request.args.get('saved')=='1')
 
     @bp.route('/books/add', methods=['GET', 'POST'])
     @guard
     def books_add(who):
-        # 只有负责人或秘书可维护共用书籍目录；签到义工不能新增。
-        if who.get('book_volunteer') or not (who['secretary'] or who.get('leader_team_ids')):
+        # 负责人、小管理员或秘书可维护共用书籍目录；签到义工不能新增。
+        if who.get('book_volunteer') or not (who['secretary'] or who.get('team_ids')):
             abort(403)
         error = ''
         if request.method == 'POST':
@@ -314,7 +315,7 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
                 if not error:
                     return redirect(url_for('hongfa.books', added='1'))
         return render('''<div class="card"><h2>➕ 新增书籍</h2>
-            <p><a href="{{url_for('hongfa.books')}}">← 返回书籍管理</a></p>
+            <p><a href="{{url_for('hongfa.books_manage')}}">← 返回管理书籍</a></p>
             <p class="hf-muted">三组共用书籍名称，但库存分别计算。新增后请到「点货／补货」输入实际数量。</p>
             {% if error %}<p class="warn" role="alert">{{error}}</p>{% endif %}
             <form method="post"><input type="hidden" name="csrf_token" value="{{csrf}}">

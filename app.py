@@ -891,7 +891,7 @@ PAGE = """
 
 </div>
 
-  <div style="display:none" aria-hidden="true"><button id="signOutBtn"></button><div id="signoutRoleGroup"></div><select id="signoutRole"></select><div id="listSignoutMask"></div><input id="listPinInput"><input id="listSignoutRow"><input id="listSignoutPin"><div id="listSignoutTarget"></div><form id="listQuickSignoutForm"></form><form id="quickSignOutForm"><input id="signout_volunteer_id"><input id="signout_pin"><input id="signout_assignment_id"><input id="signout_role"></form></div>
+  <div style="display:none" aria-hidden="true"><button id="signOutBtn"></button><div id="signoutRoleGroup"></div><select id="signoutRole"></select><div id="listSignoutMask" style="display:none"></div><input id="listPinInput"><input id="listSignoutRow"><input id="listSignoutPin"><div id="listSignoutTarget"></div><form id="listQuickSignoutForm"></form><form id="quickSignOutForm"><input id="signout_volunteer_id"><input id="signout_pin"><input id="signout_assignment_id"><input id="signout_role"></form></div>
 <script>
 const LIST_LANG_ZH = {{ t.html_lang.startswith('zh')|tojson }};
 let listSignoutId = null;

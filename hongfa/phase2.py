@@ -170,7 +170,7 @@ def register_phase2(bp, actor, render, csrf_token, valid_csrf):
     def locations(who):
         error = ''
         if request.method == 'POST':
-            if not (who['secretary'] or who.get('leader_team_ids')):
+            if not (who['secretary'] or who.get('team_ids')):
                 abort(403)
             name = (request.form.get('name') or '').strip()[:120]
             maps = (request.form.get('maps_url') or '').strip()[:1000]
@@ -187,7 +187,7 @@ def register_phase2(bp, actor, render, csrf_token, valid_csrf):
         rows = db_query('SELECT id,name,maps_url FROM hongfa_locations WHERE active=true ORDER BY name',fetchall=True) or []
         return page('''<div class="card"><h2>📍 弘法地点</h2>
           {% if error %}<p class="warn">{{error}}</p>{% endif %}
-          {% if who.secretary or who.leader_team_ids %}<form method="post"><input type="hidden" name="csrf_token" value="{{csrf}}">
+          {% if who.secretary or who.team_ids %}<form method="post"><input type="hidden" name="csrf_token" value="{{csrf}}">
           <label>地点名称</label><input name="name" required maxlength="120">
           <label>Google Maps HTTPS 链接（可留空）</label><input name="maps_url" maxlength="1000">
           <button>新增地点</button></form>{% endif %}

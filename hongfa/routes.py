@@ -26,11 +26,32 @@ small{color:#66776f}.warn{color:#ad3434}
 .hf-floating-login{position:fixed;right:max(16px,env(safe-area-inset-right));bottom:max(18px,env(safe-area-inset-bottom));z-index:1000;font-size:19px;font-weight:800;box-shadow:0 4px 16px #0003;max-width:calc(100vw - 32px);text-align:center}
 .hf-id-row{display:flex;gap:10px;align-items:center;margin:7px 0 10px}.hf-id-row input{flex:1;min-width:0;margin:0}.hf-branch-toggle{width:94px;flex:none;font-weight:800;color:white}.hf-branch-toggle.che{background:#17834d}.hf-branch-toggle.stw{background:#c73545}
 select,textarea{font:inherit;border:1px solid #cddbd3;border-radius:10px;padding:11px;background:#fff;max-width:100%}
-.hf-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.hf-field{display:flex;flex-direction:column;gap:5px}.hf-field input,.hf-field select{width:100%;margin:0}.hf-wide{grid-column:1/-1}.hf-form-grid label{font-weight:600}.hf-event{border:1px solid #e0eae3;background:#fbfdfb;border-radius:12px;padding:14px;margin:12px 0}.hf-event form{display:inline-block;margin:6px 5px 0 0}.hf-event button{font-size:15px;padding:9px 13px}.hf-muted{color:#63746a;font-size:14px}.hf-actions{margin-top:18px}.hf-actions button{font-weight:700}@media(max-width:520px){.hf-form-grid{grid-template-columns:1fr}.card{padding:16px}}</style></head><body><main>
+.hf-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.hf-field{display:flex;flex-direction:column;gap:5px}.hf-field input,.hf-field select{width:100%;margin:0}.hf-wide{grid-column:1/-1}.hf-form-grid label{font-weight:600}.hf-event{border:1px solid #e0eae3;background:#fbfdfb;border-radius:12px;padding:14px;margin:12px 0}.hf-event form{display:inline-block;margin:6px 5px 0 0}.hf-event button{font-size:15px;padding:9px 13px}.hf-muted{color:#63746a;font-size:14px}.hf-actions{margin-top:18px}.hf-actions button{font-weight:700}@media(max-width:520px){.hf-form-grid{grid-template-columns:1fr}.card{padding:16px}}
+main{padding-bottom:100px;font-size:18px;line-height:1.55}h1{font-size:26px}h2{font-size:23px;margin:0 0 14px}a{color:#145b87;font-weight:700}button,.btn{margin:3px 0} .hf-menu{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.hf-tile{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:94px;padding:12px 6px;border-radius:12px;color:white;text-decoration:none;text-align:center;font-weight:750;font-size:19px;box-sizing:border-box;background:#16854e}.hf-tile span{font-size:27px}.hf-blue{background:#246b9b}.hf-purple{background:#704ba0}.hf-brown{background:#805b36}.hf-navy{background:#344e79}.hf-gray{background:#52616a}.hf-orange{background:#a65312}.hf-day{font-weight:800;margin:18px 0 8px;color:#254b39}.hf-agenda{border:1px solid #d2e2d8;border-radius:12px;padding:12px;margin:8px 0;background:#f8fbf9;overflow-wrap:anywhere}.hf-agenda-head{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}.hf-status{font-size:15px;font-weight:700;padding:4px 9px;border-radius:8px;background:#e1f3e7;color:#17633b}.hf-status.draft{background:#fff0cb;color:#855000}.hf-status.rejected{background:#ffe3e3;color:#a22}.hf-back{position:fixed;right:16px;bottom:18px;z-index:40;background:#344e79!important;color:white!important;padding:13px 17px;border-radius:12px;text-decoration:none;box-shadow:0 3px 12px #0003;font-size:17px;font-weight:800}.hf-logout{background:#f9e4e4;color:#952b2b}.hf-nav-buttons{gap:12px!important}.hf-quicknav{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0}.hf-quicknav a{padding:10px 14px;background:#e2eee7;border-radius:9px;text-decoration:none}.hf-event{overflow-wrap:anywhere} @media(max-width:520px){main{margin:14px auto}.hf-menu{gap:10px}.hf-tile{font-size:17px;min-height:86px}.hf-back{bottom:14px}h1{font-size:23px}}
+</style></head><body><main>
 <h1>🪷 蕉赖观音堂｜弘法</h1>''' + '{% block content %}{% endblock %}' + '</main></body></html>'
 
 
 def render(content, **kwargs):
+    back = {
+        'hongfa.plans': ('/hongfa/dashboard','🏠 返回管理首页'),
+        'hongfa.week': ('/hongfa/dashboard','🏠 返回管理首页'),
+        'hongfa.locations': ('/hongfa/settings-menu','⬅ 返回系统设置'),
+        'hongfa.team_admins': ('/hongfa/settings-menu','⬅ 返回系统设置'),
+        'hongfa.event_code': ('/hongfa/plans','⬅ 返回活动安排'),
+        'hongfa.attendance': ('/hongfa/dashboard','🏠 返回管理首页'),
+        'hongfa.event_attendance': ('/hongfa/attendance','⬅ 返回出席记录'),
+        'hongfa.stock': ('/hongfa/book-menu','⬅ 返回书籍管理'),
+        'hongfa.items': ('/hongfa/book-menu','⬅ 返回书籍管理'),
+        'hongfa.report': ('/hongfa/dashboard','🏠 返回管理首页'),
+        'hongfa.books_manage': ('/hongfa/book-menu','⬅ 返回书籍管理'),
+        'hongfa.books_add': ('/hongfa/books/manage','⬅ 返回管理书籍'),
+    }.get(request.endpoint)
+    if request.endpoint == 'hongfa.books' and not kwargs.get('is_volunteer'):
+        back = ('/hongfa/book-menu','⬅ 返回书籍管理')
+        content += '<style>.hf-back{bottom:90px}</style>'
+    if back:
+        content += '<a class="hf-back" href="'+back[0]+'">'+back[1]+'</a>'
     return render_template_string(BASE.replace('{% block content %}{% endblock %}', content), **kwargs)
 
 
@@ -52,7 +73,7 @@ def actor():
     # 权限每次从数据库读取，撤销后即时失效。
     roles = db_query('''SELECT role,team_id FROM hongfa_roles
         WHERE volunteer_id=%s AND active=true''', (vid,), fetchall=True) or []
-    admins = db_query("SELECT a.team_id FROM hongfa_team_admins a JOIN hongfa_teams t ON t.id=a.team_id WHERE a.volunteer_id=%s AND t.active=true", (vid,), fetchall=True) or []
+    admins = db_query("SELECT a.team_id FROM hongfa_team_admins a JOIN hongfa_teams t ON t.id=a.team_id WHERE a.volunteer_id=%s AND a.active=true AND t.active=true", (vid,), fetchall=True) or []
     secretary = any(x['role']=='secretary' for x in roles)
     leaders = {x['team_id'] for x in roles if x['role']=='leader' and x['team_id'] is not None}
     teams = leaders | {x['team_id'] for x in admins}
@@ -124,7 +145,7 @@ def login():
                 error = '编号或 PIN 不正确。'
             else:
                 vid = str(vol['编号'])
-                roles = db_query('SELECT 1 FROM hongfa_roles WHERE volunteer_id=%s AND active=true UNION ALL SELECT 1 FROM hongfa_team_admins a JOIN hongfa_teams t ON t.id=a.team_id WHERE a.volunteer_id=%s AND t.active=true LIMIT 1',
+                roles = db_query('SELECT 1 FROM hongfa_roles WHERE volunteer_id=%s AND active=true UNION ALL SELECT 1 FROM hongfa_team_admins a JOIN hongfa_teams t ON t.id=a.team_id WHERE a.volunteer_id=%s AND a.active=true AND t.active=true LIMIT 1',
                                  (vid,vid),fetchone=True)
                 if not roles:
                     error = '此编号尚未获得弘法管理权限。'
@@ -176,16 +197,33 @@ def dashboard():
         WHERE e.event_date=%s AND e.status='published' AND e.closed_at IS NULL
         AND e.location_id IS NOT NULL AND e.team_id=ANY(%s) ORDER BY t.id''',
         (today, who['team_ids']), fetchall=True) or []
-    return render('''<div class="card"><div style="font-size:27px;font-weight:800;line-height:1.4">👤 {{display_name}}</div>
-        <div style="font-size:21px;font-weight:700;margin-top:6px">{{role_label}}</div>
-        <p style="color:#63746a">编号：{{who.id}}</p>
-        <p>身份：{{'秘书（跨组查看）' if who.secretary else ('小管理员（仅自己的组）' if who.small_admin else '负责人（仅自己的组）')}}</p>
-        {% for e in today_events %}<p><a class="btn" href="{{url_for('hongfa.event_code',event_id=e.id)}}">🔐 生成今日签到码｜{{e.team_name}}</a></p>{% endfor %}
-        {% if who.secretary or who.leader_team_ids %}<p><a class="btn" href="{{url_for('hongfa.team_admins')}}">👥 小管理员设置</a></p>{% endif %}<h2>📅 弘法安排</h2>
-        {% for e in rows %}<p>{{e.event_date}}｜{{e.team_name}}｜{{e.location_name or 'Off'}}｜{{e.status}}</p>
-        {% else %}<p>暂无安排。</p>{% endfor %}
-        <p><a class="btn" href="/hongfa/plans">📅 活动提交／审核</a> <a class="btn" href="/hongfa/week">📋 每周表</a> <a class="btn" href="/hongfa/locations">📍 地点</a> <a class="btn" href="/hongfa/attendance">👥 出席</a> <a class="btn" href="/hongfa/books">📚 快速扣书／点货</a> <a class="btn" href="/hongfa/stock">📚 原库存</a> <a class="btn" href="/hongfa/report">📊 报表</a> {% if who.secretary %}<a class="btn" href="/hongfa/items">📖 经书目录</a>{% endif %}</p><small>第三批本地测试中，请勿直接用于正式签到。</small></div>
-        <form method="post" action="{{url_for('hongfa.logout')}}"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>退出登录</button></form>''',who=who,rows=rows,csrf=csrf_token(),display_name=display_name,role_label=role_label,today_events=today_events)
+    return render('''<div class="card"><b style="font-size:24px">👤 {{display_name}}</b><div>{{role_label}} · {{who.id}}</div></div>
+        {% for e in today_events %}<a class="hf-tile hf-orange" style="margin:12px 0;min-height:65px" href="{{url_for('hongfa.event_code',event_id=e.id)}}">🔐 今日签到码｜{{e.team_name}}</a>{% endfor %}
+        <div class="card"><h2>常用功能</h2><div class="hf-menu">
+        <a class="hf-tile" href="/hongfa/plans"><span>📅</span>{{'审核发布' if who.secretary else '提交安排'}}</a>
+        <a class="hf-tile hf-blue" href="/hongfa/week"><span>📋</span>每周时间表</a>
+        <a class="hf-tile hf-purple" href="/hongfa/attendance"><span>👥</span>出席记录</a>
+        <a class="hf-tile hf-brown" href="{{url_for('hongfa.book_menu')}}"><span>📚</span>书籍管理</a>
+        <a class="hf-tile hf-navy" href="/hongfa/report"><span>📊</span>弘法报表</a>
+        <a class="hf-tile hf-gray" href="{{url_for('hongfa.settings_menu')}}"><span>⚙️</span>系统设置</a></div></div>
+        <div class="card"><h2>📅 近期弘法安排</h2>
+        {% for e in rows %}{% if loop.changed(e.event_date) %}<div class="hf-day">{{e.event_date.strftime('%m月%d日')}}（星期{{'一二三四五六日'[e.event_date.weekday()]}}）</div>{% endif %}
+        <div class="hf-agenda"><div class="hf-agenda-head"><b>{{e.team_name}}</b><span class="hf-status {{e.status}}">{{{'published':'🟢 已发布','draft':'🟠 待审核','rejected':'🔴 已退回'}.get(e.status,e.status)}}</span></div><div>{{'📍 '+e.location_name if e.location_name else '休息 / Off'}}</div></div>
+        {% else %}<p>暂无安排。</p>{% endfor %}</div>
+        <small>系统试用中，请勿直接用于正式签到。</small>
+        <form method="post" action="{{url_for('hongfa.logout')}}"><input type="hidden" name="csrf_token" value="{{csrf}}"><button class="hf-logout">退出登录</button></form>''',who=who,rows=rows,csrf=csrf_token(),display_name=display_name,role_label=role_label,today_events=today_events)
+
+
+@hongfa_bp.route('/settings-menu')
+@require_login
+def settings_menu():
+    return render('''<div class="card"><h2>⚙️ 系统设置</h2><div class="hf-menu"><a class="hf-tile" href="/hongfa/locations"><span>📍</span>弘法地点</a>{% if who.secretary or who.leader_team_ids %}<a class="hf-tile hf-purple" href="{{url_for('hongfa.team_admins')}}"><span>👥</span>小管理员设置</a>{% endif %}</div></div><a class="hf-back" href="/hongfa/dashboard">🏠 返回管理首页</a>''',who=actor())
+
+
+@hongfa_bp.route('/book-menu')
+@require_login
+def book_menu():
+    return render('''<div class="card"><h2>📚 书籍管理</h2><div class="hf-menu">{% if who.team_ids %}<a class="hf-tile" href="/hongfa/books"><span>📖</span>结缘／点货补货</a>{% endif %}<a class="hf-tile hf-blue" href="/hongfa/stock"><span>📦</span>查看库存</a><a class="hf-tile hf-brown" href="/hongfa/books/manage"><span>⚙️</span>管理书籍</a>{% if who.secretary %}<a class="hf-tile hf-gray" href="/hongfa/items"><span>📖</span>原书籍目录</a>{% endif %}{% if who.team_ids %}<a class="hf-tile hf-gray" href="/hongfa/stock"><span>📋</span>原库存操作</a>{% endif %}</div></div><a class="hf-back" href="/hongfa/dashboard">🏠 返回管理首页</a>''',who=actor())
 
 
 @hongfa_bp.route('/logout',methods=['POST'])
@@ -216,7 +254,7 @@ def team_admins():
     teams = [t for t in teams if who['secretary'] or t['id'] in who['leader_team_ids']]
     if not teams: abort(403)
     allowed = {t['id'] for t in teams}
-    selected = request.values.get('team_id',type=int)
+    selected = (request.form if request.method == 'POST' else request.args).get('team_id',type=int)
     if selected is None: selected = teams[0]['id']
     if selected not in allowed: abort(403)
     error = ''; candidate = None
@@ -237,13 +275,13 @@ def team_admins():
                 elif action=='lookup':
                     candidate={'id':vid,'name': admin_name(v,vid),'branch':branch,'number':n}
                 else:
-                    db_query("INSERT INTO hongfa_team_admins(team_id,volunteer_id,created_by) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",(selected,vid,who['id']))
+                    db_query("INSERT INTO hongfa_team_admins(team_id,volunteer_id,created_by) VALUES (%s,%s,%s) ON CONFLICT (team_id,volunteer_id) DO UPDATE SET active=true",(selected,vid,who['id']))
                     return redirect(url_for('hongfa.team_admins',team_id=selected))
         elif action=='remove':
-            db_query('DELETE FROM hongfa_team_admins WHERE team_id=%s AND volunteer_id=%s',(selected,request.form.get('vid','')))
+            db_query('UPDATE hongfa_team_admins SET active=false WHERE team_id=%s AND volunteer_id=%s',(selected,request.form.get('vid','')))
             return redirect(url_for('hongfa.team_admins',team_id=selected))
         else: abort(400)
-    rows=db_query('SELECT volunteer_id FROM hongfa_team_admins WHERE team_id=%s ORDER BY volunteer_id',(selected,),fetchall=True) or []
+    rows=db_query('SELECT volunteer_id FROM hongfa_team_admins WHERE team_id=%s AND active=true ORDER BY volunteer_id',(selected,),fetchall=True) or []
     for row in rows: row['name']=admin_name(find_volunteer(row['volunteer_id']) or {},row['volunteer_id'])
     return render('''<div class="card"><h2>👥 小管理员设置</h2><p><a href="{{url_for('hongfa.dashboard')}}">🏠 返回管理首页</a></p>
     <label>弘法组</label><select onchange="location.href='?team_id='+this.value">{% for t in teams %}<option value="{{t.id}}" {% if t.id==selected %}selected{% endif %}>{{t.name}}</option>{% endfor %}</select>

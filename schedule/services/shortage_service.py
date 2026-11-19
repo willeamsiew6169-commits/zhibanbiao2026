@@ -121,19 +121,18 @@ def build_shortage_notice_from_assignments(date_str, conn=None):
     lines = []
     if day != today and _cleaning_text(cleaning):
         lines.append(f"🧹 卫生义工　{_cleaning_text(cleaning)} 位")
-    # 群通知不区分地点：把同一时段各地点的缺额相加，再合并连续时段。
-    points = sorted({t for _,a,b,_,_ in gaps for t in (a,b)})
-    merged = []
-    for a,b in zip(points, points[1:]):
-        minimum = sum(m for _,x,y,m,n in gaps if x <= a and y >= b)
-        ideal = sum(n for _,x,y,m,n in gaps if x <= a and y >= b)
-        if not ideal:
-            continue
-        if merged and merged[-1][1] == a and merged[-1][2:] == (minimum,ideal):
-            merged[-1] = (merged[-1][0],b,minimum,ideal)
-        else:
-            merged.append((a,b,minimum,ideal))
-    lines.extend(f"🕒 {_span(a,b)}　{_need_text(m,n)} 位" for a,b,m,n in merged)
+    # 群通知只显示最低覆盖不足，不显示负责人内部的建议增员。
+    now = datetime.now(timezone(timedelta(hours=8)))
+    cutoff = now.hour * 60 + now.minute if day == today else -1
+    for place in ("观音堂", "活动中心", "地点待安排"):
+        merged = []
+        for a, b in sorted((a, b) for p, a, b, minimum, ideal in gaps
+                           if p == place and minimum > 0 and b > cutoff):
+            if merged and a <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
+            else:
+                merged.append((a, b))
+        lines.extend(f"🕒 {place} {_clock(a)} ~ {_clock(b)}" for a, b in merged)
     if not lines:
         return f"✅ {day_text}没有需要发送的缺义工通知。"
     return (f"师兄们，大家好！🙏\n\n📅 {day_text}（{day.month}月{day.day}日）义工尚需\n\n"

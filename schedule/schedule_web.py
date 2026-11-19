@@ -4468,12 +4468,6 @@ def schedule_attendance_status():
     walk_ins_raw = []
     not_checked_out_raw = []
 
-    for a in assignments:
-        if a["id"] in signed_assignment_ids:
-            checked_in_raw.append(a)
-        else:
-            not_checked_in_raw.append(a)
-
     # 固定佛台由 Excel 轮值和负责人当天覆盖名单决定，不一定有普通排班 ID。
     # 旧签到记录即使 walk_in=True，仍按当天有效名单在页面上归入正式签到。
     fixed_altar_names = {
@@ -4482,15 +4476,34 @@ def schedule_attendance_status():
     }
 
     def is_fixed_altar_checkin(log):
-        if str(log.get("actual_role") or "").strip() != "佛台":
+        if str(log.get("actual_role") or "").strip() not in ("佛台", "整理佛台"):
             return False
         name = "".join(cc.convert(str(log.get("name") or "")).split()).casefold()
         return bool(name) and name in fixed_altar_names
 
+    # 固定佛台排班可能无编号；沿用已确认的固定名单姓名匹配。
+    altar_logs = [r for r in logs if r.get("check_in_time") and is_fixed_altar_checkin(r)]
+    altar_names = {"".join(cc.convert(str(r.get("name") or "")).split()).casefold() for r in altar_logs}
+    matched_altar_logs = set()
+    for a in assignments:
+        name = "".join(cc.convert(str(a.get("name") or "")).split()).casefold()
+        altar_matched = (
+            str(a.get("role") or "").strip() in ("佛台", "整理佛台")
+            and bool(name) and name in altar_names
+        )
+        if altar_matched:
+            matched_altar_logs.add(name)
+        if a["id"] in signed_assignment_ids or altar_matched:
+            checked_in_raw.append(a)
+        else:
+            not_checked_in_raw.append(a)
+
     fixed_altar_logs = []
     for l in logs:
         if is_fixed_altar_checkin(l):
-            fixed_altar_logs.append(l)
+            name = "".join(cc.convert(str(l.get("name") or "")).split()).casefold()
+            if name not in matched_altar_logs:
+                fixed_altar_logs.append(l)
         elif l.get("walk_in"):
             walk_ins_raw.append(l)
 
@@ -4614,8 +4627,8 @@ def schedule_attendance_status():
 
             <div class="btn-row">
                 <a class="btn-tool btn-gray"
-                href="/schedule/admin">
-                    ⬅ 返回负责人首页
+                href="/schedule?mode=day&amp;override_date={{ date_str }}">
+                    ⬅ 返回当天安排
                 </a>
             </div>
 

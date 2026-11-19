@@ -506,7 +506,8 @@ def sign_out(volunteer_id: str, pin: str, assignment_id=None, role=None, attenda
                 actual_start = time_to_minutes(row.get("start_time"))
                 if actual_end is not None and actual_start is not None:
                     credited_end = min(actual_end, scheduled_end)
-                    hours = round(max(0, credited_end - actual_start) / 60, 2)
+                    credited_start = _credited_start_minutes(cur, row, actual_start)
+                    hours = round(max(0, credited_end - credited_start) / 60, 2)
 
             # 签退更新两张表必须同一事务提交。
             remark = str(row.get("remark") or "")
@@ -823,12 +824,8 @@ def _role_cutoff_minutes(cur, row):
     return None
 
 
-def _close_attendance_row(cur, row, cutoff, reason):
-    """Close attendance and its log in the same transaction."""
-    start = time_to_minutes(row.get("start_time"))
-    if start is None:
-        return False
-    end = max(start, cutoff)
+def _credited_start_minutes(cur, row, start):
+    """早到不增加正式值班时数；其他岗位及无排班记录保持原规则。"""
     role = str(row.get("role") or "")
     # Duty credited from assigned start, not early arrival.
     if role == "值班":
@@ -839,6 +836,17 @@ def _close_attendance_row(cur, row, cutoff, reason):
             scheduled_start = time_to_minutes(shift.get("start"))
             if scheduled_start is not None:
                 start = max(start, scheduled_start)
+    return start
+
+
+def _close_attendance_row(cur, row, cutoff, reason):
+    """Close attendance and its log in the same transaction."""
+    start = time_to_minutes(row.get("start_time"))
+    if start is None:
+        return False
+    end = max(start, cutoff)
+    role = str(row.get("role") or "")
+    start = _credited_start_minutes(cur, row, start)
     hours = round(max(0, end - start) / 60, 2)
     end_text = f"{end // 60:02d}:{end % 60:02d}"
     remark = str(row.get("remark") or "") + "｜" + reason
