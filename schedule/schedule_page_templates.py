@@ -715,10 +715,10 @@ html {
                 <span class="helper-text">该日期已发布，无需重复排班；新报名由系统自动补入。</span>
             </div>
             {% else %}
-            <form method="post" action="/schedule/publish" onsubmit="var b=this.querySelector('button');if(b.disabled)return false;b.disabled=true;b.innerText='⏳ 正在排班并检查……';">
+            <form method="post" action="/schedule/publish" onsubmit="return confirmManualPublish(this);">
                 <input type="hidden" name="date" id="publish_date" value="{{ override_date }}">
-                <button type="submit" class="btn-tool btn-green">
-                    🟢 自动排班并发布
+                <button type="submit" class="btn-tool" style="background:#9f1239 !important;border-color:#9f1239 !important;color:#fff !important;">
+                    🔴 自动排班并发布
                     <span class="helper-text">未发布则排班并检查；发布前检查遗漏。</span>
                 </button>
             </form>
@@ -740,6 +740,53 @@ html {
         💡 <b>发布后有新义工报名：</b>系统会自动补入空缺岗位。负责人可按「查看排班」核对最新名单；不需要重新自动排班或重新发布。<br>
         📌 <b>提醒：</b>进入通知中心或查看排班，不代表 WhatsApp 已发送或名单已确认；请负责人自行核对。
     </div>
+
+    {% if not is_published %}
+    <dialog id="manual-publish-dialog" aria-labelledby="manual-publish-title" style="width:calc(100% - 48px);max-width:480px;box-sizing:border-box;border:0;border-radius:18px;padding:24px;color:#243047;box-shadow:0 12px 44px #0005;">
+        <h2 id="manual-publish-title" style="margin-top:0;"></h2>
+        <p id="manual-publish-date" style="font-size:22px;font-weight:800;"></p>
+        <p id="manual-publish-message" style="font-size:18px;line-height:1.7;"></p>
+        <div style="display:flex;flex-wrap:wrap;gap:12px;">
+            <button type="button" id="manual-publish-cancel" style="flex:1 1 145px;background:#16803c;color:white;border:0;border-radius:10px;padding:15px;font-size:18px;font-weight:700;">取消，暂不发布</button>
+            <button type="button" id="manual-publish-confirm" style="flex:1 1 145px;background:#b45309;color:white;border:0;border-radius:10px;padding:15px;font-size:18px;font-weight:700;"></button>
+        </div>
+    </dialog>
+    <style>#manual-publish-dialog::backdrop{background:rgba(0,0,0,.55);}</style>
+    <script>
+    function confirmManualPublish(form) {
+        const button = form.querySelector('button[type="submit"]');
+        if (button.disabled) return false;
+        const date = form.querySelector('input[name="date"]').value;
+        const now = new Date(Date.now() + 8 * 60 * 60 * 1000);
+        const early = now.getUTCHours() * 60 + now.getUTCMinutes() < 21 * 60 + 45;
+        const title = early ? '⚠️ 提前发布确认' : '确认发布';
+        const message = early ? '现在还未到晚上 9:45（马来西亚时间）。发布后将不能重新自动排班，新报名只会补入。确定现在发布吗？' : '系统将自动排班并检查遗漏，确认后发布。';
+        const dialog = document.getElementById('manual-publish-dialog');
+        function submitConfirmed() {
+            if (button.disabled) return;
+            button.disabled = true;
+            button.innerText = '⏳ 正在排班并检查……';
+            HTMLFormElement.prototype.submit.call(form);
+        }
+        if (!dialog || typeof dialog.showModal !== 'function') {
+            if (window.confirm(title + '\\n发布日期：' + date + '\\n' + message)) submitConfirmed();
+            return false;
+        }
+        if (dialog.open) return false;
+        document.getElementById('manual-publish-title').textContent = title;
+        document.getElementById('manual-publish-date').textContent = '📅 发布日期：' + date;
+        document.getElementById('manual-publish-message').textContent = message;
+        const yes = document.getElementById('manual-publish-confirm');
+        const no = document.getElementById('manual-publish-cancel');
+        yes.textContent = early ? '确认提前发布' : '确认发布';
+        yes.onclick = function () { dialog.close(); submitConfirmed(); };
+        no.onclick = function () { dialog.close(); };
+        dialog.showModal();
+        no.focus();
+        return false;
+    }
+    </script>
+    {% endif %}
 
     {% if is_published %}
     <div style="margin-top:12px;">

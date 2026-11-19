@@ -84,6 +84,9 @@ ADMIN_HTML = '''<!doctype html><html lang="zh"><meta charset="utf-8"><meta name=
 .photo-card.selected{border-color:#15905c;background:#effaf2}.photo-card img,.photo-card .placeholder{height:175px;width:100%;object-fit:contain;background:#f4f5f1}
 .photo-card .inner{padding:12px}.photo-card h3{margin:5px 0;font-size:20px}.photo-card .qty{font-size:22px;font-weight:bold}
 .select-product{display:block;width:100%;margin:12px 0;background:#657581;font-size:18px;padding:13px 8px}.select-product.chosen{background:#21865a}.photo-card input[type=number]{font-size:22px;max-width:150px}.edit-product{background:#657581;font-size:16px;padding:9px 12px;margin-top:8px}.check{font-size:18px;font-weight:bold;color:#127345}
+#wa-notifications .wa-copy-btn{transition:transform .12s,background .15s}
+#wa-notifications .wa-copy-btn:active{transform:scale(.96)}
+#wa-notifications .wa-copy-btn.copied{background:#239e49!important;color:#fff}
 .delete-product{background:#b74343;font-size:16px;padding:9px 12px;margin-top:8px;margin-left:6px}
  .sticky-save{position:sticky;bottom:0;background:#fff;padding:14px;box-shadow:0 -4px 20px #0002;border-radius:12px;z-index:2}
 .sticky-save button{width:100%;font-size:23px}.upload-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -91,6 +94,15 @@ ADMIN_HTML = '''<!doctype html><html lang="zh"><meta charset="utf-8"><meta name=
 </style><main><h1>🌸 卫生用品结缘管理</h1>
 {% if not authorized %}<div class="card"><form method="post" action="{{url_for('donation.admin_login')}}"><label>负责人专用 PIN</label><input name="pin" type="password" required><button>进入管理</button></form></div>
 {% else %}<p><a class="btn secondary" href="{{url_for('donation.admin_logout')}}">退出管理</a> <a class="btn" href="{{url_for('donation.home')}}">查看义工页面</a></p>
+<div class="card" id="wa-notifications"><h2 style="margin-top:0">📣 WhatsApp 群通知</h2>
+<label for="waOpenTime">提前通知：预计开放时间</label><input id="waOpenTime" type="time" value="22:00" style="max-width:200px">
+<div style="display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(210px,1fr))">
+<button type="button" style="background:#a85b09" class="wa-copy-btn" onclick="copyDonationNotice('advance',this)">🟠 复制提前通知</button>
+<button type="button" class="wa-copy-btn" onclick="copyDonationNotice('open',this)">🟢 复制开放结缘通知</button>
+<button type="button" style="background:#255da5" class="wa-copy-btn" onclick="copyDonationNotice('published',this)">🔵 复制公布完毕通知</button></div>
+<p id="waCopyStatus" role="status" aria-live="polite" style="color:#187c4b;font-weight:bold;margin-bottom:0"></p>
+<textarea id="waManualCopy" hidden readonly rows="10" aria-label="通知内容"></textarea>
+</div>
 <div class="notice" id="notice">正在读取用品…</div>
 <div class="card"><h2>① 第一次使用：上传用品照片</h2><p class="muted">每件用品上传一次，以后可重复使用。照片会保存在 Supabase 数据库，不怕 Render 重新部署。</p>
 <form id="uploadForm" enctype="multipart/form-data"><div class="upload-row"><div><label>用品名称</label><input name="name" required maxlength="150" placeholder="例如：洗洁精"></div><div><label>规格</label><input name="specification" maxlength="300" placeholder="例如：5公升"></div></div>
@@ -102,6 +114,77 @@ ADMIN_HTML = '''<!doctype html><html lang="zh"><meta charset="utf-8"><meta name=
 <script>
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let data=null,editing=false,saving=false;
+function donationNoticeText(kind){
+ const value=document.getElementById('waOpenTime').value||'22:00';
+ const [h,m]=value.split(':').map(Number);
+ const time=(h%12||12)+':'+String(m).padStart(2,'0')+(h>=12?'pm':'am');
+ const messages={
+ advance:`📣📣📣
+*通告*
+
+💕 敬爱的师兄们，大家晚上好。
+
+稍后⏰${time}，我们将会发布共修会所需的卫生用品清单，欢迎大家随喜结缘。
+
+公布的用品信息将包括指定品牌（如有）、数量及送至共修会的日期。
+
+*请注意：这些用品的结缘机会仅限于本群的师兄们，请勿转发至其他群或代他人报名。*
+
+如有任何关于卫生的疑问，请联系程秋萍师兄 +60 12-327 1997。
+
+感恩大家的发心与配合。🙏🏻`,
+ open:`💕 各位师兄，大家好。
+
+🌸 *共修会卫生用品结缘现已开放。*
+
+欢迎各位师兄随喜结缘，请点击以下链接进行报名。
+
+👇 *卫生用品结缘链接*
+https://gyt-checkin-sg.onrender.com/donation/
+
+📱 *结缘操作步骤：*
+
+1️⃣ 点击以上链接。
+2️⃣ 选择 CHE 或 STW，输入您的义工编号。
+3️⃣ 确认系统显示的是您的姓名，进入结缘页面。
+4️⃣ 选择您想结缘的用品，点击「我要结缘」。
+5️⃣ 确认结缘后，看到自己的名字出现在结缘名单中，即表示结缘成功。
+
+📌 *温馨提醒：*
+
+🔹 今晚凌晨12点前，每位义工只限结缘一种用品。
+🔹 凌晨12点后，如还有剩余名额，可继续结缘其他用品。
+🔹 显示「已满额」的用品，无需再报名。
+🔹 请于购买后 *7️⃣至🔟天内* 带到活动中心。
+🔹 请勿转发至其他群或代他人报名。
+
+如有任何疑问，请联系程秋萍师兄 +60 12-327 1997。
+
+感恩大家的慈悲发心与配合。🙏🏻`,
+ published:`📌 结缘物品已全部公布完毕，欢迎师兄们随喜结缘。
+
+感恩大家的慈悲发心与护持功德！🙏`};
+ return messages[kind];
+}
+function donationCopySuccess(kind,btn,status){
+ status.textContent='✅ 信息已复制，请到 WhatsApp 群粘贴发送。';
+ if(!btn)return;
+ if(!btn.dataset.originalText)btn.dataset.originalText=btn.textContent;
+ clearTimeout(btn.copyTimer);
+ btn.classList.add('copied');
+ btn.textContent=({advance:'✅ 提前通知已复制',open:'✅ 开放通知已复制',published:'✅ 完毕通知已复制'})[kind];
+ btn.copyTimer=setTimeout(()=>{btn.classList.remove('copied');btn.textContent=btn.dataset.originalText},3000);
+}
+async function copyDonationNotice(kind,btn){
+ if(btn&&btn.dataset.originalText){clearTimeout(btn.copyTimer);btn.classList.remove('copied');btn.textContent=btn.dataset.originalText;}
+ const content=donationNoticeText(kind), status=document.getElementById('waCopyStatus'), box=document.getElementById('waManualCopy');
+ box.hidden=true;status.textContent='';
+ try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(content);donationCopySuccess(kind,btn,status);return}}catch(e){}
+ box.value=content;box.hidden=false;box.focus();box.select();box.setSelectionRange(0,content.length);
+ let copied=false;try{copied=document.execCommand('copy')}catch(e){}
+ if(copied){box.hidden=true;donationCopySuccess(kind,btn,status)}
+ else{status.textContent='请长按或使用 Ctrl+C 复制下方通知。'}
+}
 async function api(url,body){const opt=body===undefined?{cache:'no-store'}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};const r=await fetch(url,opt);return r.json()}
 function getSelection(){return [...document.querySelectorAll('.photo-card')].map(el=>({product_id:Number(el.dataset.id),selected:el.querySelector('.selected-box').checked,slots:Number(el.querySelector('.qty').value)}))}
 function toggle(id){const el=document.querySelector('.photo-card[data-id="'+id+'"]');const check=el.querySelector('.selected-box');check.checked=!check.checked;updateCard(el);editing=true}

@@ -90,7 +90,7 @@ def _need_text(minimum, ideal):
 
 
 def _cleaning_text(count):
-    return {0: "2～3", 1: "1～2", 2: "1"}.get(count, "")
+    return {0: "2 ~ 3", 1: "1 ~ 2", 2: "1"}.get(count, "")
 
 
 def build_shortage_summary_for_admin(date_str, conn=None):
@@ -172,7 +172,7 @@ def build_signup_shortage_notice(date_str):
                 full_day_count += 1
     notices = []
     if cleaning_count < 3:
-        need_text = "2～3" if cleaning_count == 0 else ("1～2" if cleaning_count == 1 else "1")
+        need_text = "2 ~ 3" if cleaning_count == 0 else ("1 ~ 2" if cleaning_count == 1 else "1")
         notices.append(f"🧹 卫生 还需要 {need_text} 位义工。")
     total_duty = morning_count + afternoon_count
     if total_duty < 6:
