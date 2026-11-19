@@ -200,7 +200,7 @@ def get_eligible_signin_roles(volunteer, raw_id, assignments=None):
 
     # 值班试用期：关闭排班限制时，允许无排班的义工现场测试签到。
     # 其他岗位仍按各自报名／固定名单规则筛选。
-    if not REQUIRE_ASSIGNMENT_FOR_SIGNIN or any(a.get("role") == "值班" for a in assignments):
+    if not get_signin_policies()["duty"] or any(a.get("role") == "值班" for a in assignments):
         roles.add("值班")
     for role in ("卫生", "膳食"):
         if has_active_signup_for_role(volunteer, raw_id, role):

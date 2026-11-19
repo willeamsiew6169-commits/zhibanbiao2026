@@ -131,7 +131,7 @@ def outgoing_snapshot(page, message):
             total++;
             ids.push(id);
             const all = Array.from(bubble.querySelectorAll('[data-testid="selectable-text"], .selectable-text, .copyable-text span[dir]'));
-            const top = all.filter(el => !el.parentElement?.closest('[data-testid="selectable-text"]'));
+            const top = all.filter(el => !all.some(other => other !== el && other.contains(el)));
             const variants = [];
             for (const el of top) {
                 variants.push(el.innerText || '');
@@ -168,6 +168,52 @@ def newly_visible_outgoing(before, after):
     """只有发送前不存在的本人消息 ID 且正文完整相符，才能确认。"""
     old_ids = set(before['ids'])
     return any(item['id'] not in old_ids for item in after['matched'])
+
+
+def verify_after_send(page, message, before):
+    """Read-only verification except expanding messages; never press Enter again."""
+    deadline = time.monotonic() + 30
+    expanded_ids = set()
+    after = None
+    while time.monotonic() < deadline:
+        page.wait_for_timeout(500)
+        try:
+            check_header(page)
+            after = outgoing_snapshot(page, message)
+            check_header(page)
+        except (RuntimeError, PlaywrightError) as exc:
+            LOG.warning("发送后界面暂未就绪，仅等待核对：%s", exc)
+            continue
+        LOG.info("发送后检查：本人消息=%s，完全匹配=%s", after["total"], len(after["matched"]))
+        if newly_visible_outgoing(before, after):
+            return "sent", "检测到测试群新增完整本人消息（非送达回执）"
+        for msg_id in set(after["ids"]) - set(before["ids"]) - expanded_ids:
+            try:
+                check_header(page)
+                nodes = page.locator("#main [data-id]")
+                for j in range(nodes.count()):
+                    node = nodes.nth(j)
+                    if node.get_attribute("data-id") != msg_id:
+                        continue
+                    more = node.get_by_text(re.compile(r"^(Read more|阅读更多|查看更多|展开全文|显示更多|继续阅读|阅读全文|Baca lagi)\s*$", re.I))
+                    if more.count() == 1 and more.is_visible():
+                        more.click(timeout=2000)
+                        expanded_ids.add(msg_id)
+                    break
+            except (RuntimeError, PlaywrightError) as exc:
+                LOG.warning("展开消息暂未成功：%s", exc)
+    LOG.warning("发送后核对超时；最后本人消息数=%s", after["total"] if after else None)
+    return "uncertain", "已按 Enter，但未能确认新增本人消息；禁止自动重试"
+
+
+def can_continue_after_uncertain(page):
+    """Only resume different jobs if original test chat and empty editor are verified."""
+    try:
+        check_header(page)
+        editor = page.locator('footer [contenteditable="true"][role="textbox"]')
+        return editor.count() == 1 and editor.is_visible() and not editor.inner_text().strip() and not editor.text_content().strip()
+    except Exception:
+        return False
 
 
 def send_test(page, message):
@@ -209,32 +255,7 @@ def send_test(page, message):
     try:
         editor.press('Enter')
         if AUTO:
-            deadline = time.monotonic() + 30
-            expanded_ids = set()
-            while time.monotonic() < deadline:
-                page.wait_for_timeout(500)
-                check_header(page)
-                after = outgoing_snapshot(page, message)
-                LOG.info('发送后检查：本人消息=%s，完全匹配=%s，匹配ID=%s',
-                         after['total'], len(after['matched']),
-                         [(x['id'], x.get('mode')) for x in after['matched']][-3:])
-                if newly_visible_outgoing(before, after):
-                    return 'sent', '自动检测到测试群聊天区新增本人消息（仅本地界面确认，非送达回执）'
-                # 长消息可能被 WhatsApp 折叠；只展开本次新增本人消息。
-                for msg_id in set(after['ids']) - set(before['ids']) - expanded_ids:
-                    # 用 DOM 属性精确定位，不拼接 CSS 字符串。
-                    nodes = page.locator('#main [data-id]')
-                    for j in range(nodes.count()):
-                        node = nodes.nth(j)
-                        if node.get_attribute('data-id') != msg_id:
-                            continue
-                        more = node.get_by_text(re.compile(r'^(Read more|阅读更多|查看更多|展开全文|显示更多|继续阅读|阅读全文|Baca lagi)\s*$', re.I))
-                        if more.count() == 1 and more.is_visible():
-                            more.click(timeout=2000)
-                            expanded_ids.add(msg_id)
-                        break
-            LOG.warning('未匹配到新增本人消息；发送后正文样本=%s', after['samples'][-5:])
-            return 'uncertain', '已按 Enter，但未能确认新增本人消息；禁止自动重试'
+            return verify_after_send(page, message, before)
         page.wait_for_timeout(1500)
     except Exception as exc:
         return 'uncertain', f'发送动作结果不明：{type(exc).__name__}: {exc}'
@@ -443,6 +464,12 @@ def main():
                 except Exception:
                     LOG.exception('ACK 失败；请人工检查 Supabase，不要重排任务')
                     break
+                if (AUTO and status == 'uncertain' and
+                        reason.startswith('已按 Enter，但未能确认新增本人消息') and
+                        can_continue_after_uncertain(page)):
+                    LOG.warning('Job %s 已隔离为 uncertain，不重发；测试群及空输入框已核对，继续其他任务', job['id'])
+                    time.sleep(POLL)
+                    continue
                 if AUTO and status != 'sent':
                     LOG.error('自动测试结果非 sent，暂停继续领取，防止连续失败')
                     break

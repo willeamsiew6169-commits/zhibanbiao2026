@@ -23,34 +23,77 @@ def _period(year, month=None):
     return date(year, month, 1), (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1))
 
 
+def load_live_attendance(start, end):
+    """One row per official attendance; explicitly identified farm supplements only."""
+    import re
+    rows = db_query("""
+        SELECT id, volunteer_id, name AS volunteer_name, date::date AS day,
+               role, start_time::text AS start_time, end_time::text AS end_time,
+               hours, remark AS remarks, 'cloud' AS data_source
+        FROM public.attendance
+        WHERE date::date >= %s AND date::date < %s AND date::date >= DATE '2026-11-15'
+        ORDER BY date, id
+    """, (start, end), fetchall=True) or []
+    logs = db_query("""
+        SELECT id, assignment_id, volunteer_id, name, attendance_date AS day,
+               actual_role, actual_place, check_in_time, check_out_time, remarks
+        FROM public.volunteer_attendance_logs
+        WHERE attendance_date >= %s AND attendance_date < %s
+          AND attendance_date >= DATE '2026-11-15'
+        ORDER BY id
+    """, (start, end), fetchall=True) or []
+    def key(row, role):
+        return (row['day'], str(row['volunteer_id']), role)
+    grouped = {}
+    for log in logs:
+        grouped.setdefault(key(log, log['actual_role']), []).append(log)
+    occupied = set()
+    for row in rows:
+        k = key(row, row['role'])
+        occupied.add(k)
+        marker = re.search(r'assignment_ids?=([0-9,]+)', row.get('remarks') or '')
+        candidates = grouped.get(k, [])
+        if marker:
+            ids = set(map(int, marker.group(1).split(',')))
+            candidates = [l for l in candidates if l['assignment_id'] in ids]
+            row['warning'] = '' if len({l['assignment_id'] for l in candidates}) == len(ids) else '岗位或排班日志不一致，请核对'
+        else:
+            candidates = [l for l in candidates if l['assignment_id'] is None][-1:]
+            row['warning'] = ''
+        row['place'] = '、'.join(dict.fromkeys(l['actual_place'] for l in candidates if l['actual_place']))
+        if row['role'] == '值班' and row.get('hours') is not None and float(row['hours']) > 12:
+            row['warning'] = (row['warning'] + '；' if row['warning'] else '') + '值班时数超过12小时，请核对'
+    for log in logs:
+        k = key(log, log['actual_role'])
+        if (k in occupied or log['day'] != date(2026, 11, 15)
+                or log['volunteer_id'] not in ('CHE-232', 'CHE-188')
+                or log['actual_role'] != '佛学班' or log['actual_place'] != '农舍'
+                or log['remarks'] != '历史补录：农舍佛学班，实际出席2小时'
+                or not log['check_in_time'] or not log['check_out_time']):
+            continue
+        rows.append(dict(volunteer_id=log['volunteer_id'], volunteer_name=log['name'],
+                         day=log['day'], role='佛学班', place='农舍',
+                         start_time=log['check_in_time'].strftime('%H:%M'),
+                         end_time=log['check_out_time'].strftime('%H:%M'),
+                         hours=Decimal(str((log['check_out_time']-log['check_in_time']).total_seconds())) / 3600,
+                         remarks=log['remarks'], data_source='cloud', warning=''))
+        occupied.add(k)
+    return rows
+
+
 def load_attendance_rows(year, month=None):
-    """按正式切换日期读取历史/云端记录，保留每条岗位记录，不按姓名合并。"""
+    """Historical cutoff and official credited service hours."""
     start, end = _period(year, month)
-    rows = db_query('''
+    rows = db_query("""
         SELECT volunteer_id, volunteer_name, attendance_date AS day,
-               role, start_time, end_time, hours,
-               remarks, 'history' AS data_source
+               role, start_time, end_time, hours, remarks, 'history' AS data_source
         FROM public.volunteer_attendance_history
         WHERE attendance_date >= %s AND attendance_date < %s
           AND attendance_date < DATE '2026-11-15'
-        UNION ALL
-        SELECT l.volunteer_id, v.name AS volunteer_name,
-               l.attendance_date AS day, l.actual_role AS role,
-               l.check_in_time::time AS start_time,
-               l.check_out_time::time AS end_time,
-               CASE WHEN l.check_in_time IS NOT NULL
-                         AND l.check_out_time IS NOT NULL
-                         AND l.check_out_time >= l.check_in_time
-                    THEN EXTRACT(EPOCH FROM (l.check_out_time - l.check_in_time))/3600
-                    ELSE NULL END AS hours,
-               NULL AS remarks, 'cloud' AS data_source
-        FROM public.volunteer_attendance_logs l
-        LEFT JOIN public.volunteers v ON v.id = l.volunteer_id
-        WHERE l.attendance_date >= %s AND l.attendance_date < %s
-          AND l.attendance_date >= DATE '2026-11-15'
-          AND l.check_in_time IS NOT NULL
-        ORDER BY day, volunteer_id, start_time NULLS LAST
-    ''', (start, end, start, end), fetchall=True) or []
+        ORDER BY attendance_date, volunteer_id, start_time NULLS LAST
+    """, (start, end), fetchall=True) or []
+    if end > CUTOVER:
+        rows.extend(load_live_attendance(max(start, CUTOVER), end))
     # 报表展示统一采用当前正式编号；数据库历史记录保持原样。
     # 只使用 volunteers.id -> member_id 的明确关联，不按姓名猜测身份。
     volunteers = load_volunteers()

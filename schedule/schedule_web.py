@@ -1397,6 +1397,43 @@ def schedule_admin():
     mode = request.args.get("mode", "")
 
     override_date = request.args.get("override_date") or default_schedule_date
+    # 历史日期仅查询正式历史出席；不进入现有报名/排班 dashboard。
+    try:
+        selected_day = date.fromisoformat(override_date)
+    except ValueError:
+        return "日期格式无效", 400
+    weekday_label = "星期" + "一二三四五六日"[selected_day.weekday()]
+    if mode == "day" and selected_day < date(2026, 11, 15):
+        if request.method != "GET":
+            return "历史出席仅供查询", 405
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT volunteer_id, volunteer_name, role, start_time, end_time, hours
+                    FROM public.volunteer_attendance_history
+                    WHERE attendance_date = %s
+                    ORDER BY start_time NULLS LAST, volunteer_name, volunteer_id, role
+                """, (selected_day,))
+                history_rows = cur.fetchall()
+        history_people = len({str(r["volunteer_id"]) for r in history_rows if r["volunteer_id"]})
+        history_hours = sum(r["hours"] for r in history_rows if r["hours"] is not None)
+        return render_template_string(
+            SCHEDULE_HTML, mode=mode, override_date=override_date,
+            weekday_label=weekday_label, historical_view=True,
+            special_day_info=get_special_day_info(selected_day),
+            history_rows=history_rows, history_people=history_people,
+            history_hours=history_hours,
+            history_unknown_hours=sum(r["hours"] is None for r in history_rows),
+        )
+    actual_rows = []
+    actual_error = False
+    if mode == "day" and selected_day <= malaysia_today():
+        try:
+            from reports_service import load_live_attendance
+            actual_rows = load_live_attendance(selected_day, selected_day + timedelta(days=1))
+        except Exception as exc:
+            print("实际出席查询失败:", repr(exc))
+            actual_error = True
     _dashboard_started = time.perf_counter()
     dashboard = load_admin_dashboard_data(
         mode=mode,
@@ -1532,6 +1569,12 @@ def schedule_admin():
         setup_saved=setup_saved,
         remove_saved=remove_saved,
         override_date=override_date,
+        weekday_label=weekday_label,
+        actual_visible=mode == "day" and selected_day <= malaysia_today(),
+        actual_rows=actual_rows,
+        actual_error=actual_error,
+        actual_people=len({str(r['volunteer_id']) for r in actual_rows if r['volunteer_id']}),
+        actual_hours=sum(float(r['hours']) for r in actual_rows if r['hours'] is not None and r.get('end_time')),
         fixed_buddha_today=fixed_buddha_today,
         buddha_leave_dates=buddha_leave_dates,
         selected_buddha_leave_date=selected_buddha_leave_date,

@@ -496,6 +496,53 @@ html {
 
 {% if mode in ("day", "signup", "special", "controls") %}
 {% if mode == "day" %}
+{% macro attendance_ampm(value, empty='—') -%}
+    {%- if not value -%}{{ empty }}
+    {%- else -%}
+        {%- set raw = value|string|trim -%}
+        {%- set text = raw|lower -%}
+        {%- set parts = text.split(':') -%}
+        {%- if text.endswith('am') or text.endswith('pm') -%}{{ text|replace(' ', '') }}
+        {%- elif parts|length in [2, 3] and parts[0].isdigit() and parts[1].isdigit() and 0 <= parts[0]|int < 24 and 0 <= parts[1]|int < 60 and (parts|length == 2 or parts[2].isdigit()) -%}
+            {{ (parts[0]|int % 12) or 12 }}:{{ '%02d'|format(parts[1]|int) }}{{ 'am' if parts[0]|int < 12 else 'pm' }}
+        {%- else -%}{{ raw }}
+        {%- endif -%}
+    {%- endif -%}
+{%- endmacro %}
+{% if historical_view %}
+<div class="card today-panel">
+    <h2 class="section-title">📚 历史出席查询</h2>
+    <div class="date-card">
+        <b>🗓 日期资料</b><br>
+        阳历：{{ override_date }}（{{ weekday_label }}）<br>
+        农历：{{ special_day_info.lunar_text }}<br>
+        {% if special_day_info.is_special %}🔴 {{ special_day_info.special_names | join("、") }}{% else %}🟢 平时日{% endif %}<br>
+        📚 本地历史出席记录（只读）
+    </div>
+    <div class="date-status-row compact-date-row">
+        <div class="date-picker-card compact-date-picker">
+            <div class="status-title">📅 选择工作日期</div>
+            <input type="date" id="main_date" class="date-input" value="{{ override_date }}" onchange="goToScheduleDate(this.value)">
+        </div>
+    </div>
+    <div class="kpi-grid">
+        <div class="kpi-card"><div class="kpi-title">👥 出席人数</div><div class="kpi-value">{{ history_people }}</div></div>
+        <div class="kpi-card"><div class="kpi-title">📋 出席笔数</div><div class="kpi-value">{{ history_rows|length }}</div></div>
+        <div class="kpi-card"><div class="kpi-title">⏱ 服务总时数</div><div class="kpi-value">{{ '%.2f'|format(history_hours) }}</div></div>
+    </div>
+    <div class="info-box" style="margin-top:14px;">
+        <b>👥 当日义工出席详情（{{ override_date }} {{ weekday_label }}）</b>
+        <p style="font-size:13px;color:#64748b;">仅显示正式历史出席，不包含测试报名、排班或签到。{% if history_unknown_hours %} 有 {{ history_unknown_hours }} 笔时数未记录，未计入总时数。{% endif %}</p>
+        {% if history_rows %}
+        <div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:14px;min-width:520px;text-align:left;">
+        <thead><tr style="background:#edf3f9;"><th>义工姓名</th><th>岗位</th><th>开始时间</th><th>结束时间</th><th>时数</th></tr></thead>
+        <tbody>{% for row in history_rows %}<tr style="border-bottom:1px solid #edf1f5;">
+        <td style="padding:9px;">{{ row.volunteer_name or row.volunteer_id or '—' }}</td><td>{{ row.role or '—' }}</td><td>{{ attendance_ampm(row.start_time) }}</td><td>{{ attendance_ampm(row.end_time) }}</td><td>{{ row.hours if row.hours is not none else '—' }}</td>
+        </tr>{% endfor %}</tbody></table></div>
+        {% else %}<p>这一天没有已导入的历史出席记录。</p>{% endif %}
+    </div>
+</div>
+{% else %}
 
 <div class="card today-panel" id="today-schedule">
     <h2 class="section-title">📅 今日概况</h2>
@@ -503,7 +550,7 @@ html {
 
     <div class="date-card">
         <b>🗓 日期资料</b><br>
-        阳历：{{ special_day_info.solar_date }}<br>
+        阳历：{{ special_day_info.solar_date }}（{{ weekday_label }}）<br>
         农历：{{ special_day_info.lunar_text }}<br>
 
         {% if special_day_info.is_special %}
@@ -571,7 +618,7 @@ html {
     </div>
 
     <div class="info-box" style="margin-top:14px;">
-        <b>👥 当日义工报名详情（{{ override_date }}）</b>
+        <b>👥 当日义工报名详情（{{ override_date }} {{ weekday_label }}）</b>
         <div style="font-size:13px;color:#64748b;margin:5px 0 10px;">显示所有报名记录，包括待安排、已安排及已取消。</div>
         {% if signup_details %}
         <div style="overflow-x:auto;">
@@ -611,6 +658,34 @@ html {
         </div>
         {% else %}<div style="color:#64748b;">这一天暂时没有报名记录。</div>{% endif %}
     </div>
+
+    {% if actual_visible %}
+    <details class="info-box" style="margin-top:14px;">
+        <summary style="cursor:pointer;font-weight:700;font-size:16px;line-height:1.8;">
+            📋 当日实际出席详情（{{ override_date }} {{ weekday_label }}）
+            <span style="font-size:13px;color:#2563eb;white-space:nowrap;">点击展开 / 收起</span>
+            {% if actual_error %}<span style="display:block;color:#b91c1c;font-size:14px;">实际出席查询失败，请稍后刷新。</span>
+            {% else %}
+            <span style="display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:#334155;">
+                <span>👥 {{ actual_people }} 人</span>
+                <span>📝 {{ actual_rows|length }} 笔</span>
+                <span>⏱️ {{ '%.2f'|format(actual_hours) }} 小时</span>
+            </span>
+            {% endif %}
+        </summary>
+        {% if actual_error %}<p style="color:#b91c1c;">实际出席查询失败，请稍后刷新。</p>
+        {% else %}
+        <p style="font-size:13px;color:#64748b;">采用正式签到时数；未签退不计时数。异常记录保留原值，待负责人核对。</p>
+        {% if actual_rows %}
+        <div style="overflow-x:auto;"><table style="width:100%;min-width:660px;border-collapse:collapse;font-size:14px;text-align:left;">
+        <thead><tr style="background:#edf3f9;"><th>姓名</th><th>岗位</th><th>记录地点</th><th>签到</th><th>签退</th><th>时数</th><th>状态</th></tr></thead>
+        <tbody>{% for row in actual_rows %}<tr style="border-bottom:1px solid #edf1f5;">
+        <td style="padding:9px;">{{ row.volunteer_name or row.volunteer_id }}</td><td>{{ row.role }}</td><td>{{ row.place or '—' }}</td><td>{{ attendance_ampm(row.start_time) }}</td><td>{{ attendance_ampm(row.end_time, '未签退') }}</td><td>{{ row.hours if row.hours is not none and row.end_time else '—' }}</td>
+        <td>{% if row.warning %}<span style="color:#b45309;">⚠️ {{ row.warning }}</span>{% elif not row.end_time %}🟡 未签退{% elif row.hours is none %}⚠️ 缺少时数{% else %}🟢 已签退{% endif %}</td></tr>{% endfor %}</tbody></table></div>
+        {% else %}<p>这一天暂无实际出席记录。</p>{% endif %}
+        {% endif %}
+    </details>
+    {% endif %}
 
     <div class="info-box">
         <b>📢 缺义工提醒</b><br>
@@ -799,6 +874,7 @@ html {
 </div>
 
 
+{% endif %}
 {% endif %}
 {% if mode == "signup" %}
 <div class="card">
@@ -1463,6 +1539,7 @@ function goToScheduleDate(dateValue) {
 // 每20秒轻量检查；报名/取消/自动补排变化后自动更新负责人数据。
 // 正在输入或修改表单时暂停刷新，避免丢失未保存内容。
 (function () {
+    if ({{ (historical_view|default(false))|tojson }}) return;
     const dateValue = {{ override_date|tojson }};
     const apiUrl = '/schedule/api/admin-signup-version?date=' + encodeURIComponent(dateValue);
     let previousVersion = null;

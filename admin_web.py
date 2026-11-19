@@ -144,7 +144,13 @@ def admin_add_record():
 <title>补录签到</title><link rel="stylesheet" href="{{ url_for('static', filename='css/toolbox.css') }}">
 <style>.backfill-input{min-height:52px;font-size:19px}.backfill-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 @media(max-width:600px){.backfill-grid{grid-template-columns:1fr}}</style></head><body><div class="page"><div class="card">
-<h1 class="page-title">📝 管理员补录签到</h1><p>可补录过去任何日期；同岗位已有记录时不重复新增。</p>
+<h1 class="page-title">📝 管理员补录签到</h1>
+<nav style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 18px">
+<a style="padding:10px;border-radius:8px;background:#e8efff;text-decoration:none" href="{{ url_for('admin.admin_report',pin=pin) }}">← 返回管理员</a>
+<a style="padding:10px;border-radius:8px;background:#e8efff;text-decoration:none" href="{{ url_for('admin.manage_history',pin=pin,kind='attendance',day=chosen_date) }}">签到记录</a>
+<span aria-current="page" style="padding:10px;border-radius:8px;background:#c56b16;color:white">📝 补录签到</span>
+<a style="padding:10px;border-radius:8px;background:#e8efff;text-decoration:none" href="{{ url_for('admin.manage_history',pin=pin,kind='reading',day=chosen_date) }}">白话佛法</a>
+</nav><p>可补录过去任何日期；同岗位已有记录时不重复新增。</p>
 {% with messages=get_flashed_messages(with_categories=true) %}{% for category,msg in messages %}
 <div class="alert {{ 'alert-success' if category=='ok' else 'alert-danger' }}">{{ msg }}</div>
 {% endfor %}{% endwith %}
@@ -165,7 +171,7 @@ def admin_add_record():
 <div class="form-group"><label class="form-label">补录原因</label><select class="form-input backfill-input" name="reason" required>
 <option value="忘记签到">忘记签到</option><option value="忘记签退">忘记签退</option><option value="不会操作">不会操作</option><option value="负责人核实补录">负责人核实补录</option></select></div>
 <button class="btn-tool btn-success" type="submit" onclick="return confirm('确认按填写时间补录这笔实际出席？')">✅ 确认补录</button></form>{% endif %}
-<p><a class="btn-tool btn-secondary" href="{{ url_for('admin.admin_report',pin=pin) }}">返回管理员页面</a></p>
+<p><a class="btn-tool btn-secondary" href="{{ url_for('admin.manage_history',pin=pin,kind='attendance',day=chosen_date) }}">返回签到记录管理</a></p>
 </div></div></body></html>
 """, pin=pin, today=now_date_str(), chosen_date=chosen_date, chosen_id=chosen_id,
        volunteers=volunteers, records=records, roles=ROLES)
@@ -726,7 +732,7 @@ def admin_report():
 
     <h1 class="page-title">🔐 {{ t["admin_title"] }}</h1>
     <p class="page-subtitle">
-        {{ t.get("admin_subtitle", "签到管理、数据中心与管理员工具") }}
+        {{ "Attendance and record management" if t["html_lang"].startswith("en") else "签到与记录管理" }}
     </p>
 
     <div class="card">
@@ -739,47 +745,16 @@ def admin_report():
             </a>
 
             <a class="btn-tool btn-primary"
-               href="{{ url_for('admin.manage_history', pin=pin, kind='attendance') }}">📋 签到记录管理（今日／历史）</a>
-        </div>
-    </div>
-
-    <div class="card">
-        <div class="section-title">📊 {{ t.get("data_center", "数据中心") }}</div>
-
-        <div class="admin-tool-stack">
-            <a class="btn-tool btn-success"
-               href="{{ url_for('admin.data_center', pin=pin) }}">
-                {{ t.get("enter_data_center", "进入数据中心") }}
-            </a>
-        </div>
-
-        <div class="admin-desc">
-            {{ t.get("data_center_desc", "下载签到、白话共修及未来各系统资料。") }}
-        </div>
-    </div>
-
-    <div class="card">
-        <div class="section-title">🛠 {{ t["admin_tools"] }}</div>
-
-        <div class="admin-tool-stack">
-            <a class="btn-tool btn-warning"
-               href="{{ url_for('admin.admin_add_record', pin=pin) }}">
-                {{ t["admin_add_record"] }}
-            </a>
-
-            <a class="btn-tool btn-purple"
-               href="{{ url_for('admin.manage_history', pin=pin, kind='reading') }}">📖 白话佛法记录管理／补点名</a>
+               href="{{ url_for('admin.manage_history', pin=pin, kind='attendance') }}">📋 记录管理（签到／白话佛法）</a>
         </div>
     </div>
 
     <div class="card">
         <div class="section-title">🔐 报名签到限制管理 / Check-in Rules</div>
-        <p class="admin-desc">三个开关独立设置；值班开关同时控制佛台名单限制。卫生只需当天有效报名，不必正式排班。<br>
-        Three controls; Duty also controls Altar roster eligibility. Cleaning only requires a valid signup for today.</p>
+        <p class="admin-desc">仅控制值班签到；佛台、卫生及膳食仍按各自资格判断。<br>
+        Duty only; other roles retain their own eligibility rules.</p>
         {% for code, label, detail in [
-          ('duty', '📋 值班＋佛台 / Duty + Altar', '值班：当天正式排班；佛台：当天有效固定名单 / Duty: published assignment; Altar: effective roster'),
-          ('cleaning', '🧹 卫生 / Cleaning', '当天有效报名 / Valid signup'),
-          ('meal', '🥗 膳食组 / Meal Team', '当天有效报名 / Valid signup')
+          ('duty', '📋 值班签到模式 / Duty check-in mode', '测试模式允许无排班签到；正式模式必须有当天有效值班排班。 / Test mode allows walk-in duty; official mode requires a valid duty assignment.')
         ] %}
         <form method="post" action="{{ url_for('admin.update_signin_policy') }}"
               style="padding:12px 0;border-top:1px solid #eee;">
@@ -788,11 +763,11 @@ def admin_report():
             <div style="font-weight:700;font-size:19px">{{ label }}</div>
             <div class="admin-desc">{{ detail }}</div>
             <div style="margin:8px 0;font-weight:700;color:{{ '#198754' if policies[code] else '#b02a37' }}">
-                {{ '🟢 已开启 / ON' if policies[code] else '🔴 已关闭 / OFF' }}
+                {{ '🟢 正式模式 / Official' if policies[code] else '🔴 测试模式 / Test' }}
             </div>
             <button type="submit" name="enabled" value="{{ '0' if policies[code] else '1' }}"
                     class="btn-tool {{ 'btn-danger' if policies[code] else 'btn-success' }}">
-                {{ '关闭限制 / Disable' if policies[code] else '开启限制 / Enable' }}
+                {{ '切换测试模式 / Test mode' if policies[code] else '切换正式模式 / Official mode' }}
             </button>
         </form>
         {% endfor %}
@@ -1698,6 +1673,18 @@ def _history_redirect(kind, day, pin):
     return redirect(url_for("admin.manage_history", kind=kind, day=day, pin=pin))
 
 
+def _history_display_time(value):
+    """仅格式化历史签到列表的显示时间，不修改原始记录。"""
+    text = str(value or "").strip()
+    for fmt in ("%H:%M", "%H:%M:%S", "%I:%M%p", "%I:%M %p"):
+        try:
+            clock = datetime.strptime(text.upper(), fmt)
+            return f"{clock.hour % 12 or 12}:{clock.minute:02d}{'am' if clock.hour < 12 else 'pm'}"
+        except ValueError:
+            pass
+    return text
+
+
 @admin_bp.route("/admin/history")
 def manage_history():
     if not _history_authorized():
@@ -1723,7 +1710,8 @@ def manage_history():
     recorded = {str(r.get("name") or "").strip() for r in rows}
     return render_template_string(HISTORY_PAGE, pin=pin, kind=kind, day=day,
                                   rows=rows, candidates=candidates, recorded=recorded,
-                                  today=now_date_str())
+                                  display_time=_history_display_time, today=now_date_str(),
+                                  weekday="星期" + "一二三四五六日"[date.fromisoformat(str(day)).weekday()])
 
 
 @admin_bp.route("/admin/history/reading/add", methods=["POST"])
@@ -1869,18 +1857,37 @@ def history_delete(kind, record_id):
 HISTORY_PAGE = """
 <!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>记录管理</title><link rel="stylesheet" href="{{ url_for('static',filename='css/toolbox.css') }}">
-<style>.history-wrap{max-width:1050px;margin:auto}.history-table{width:100%;border-collapse:collapse}.history-table td,.history-table th{padding:12px;border-bottom:1px solid #ddd;text-align:left}.history-actions{display:flex;gap:8px;flex-wrap:wrap}.history-actions form{margin:0}.history-check{display:block;padding:9px;border-bottom:1px solid #eee}.history-check.done{color:#888;background:#f4f4f4}.history-check input{margin-right:10px}.history-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}.history-scroll{overflow-x:auto}.history-input{max-width:100%;padding:10px;margin:5px 0}.history-link{display:inline-block;padding:10px;margin:4px;background:#e8efff;border-radius:8px;text-decoration:none}</style>
-</head><body><div class="page history-wrap"><div class="card"><h1 class="page-title">{{ '📋 义工签到记录管理' if kind=='attendance' else '📖 白话佛法记录管理' }}</h1>
+<style>.history-wrap{max-width:1050px;margin:auto}.history-table{width:100%;border-collapse:collapse}.history-table td,.history-table th{padding:12px;border-bottom:1px solid #ddd;text-align:left}.history-actions{display:flex;gap:8px;flex-wrap:wrap}.history-actions form{margin:0}.history-check{display:block;padding:9px;border-bottom:1px solid #eee}.history-check.done{color:#888;background:#f4f4f4}.history-check input{margin-right:10px}.history-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}.history-scroll{overflow-x:auto}.history-input{max-width:100%;padding:10px;margin:5px 0}.history-link{display:inline-block;padding:10px;margin:4px;background:#e8efff;border-radius:8px;text-decoration:none}
+.reading-history .card{border:1px solid #dce8df;border-radius:18px;padding:clamp(16px,3vw,28px)}
+.reading-history .page-title{color:#185c42;font-size:clamp(25px,4vw,36px)}
+.reading-history .history-link{background:#e8f3ed;color:#185c42;font-weight:700}
+.reading-history .history-link.active{background:#185c42;color:white}
+.reading-history .history-table th{background:#e8f3ed;color:#185c42;white-space:nowrap}
+.reading-history .history-table td{border-color:#e4ebe6}
+.reading-history .history-actions{align-items:center;flex-wrap:nowrap}
+.reading-history .history-actions .history-link,.reading-history .history-actions button{font-size:16px;min-height:44px;margin:0;white-space:nowrap}
+.reading-history .history-check{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#f0f8f2;border:1px solid #d6e8db;border-radius:12px;padding:14px;min-height:58px;cursor:pointer}
+.reading-history .history-check input{width:22px;height:22px;accent-color:#198754;margin:0}
+.reading-history .history-check.done{background:#f1f2f3;color:#777;cursor:default}
+.reading-history .history-check:has(input:checked){background:#d9f2e1;border-color:#198754}
+.reading-history .history-status{font-size:14px;color:#66756a}
+.reading-history .history-backfill h2{color:#185c42;margin-top:0}
+.reading-history .history-backfill .form-input{min-height:50px;font-size:18px;width:100%;box-sizing:border-box}
+.reading-history .history-backfill .btn-success{min-height:52px;font-size:20px}
+@media(max-width:600px){.reading-history .history-grid{grid-template-columns:1fr}.reading-history .history-table{min-width:620px}}
+</style>
+</head><body><div class="page history-wrap {{ 'reading-history' if kind=='reading' else '' }}"><div class="card"><h1 class="page-title">{{ '📋 义工签到记录管理' if kind=='attendance' else '📖 白话佛法记录管理' }}</h1>
 <a class="history-link" href="{{ url_for('admin.admin_report',pin=pin) }}">← 返回管理员</a>
 <a class="history-link" href="{{ url_for('admin.manage_history',pin=pin,kind='attendance',day=day) }}">签到记录</a>
-<a class="history-link" href="{{ url_for('admin.manage_history',pin=pin,kind='reading',day=day) }}">白话佛法</a>
+<a class="history-link" href="{{ url_for('admin.admin_add_record',pin=pin,date=day) }}">📝 补录签到</a>
+<a class="history-link {{ 'active' if kind=='reading' else '' }}" href="{{ url_for('admin.manage_history',pin=pin,kind='reading',day=day) }}">白话佛法</a>
 {% with msgs=get_flashed_messages(with_categories=true) %}{% for category,msg in msgs %}<div class="alert {{ 'alert-success' if category=='ok' else 'alert-danger' }}">{{msg}}</div>{% endfor %}{% endwith %}
-<form method="get"><input type="hidden" name="pin" value="{{pin}}"><input type="hidden" name="kind" value="{{kind}}"><label>📅 选择日期：</label><input class="history-input" type="date" name="day" value="{{day}}" max="{{today}}" required><button class="btn-tool btn-primary" style="width:auto;display:inline-flex" type="submit">🔍 查询</button></form>
-<p>所选日期：<b>{{day}}</b>　共 {{rows|length}} 笔</p>
+<form method="get"><input type="hidden" name="pin" value="{{pin}}"><input type="hidden" name="kind" value="{{kind}}"><label for="history-day" style="font-size:20px;font-weight:700">📅 选择日期：</label><input id="history-day" class="history-input" style="font-size:24px;min-height:56px;width:260px;box-sizing:border-box;border:2px solid #2563eb;border-radius:10px;cursor:pointer" type="date" name="day" value="{{day}}" max="{{today}}" required onchange="if(this.value &amp;&amp; this.checkValidity()) this.form.requestSubmit()"></form>
+<p>所选日期：<b>{{day}}（{{weekday}}）</b>　共 {{rows|length}} 笔</p>
 <div class="history-scroll"><table class="history-table"><thead><tr><th>姓名</th>{% if kind=='attendance' %}<th>岗位</th><th>签到</th><th>签退</th><th>时数</th>{% else %}<th>身份</th><th>主题</th><th>时间</th>{% endif %}<th>操作</th></tr></thead><tbody>
-{% for r in rows %}<tr><td>{{r.name}}</td>{% if kind=='attendance' %}<td>{{r.role}}</td><td>{{r.start_time or '-'}}</td><td>{{r.end_time or '未签退'}}</td><td>{{r.hours if r.hours is not none else '-'}}</td>{% else %}<td>{{r.identity}}</td><td>{{r.topic}}</td><td>{{r.time}}</td>{% endif %}<td><div class="history-actions"><a class="history-link" href="{{url_for('admin.history_edit',kind=kind,record_id=r.id,pin=pin)}}">✏️ 修改</a><form method="post" action="{{url_for('admin.history_delete',kind=kind,record_id=r.id)}}" onsubmit="return confirm('确定删除这笔记录吗？删除后无法从此页面恢复。')"><input type="hidden" name="pin" value="{{pin}}"><button class="btn-tool btn-danger" style="width:auto;padding:10px" type="submit">🗑️ 删除</button></form></div></td></tr>{% else %}<tr><td colspan="6">这一天暂无记录。</td></tr>{% endfor %}
+{% for r in rows %}<tr><td>{{r.name}}</td>{% if kind=='attendance' %}<td>{{r.role}}</td><td>{{display_time(r.start_time) or '-'}}</td><td>{{display_time(r.end_time) or '未签退'}}</td><td>{{r.hours if r.hours is not none else '-'}}</td>{% else %}<td>{{r.identity}}</td><td>{{r.topic}}</td><td>{{display_time(r.time) or "-"}}</td>{% endif %}<td><div class="history-actions"><a class="history-link" href="{{url_for('admin.history_edit',kind=kind,record_id=r.id,pin=pin)}}">✏️ 修改</a><form method="post" action="{{url_for('admin.history_delete',kind=kind,record_id=r.id)}}" onsubmit="return confirm('确定删除这笔记录吗？删除后无法从此页面恢复。')"><input type="hidden" name="pin" value="{{pin}}"><button class="btn-tool btn-danger" style="width:auto;padding:10px" type="submit">🗑️ 删除</button></form></div></td></tr>{% else %}<tr><td colspan="6">这一天暂无记录。</td></tr>{% endfor %}
 </tbody></table></div></div>
-{% if kind=='reading' %}<div class="card"><h2>➕ 补录白话佛法点名</h2><p>以下为 {{day}} 实际签到的义工。已点名者显示灰色，不可重复勾选。</p><form method="post" action="{{url_for('admin.history_reading_add')}}"><input type="hidden" name="pin" value="{{pin}}"><input type="hidden" name="day" value="{{day}}"><div class="history-grid">{% for c in candidates %}<label class="history-check {{'done' if c.name in recorded else ''}}"><input type="checkbox" name="names" value="{{c.name}}" {{'disabled' if c.name in recorded else ''}}>{{c.name}} {{'✅ 已点名' if c.name in recorded else '🔴 未点名'}}</label>{% else %}<p>当天没有实际签到的义工。</p>{% endfor %}</div><p><label>其他佛友姓名（可用逗号分隔多人）<br><input class="form-input" name="extra_names" placeholder="例如：张三，李四"></label></p><p><label>共修主题<br><input class="form-input" name="topic" required></label></p><p><label>共修时间<br><input class="form-input" name="time" placeholder="例如：10:30 AM" required></label></p><button class="btn-tool btn-success" type="submit">保存补点名</button></form></div>{% endif %}
+{% if kind=='reading' %}<div class="card history-backfill"><h2>➕ 补录白话佛法点名</h2><p>以下为 {{day}} 实际签到的义工。已点名者显示灰色，不可重复勾选。</p><form method="post" action="{{url_for('admin.history_reading_add')}}"><input type="hidden" name="pin" value="{{pin}}"><input type="hidden" name="day" value="{{day}}"><div class="history-grid">{% for c in candidates %}<label class="history-check {{'done' if c.name in recorded else ''}}"><input type="checkbox" name="names" value="{{c.name}}" {{'disabled' if c.name in recorded else ''}}><strong>{{c.name}}</strong><span class="history-status">{{'✅ 已点名' if c.name in recorded else '🔴 未点名'}}</span></label>{% else %}<p>当天没有实际签到的义工。</p>{% endfor %}</div><p><label>其他佛友姓名（可用逗号分隔多人）<br><input class="form-input" name="extra_names" placeholder="例如：张三，李四"></label></p><p><label>共修主题<br><input class="form-input" name="topic" required></label></p><p><label>共修时间<br><input class="form-input" name="time" placeholder="例如：10:30 AM" required></label></p><button class="btn-tool btn-success" type="submit">保存补点名</button></form></div>{% endif %}
 </div></body></html>
 """
 
