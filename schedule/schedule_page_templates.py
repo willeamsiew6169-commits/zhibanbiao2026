@@ -709,12 +709,12 @@ html {
         <div class="alert alert-error">
             <h3 style="margin-top:0;">🔴 未安排提醒</h3>
             <div style="font-weight:700; margin-bottom:8px;">明日：{{ pending_tomorrow_label }}</div>
-            今日：<b>{{ pending_counts.today }}</b> 人　
-            明日：<b>{{ pending_counts.tomorrow }}</b> 人　
-            本月：<b>{{ pending_counts.month }}</b> 人
+            今日：<b>{{ pending_counts.today }}</b> 笔　
+            明日：<b>{{ pending_counts.tomorrow }}</b> 笔　
+            本月：<b>{{ pending_details|length }}</b> 笔
             <details style="margin-top:12px;">
-                <summary style="cursor:pointer;font-weight:700;">🔽 查看未安排名单（{{ pending_counts.month }} 笔）</summary>
-                <div style="font-size:13px;margin:9px 0;color:#7f1d1d;">沿用原有统计范围：从本月1日起，包含未来月份的待安排报名；同一人多次报名分别列出。</div>
+                <summary style="cursor:pointer;font-weight:700;">🔽 查看未安排名单（{{ pending_details|length }} 笔）</summary>
+                <div style="font-size:13px;margin:9px 0;color:#7f1d1d;">仅统计当前自然月份内的待安排报名；同一人多次报名分别列出。</div>
                 {% if pending_details %}
                 <div style="overflow-x:auto;">
                     <table style="width:100%;border-collapse:collapse;font-size:14px;min-width:520px;text-align:left;">

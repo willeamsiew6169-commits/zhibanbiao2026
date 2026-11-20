@@ -31,7 +31,6 @@ from reading_web import reading_bp
 from xfz_web import xfz_bp
 from donation_web import donation_bp
 from hongfa.routes import hongfa_bp
-
 from finance_v7 import finance_v7_bp
 from finance_web import finance_bp
 import finance_export
@@ -934,12 +933,19 @@ function renderTodayList(rows) {
   });
   wrap.appendChild(table);todayList.appendChild(wrap);
 }
+let todayListLoaded = false;
+let todayListBusy = false;
 async function loadTodayList() {
+  if (todayListBusy) return;
+  todayListBusy = true;
   try {
-    const resp=await fetch({{ url_for('today_attendance_list')|tojson }},{cache:'no-store'});
+    const resp=await fetch({{ url_for('today_attendance_list')|tojson }},{cache:'no-store', signal:AbortSignal.timeout(10000)});
     if(!resp.ok) throw new Error('HTTP '+resp.status);
     const data=await resp.json();renderTodayList(data.rows || []);
-  } catch(e) {todayList.textContent=listText('名单加载失败，请稍后再试。','Unable to load list. Please try again.');}
+    todayListLoaded = true;
+  } catch(e) {
+    if (!todayListLoaded) todayList.textContent=listText('名单加载失败，请稍后再试。','Unable to load list. Please try again.');
+  } finally { todayListBusy = false; }
 }
 todayDetails.addEventListener('toggle',()=>{if(todayDetails.open)loadTodayList();});
 // 只更新统计数字和已展开的名单；不刷新整页、不干扰正在输入的编号或 PIN。
@@ -948,7 +954,7 @@ async function refreshAttendanceOverview() {
   if (attendanceRefreshBusy || document.hidden) return;
   attendanceRefreshBusy = true;
   try {
-    const resp = await fetch({{ url_for('today_attendance_stats')|tojson }}, {cache:'no-store'});
+    const resp = await fetch({{ url_for('today_attendance_stats')|tojson }}, {cache:'no-store', signal:AbortSignal.timeout(10000)});
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
     if (data.date !== {{ today_date|tojson }}) {
@@ -1206,7 +1212,7 @@ function renderSigninRoleButtons(data, verified) {
   holder.replaceChildren();
   if (!verified) return;
   const roles = (data.eligible_roles || []).map((item, index) => {
-    const shifts = (data.today_assignments || []).filter(a => a.role === item.role && a.state === 'pending');
+    const shifts = (data.today_assignments || []).filter(a => a.role === item.role && a.state === 'pending' && (item.role !== '值班' || (data.eligible_duty_assignment_ids || []).includes(Number(a.id))));
     const shift = shifts.sort((a,b) => roleSortMinutes(a.start_time) - roleSortMinutes(b.start_time))[0];
     const defaultStarts = {'卫生':'08:00','佛台':'08:00','供花':'08:00','供果':'08:00','供台':'06:00','膳食':'08:00','佛学班':'10:00'};
     return {...item, index, shift, sortTime:shift ? roleSortMinutes(shift.start_time) : roleSortMinutes(defaultStarts[item.role])};
@@ -1866,7 +1872,8 @@ def _attendance_speed_report(response):
 
 @app.route("/api/today-attendance-stats")
 def today_attendance_stats():
-    """签到首页轻量只读刷新接口；沿用原统计口径。"""
+    """签到首页刷新：先执行原有到时自动签退，再读取统计。"""
+    auto_signout_unfinished_today()
     stats = get_today_stats()
     return jsonify({"date": now_date_str(), **stats})
 
@@ -2183,10 +2190,10 @@ def api_volunteer(volunteer_id):
                 cur.execute("""
                     select id, role, assigned_place, start_time, end_time, shift_label
                     from volunteer_schedule_assignments
-                    where volunteer_id = %s and assignment_date = %s
+                    where volunteer_id = ANY(%s) and assignment_date = %s
                       and coalesce(status, 'assigned') <> 'cancelled'
                     order by start_time, assigned_place
-                """, (v.get("编号"), today))
+                """, (get_assignment_id_candidates(v, volunteer_id), today))
                 today_assignments = cur.fetchall()
                 # 佛学班地点统一显示为活动中心，不改动数据库排班及签到记录。
                 for assignment in today_assignments:
@@ -2220,9 +2227,10 @@ def api_volunteer(volunteer_id):
                     select assignment_id from volunteer_attendance_logs
                     where volunteer_id = %s and attendance_date = %s
                       and check_out_time is null
-                    order by id desc limit 1
+                    order by id desc
                 """, (v.get("编号"), today))
-                open_log = cur.fetchone()
+                open_logs = cur.fetchall() or []
+                open_log = open_logs[0] if open_logs else None
                 cur.execute("""
                     select assignment_id, remarks from volunteer_attendance_logs
                     where volunteer_id = %s and attendance_date = %s
@@ -2340,13 +2348,15 @@ def api_volunteer(volunteer_id):
                 'shift_label': meal_role, 'state': _extra_state('膳食'),
                 'display_only': True,
             })
-        today_assignments.sort(key=lambda x: str(x.get('start_time') or ''))
+        from schedule.builders.time_utils import time_to_minutes
+        today_assignments.sort(key=lambda x: time_to_minutes(x.get("start_time")) if time_to_minutes(x.get("start_time")) is not None else 9999)
 
         completed_ids = {int(x["assignment_id"]) for x in completed_rows if x.get("assignment_id") is not None}
         auto_ids = {int(x["assignment_id"]) for x in completed_rows
                     if x.get("assignment_id") is not None and "系统自动签退" in str(x.get("remarks") or "")}
         open_assignment_id = int(open_log["assignment_id"]) if open_log and open_log.get("assignment_id") is not None else None
 
+        open_ids = {int(r["assignment_id"]) for r in open_logs if r.get("assignment_id") is not None}
         attendance_action = "walkin"
         current_assignment_id = None
         current_assignment_text = ""
@@ -2355,7 +2365,7 @@ def api_volunteer(volunteer_id):
             if a.get('display_only'):
                 continue
             aid = int(a.get("id") or 0)
-            if aid == open_assignment_id:
+            if aid in open_ids:
                 a["state"] = "active"
             elif aid in completed_ids:
                 a["state"] = "completed"

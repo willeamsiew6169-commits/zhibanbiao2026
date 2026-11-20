@@ -240,8 +240,14 @@ def patch_schedule_for_date(date_str, only_signup_id=None):
                           'name': signup.get('name'),
                           'start_time': signup.get('start_time'),
                           'end_time': signup.get('end_time')}
+                cleaning_rows = db_query("""
+                    select volunteer_id, assigned_place from volunteer_schedule_assignments
+                    where assignment_date=%s and role='卫生'
+                      and coalesce(status,'assigned') <> 'cancelled'
+                """, (date_str,), fetchall=True) or []
                 arranged = plan([person], existing=existing,
-                                history=load_place_history_cache())
+                                history=load_place_history_cache(),
+                                cleaning=_v2_cleaning_rows(cleaning_rows))
                 target_rows = [dict(item, assigned_place=key[1:],
                                     shift_label=key[0]) for key,item in arranged]
                 return sync_patch_assignments(date_str, target_rows,
@@ -754,7 +760,13 @@ def _replace_duty_signup_atomic(signup_id, date_str):
             existing = [r for r in old_rows if r not in target]
             person = dict(signup)
             person['signup_id'] = signup_id
-            arranged = plan([person], existing=existing, history=history)
+            cur.execute("""
+                SELECT volunteer_id, assigned_place FROM volunteer_schedule_assignments
+                WHERE assignment_date=%s AND role='卫生'
+                  AND COALESCE(status,'assigned') <> 'cancelled'
+            """, (date_str,))
+            arranged = plan([person], existing=existing, history=history,
+                            cleaning=_v2_cleaning_rows(cur.fetchall()))
             if not arranged:
                 raise ValueError('V2 未能生成有效值班安排，保留原有记录')
 
@@ -1083,6 +1095,24 @@ def sync_patch_assignments(date_str, assigned_rows, only_signup_id=None):
 
     return len(new_rows)
 
+def _v2_cleaning_context(result):
+    context = {}
+    for key, place in (("佛堂卫生", "观音堂"), ("二楼卫生", "活动中心"), ("楼梯卫生", "活动中心")):
+        for person in result.get(key, []):
+            if isinstance(person, dict):
+                identity = str(person.get("volunteer_id") or person.get("编号") or "").strip().upper()
+                if identity:
+                    context[identity] = place
+    return context
+
+
+def _v2_cleaning_rows(rows):
+    result = {}
+    for row in rows:
+        result.setdefault(row.get("assigned_place"), []).append(row)
+    return _v2_cleaning_context(result)
+
+
 def auto_assign_new_duty(result):
     """V2：覆盖优先、历史公平、按需换岗；仅处理本次 result 的值班人员。"""
     from schedule.builders.duty_v2 import plan
@@ -1092,7 +1122,7 @@ def auto_assign_new_duty(result):
             if isinstance(person, dict)]
     # 历史仅作次级决策，不改变数据库中的任何历史记录。
     history = load_place_history_cache()
-    rows = plan(pool, history=history)
+    rows = plan(pool, history=history, cleaning=_v2_cleaning_context(result))
     for key in duty_keys:
         result[key] = []
     for key, person in rows:
@@ -2457,7 +2487,7 @@ def auto_assign_duty(result):
             if isinstance(person, dict)]
     # 历史仅作次级决策，不改变数据库中的任何历史记录。
     history = load_place_history_cache()
-    rows = plan(pool, history=history)
+    rows = plan(pool, history=history, cleaning=_v2_cleaning_context(result))
     for key in duty_keys:
         result[key] = []
     for key, person in rows:

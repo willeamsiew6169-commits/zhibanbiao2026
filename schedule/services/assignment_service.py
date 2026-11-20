@@ -91,6 +91,7 @@ def load_schedule_admin_dashboard_data(override_date, conn=None):
     today = malaysia_today()
     tomorrow = today + timedelta(days=1)
     month_start = today.replace(day=1)
+    month_end = (month_start + timedelta(days=32)).replace(day=1)
 
     if conn is None:
         with get_conn() as own_conn:
@@ -100,12 +101,12 @@ def load_schedule_admin_dashboard_data(override_date, conn=None):
             select
                 count(*) filter (where signup_date = %s) as today_count,
                 count(*) filter (where signup_date = %s) as tomorrow_count,
-                count(*) filter (where signup_date >= %s) as month_count
+                count(*) filter (where signup_date >= %s and signup_date < %s) as month_count
             from volunteer_schedule_signups
             where coalesce(status, 'pending') = 'pending'
               and coalesce(role, '') not in ('膳食', '膳食组')
               and signup_date >= %s
-        """, (today, tomorrow, month_start, month_start))
+        """, (today, tomorrow, month_start, month_end, month_start))
         pending_row = cur.fetchone()
         pending_counts = {
             "today": pending_row["today_count"] or 0,

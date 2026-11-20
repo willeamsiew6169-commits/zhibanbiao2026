@@ -48,7 +48,7 @@ def _options(person):
     return opts
 
 
-def _score(assignments, fixed, history):
+def _score(assignments, fixed, history, existing=(), cleaning=None):
     all_segments = list(fixed)
     for _, segments in assignments:
         all_segments.extend(segments)
@@ -75,6 +75,30 @@ def _score(assignments, fixed, history):
                 if total >= 3:
                     desired_center = (total + 1) // 2
                     center_priority += (e-s) * max(0, desired_center - counts["活动中心"])
+    # 方案 C：按班次、编号统计人数。跨地点者按该班服务时间比例分摊，
+    # 避免为凑人数而额外拆班或把一人重复算作两人。
+    from fractions import Fraction
+    shift_people = {}
+    def add_shift_person(identity, segments):
+        for a, b, place in segments:
+            for start, end, location in _split_shift([(a, b, place)]):
+                minutes = shift_people.setdefault(shift_of(start), {}).setdefault(identity, dict.fromkeys(PLACES, 0))
+                minutes[location] += end - start
+    for i, row in enumerate(existing):
+        a, b = _start(row), _end(row)
+        place = row.get("assigned_place") or row.get("place")
+        if a is not None and b is not None and b > a and place in PLACES:
+            add_shift_person(_id(row) or ("existing", i), [(a, b, place)])
+    for i, (person, segments) in enumerate(assignments):
+        add_shift_person(_id(person) or ("new", i), segments)
+    shift_imbalance = shift_center_penalty = 0
+    for shift, persons in shift_people.items():
+        center = sum(Fraction(v[PLACES[1]], sum(v.values())) for v in persons.values())
+        total = len(persons)
+        # 奇数允许相差一人；偶数力求相等。
+        shift_imbalance += max(0, abs(total - 2 * center) - total % 2)
+        if shift == "橙" and total >= 2:
+            shift_center_penalty += max(0, (total + 1) // 2 - center) if total % 2 else 0
     history_penalty = sum(sum((b-a)*_history_score(person,place,history) for a,b,place in segs)
                           for person,segs in assignments)
     changes = sum(len(segs)-1 for _,segs in assignments)
@@ -88,8 +112,29 @@ def _score(assignments, fixed, history):
                 and _end(p1) - _start(p1) >= 240
                 and _id(p1) != "STW-152" and _id(p2) != "STW-152"):
             rotation_penalty = sum(len(segs) == 1 for _, segs in assignments)
-    # 覆盖优先；10–16点活动中心多一人优先于历史公平；其余保持原有次序。
-    return (uncovered, center_priority, rotation_penalty, history_penalty, imbalance, changes, midpoint_penalty)
+    # 同日轮替按编号汇总，已发布记录仅作为参考。
+    by_id = {}
+    active = {_id(person) for person, _ in assignments} - {"", "STW-152"}
+    for row in existing:
+        identity = _id(row)
+        a,b = _start(row),_end(row)
+        place = row.get("assigned_place") or row.get("place")
+        if identity in active and a is not None and b is not None and b > a and place in PLACES:
+            by_id.setdefault(identity, []).append((a,b,place))
+    for person,segs in assignments:
+        if _id(person) in active:
+            by_id.setdefault(_id(person), []).extend(segs)
+    clean_penalty = day_penalty = 0
+    for identity,segs in by_id.items():
+        before = {place: sum(max(0,min(b,840)-max(a,600)) for a,b,p in segs if p == place) for place in PLACES}
+        after = {place: sum(max(0,b-max(a,840)) for a,b,p in segs if p == place) for place in PLACES}
+        if sum(before.values()) and sum(after.values()):
+            day_penalty += sum(before[p]*after[p] for p in PLACES) / (sum(before.values())*sum(after.values()))
+        clean_place = (cleaning or {}).get(identity)
+        if clean_place in PLACES:
+            clean_penalty += int(min(segs)[2] == clean_place)
+    return (uncovered, imbalance, shift_imbalance, shift_center_penalty, center_priority, clean_penalty, day_penalty,
+            rotation_penalty, history_penalty, changes, midpoint_penalty)
 
 
 def _split_shift(segments):
@@ -99,9 +144,10 @@ def _split_shift(segments):
             yield s,e,place
 
 
-def plan(people, existing=(), history=None):
+def plan(people, existing=(), history=None, cleaning=None):
     """people: 本次允许安排的义工；existing: 已发布、不可修改的地点区间。"""
     history = history or {}
+    existing = list(existing)
     fixed = []
     for row in existing:
         s,e = _start(row),_end(row)
@@ -114,17 +160,39 @@ def plan(people, existing=(), history=None):
     chosen = []
     for p in people:
         options = _options(p)
-        best = min(options, key=lambda segs: _score(chosen+[(p,segs)], fixed, history))
+        best = min(options, key=lambda segs: _score(chosen+[(p,segs)], fixed, history, existing, cleaning))
         chosen.append((p,best))
     # 未发布完整排班可反复改善，补排时 existing 永远不变。
     for _ in range(5):
         improved = False
         for i,(p,current) in enumerate(chosen):
             options = _options(p)
-            best = min(options, key=lambda segs: _score(chosen[:i]+[(p,segs)]+chosen[i+1:], fixed, history))
-            if _score(chosen[:i]+[(p,best)]+chosen[i+1:], fixed, history) < _score(chosen,fixed,history):
+            best = min(options, key=lambda segs: _score(chosen[:i]+[(p,segs)]+chosen[i+1:], fixed, history, existing, cleaning))
+            if _score(chosen[:i]+[(p,best)]+chosen[i+1:], fixed, history, existing, cleaning) < _score(chosen,fixed,history,existing,cleaning):
                 chosen[i] = (p,best)
                 improved = True
+        if not improved:
+            break
+    # 联合改善：单人调整可能暂时制造空岗，无法完成公平交换。
+    # 限制轮数，避免大日子无限搜索。
+    for _ in range(3):
+        improved = False
+        for i in range(len(chosen)):
+            for j in range(i+1,len(chosen)):
+                p1,s1 = chosen[i]
+                p2,s2 = chosen[j]
+                current_score = _score(chosen, fixed, history, existing, cleaning)
+                best = None
+                for a in _options(p1):
+                    for b in _options(p2):
+                        candidate = list(chosen)
+                        candidate[i],candidate[j] = (p1,a),(p2,b)
+                        score = _score(candidate, fixed, history, existing, cleaning)
+                        if score < current_score:
+                            current_score,best = score,candidate
+                if best is not None:
+                    chosen = best
+                    improved = True
         if not improved:
             break
     # 两位相同时段必须联合选择，单人逐个优化会卡在局部最优。
@@ -132,7 +200,7 @@ def plan(people, existing=(), history=None):
         p1, _ = chosen[0]
         p2, _ = chosen[1]
         best_pair = min(((a,b) for a in _options(p1) for b in _options(p2)),
-                        key=lambda pair: _score([(p1,pair[0]),(p2,pair[1])], fixed, history))
+                        key=lambda pair: _score([(p1,pair[0]),(p2,pair[1])], fixed, history, existing, cleaning))
         chosen = [(p1,best_pair[0]), (p2,best_pair[1])]
     result = []
     for person,segments in chosen:

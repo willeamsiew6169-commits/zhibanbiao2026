@@ -144,27 +144,26 @@ def same_role_contiguous_group(assignments, selected):
     """Combine only directly adjacent duty segments; never combine different roles or gaps."""
     if selected.get("role") != "值班":
         return [selected]
-    ordered = sorted(
-        (a for a in assignments if a.get("role") == "值班"),
-        key=lambda a: (time_to_minutes(a.get("start_time")) if time_to_minutes(a.get("start_time")) is not None else 9999, int(a.get("id") or 0))
-    )
-    idx = next((i for i, a in enumerate(ordered) if int(a["id"]) == int(selected["id"])), None)
-    if idx is None:
+    def interval(a):
+        return time_to_minutes(a.get("start_time")), time_to_minutes(a.get("end_time"))
+
+    start, end = interval(selected)
+    if start is None or end is None or end <= start:
         return [selected]
-    left = right = idx
-    while left > 0:
-        prev_end = time_to_minutes(ordered[left - 1].get("end_time"))
-        curr_start = time_to_minutes(ordered[left].get("start_time"))
-        if prev_end is None or curr_start is None or prev_end != curr_start:
-            break
-        left -= 1
-    while right + 1 < len(ordered):
-        curr_end = time_to_minutes(ordered[right].get("end_time"))
-        next_start = time_to_minutes(ordered[right + 1].get("start_time"))
-        if curr_end is None or next_start is None or curr_end != next_start:
-            break
-        right += 1
-    return ordered[left:right + 1]
+    group = {int(selected["id"]): selected}
+    changed = True
+    while changed:
+        changed = False
+        for a in assignments:
+            if a.get("role") != "值班" or a.get("display_only") or a.get("status") == "cancelled":
+                continue
+            aid = int(a["id"])
+            lo, hi = interval(a)
+            if aid not in group and lo is not None and hi is not None and lo < hi and lo <= end and hi >= start:
+                group[aid] = a
+                start, end = min(start, lo), max(end, hi)
+                changed = True
+    return sorted(group.values(), key=lambda a: (interval(a)[0], int(a["id"])))
 
 
 
@@ -249,6 +248,11 @@ def get_eligible_signin_roles(volunteer, raw_id, assignments=None):
     completed = db_query("""SELECT DISTINCT role FROM attendance WHERE date=%s AND volunteer_id=%s""",
                          (today.isoformat(), volunteer["编号"]), fetchall=True) or []
     done = {r["role"] for r in completed}
+    if "值班" in roles and any(a.get("role") == "值班" for a in assignments):
+        if _available_duty_ids(volunteer, assignments):
+            done.discard("值班")
+        else:
+            roles.discard("值班")
     return [role for role in ROLES if role in roles and role not in done]
 
 
@@ -261,19 +265,44 @@ def _altar_cutoff_minutes(duty_date):
 
 
 def _duty_group_signin_allowed(assignments, selected, now=None):
-    """Require at least 30 minutes remaining in the final contiguous duty segment."""
+    """No early-arrival limit for duty; preserve the existing final 30-minute cutoff."""
     now = now or malaysia_now()
     group = same_role_contiguous_group(assignments, selected)
     ends = [time_to_minutes(a.get("end_time")) for a in group]
     if not ends or any(end is None for end in ends):
         return False
-    return now.hour * 60 + now.minute < max(ends) - 30
+    starts = [time_to_minutes(a.get("start_time")) for a in group]
+    if any(start is None for start in starts):
+        return False
+    minute = now.hour * 60 + now.minute
+    return minute < max(ends) - 30
 
 
 def eligible_duty_assignment_ids(assignments):
     """IDs of duty segments that still have at least 30 minutes remaining."""
-    duty = [a for a in assignments if a.get("role") == "值班"]
-    return [int(a["id"]) for a in duty if _duty_group_signin_allowed(duty, a)]
+    duty = [a for a in assignments if a.get("role") == "值班"
+            and a.get("id") is not None and not a.get("display_only")
+            and a.get("status") != "cancelled"]
+    # Only the earliest unfinished time group is offered; never skip a current shift.
+    valid = [a for a in duty if _duty_group_signin_allowed(duty, a)]
+    if not valid:
+        return []
+    first = min(valid, key=lambda a: min(time_to_minutes(x["start_time"]) for x in same_role_contiguous_group(duty, a)))
+    return [int(a["id"]) for a in same_role_contiguous_group(duty, first)]
+
+
+def _available_duty_ids(volunteer, assignments):
+    ids = eligible_duty_assignment_ids(assignments)
+    if not ids:
+        return []
+    rows = db_query("""SELECT end_time FROM attendance WHERE date=%s AND volunteer_id=%s AND role='值班'""",
+                    (now_date_str(), volunteer["编号"]), fetchall=True) or []
+    if any(not r.get("end_time") for r in rows):
+        return []
+    logs = db_query("""SELECT assignment_id FROM volunteer_attendance_logs WHERE attendance_date=%s AND volunteer_id=%s AND actual_role='值班'""",
+                    (now_date_str(), volunteer["编号"]), fetchall=True) or []
+    used = {int(r["assignment_id"]) for r in logs if r.get("assignment_id") is not None}
+    return [aid for aid in ids if not used.intersection(int(a["id"]) for a in same_role_contiguous_group(assignments, next(a for a in assignments if a.get("id") is not None and int(a["id"]) == aid)))]
 
 
 def _close_previous_roles(cur, volunteer_id, new_role):
@@ -312,10 +341,10 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
     if role not in ROLES:
         return False, "请选择正确岗位。"
 
-    # Every role can be checked in only once per day.
+    # 其他岗位每日一次；值班按不连续的服务组分别签到。
     existing = db_query("""SELECT 1 FROM attendance WHERE date=%s AND volunteer_id=%s AND role=%s LIMIT 1""",
                         (now_date_str(), volunteer["编号"], role), fetchone=True)
-    if existing:
+    if existing and role != "值班":
         return False, f"{volunteer['姓名']} 今天已经签到过{role}。"
 
     assignments = load_today_assignments_for_volunteer(volunteer, raw_id)
@@ -337,6 +366,7 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
     # 有正式排班时：一轮 assignment = 一次签到。
     if assignments:
         selected = None
+        available = set(_available_duty_ids(volunteer, assignments)) if role == "值班" else None
         if assignment_id not in (None, ""):
             try:
                 aid = int(assignment_id)
@@ -355,13 +385,13 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
             """, (assignment_ids, volunteer["编号"], now_date_str()), fetchall=True) or []
             done_ids = {int(r["assignment_id"]) for r in done_rows if r.get("assignment_id") is not None}
             selected = next((a for a in assignments if int(a["id"]) not in done_ids
-                             and (role != "值班" or _duty_group_signin_allowed(assignments, a))), None)
+                             and (role != "值班" or int(a["id"]) in available)), None)
 
         if not selected:
             return False, f"{volunteer['姓名']} 今天的正式排班已经全部完成。"
 
-        if role == "值班" and not _duty_group_signin_allowed(assignments, selected):
-            return False, "距离本轮值班结束不足30分钟，不能再签到。"
+        if role == "值班" and int(selected["id"]) not in available:
+            return False, "本轮值班尚未开放、已经签到或距离结束不足30分钟。"
 
         group = same_role_contiguous_group(assignments, selected)
         group_ids = [int(a["id"]) for a in group]
@@ -401,6 +431,9 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
                 ) for segment in group])
 
         return True, f"{volunteer['姓名']} 已签到\n\n岗位：{role}\n安排：{job_text}\n\n同岗位连续换地点无需重新签到；系统将按岗位结束时间自动签退。"
+
+    if existing and role == "值班":
+        return False, "今天已经签到过无正式排班的值班。"
 
     # 固定佛台不写普通 assignments：依有效固定名单判断正式签到。
     fixed_altar = role == "佛台" and is_fixed_buddha_volunteer(
@@ -831,9 +864,9 @@ def _credited_start_minutes(cur, row, start):
     if role == "值班":
         ids = _assignment_ids_from_remark(row.get("remark"))
         if ids:
-            cur.execute("SELECT min(start_time) AS start FROM volunteer_schedule_assignments WHERE id=any(%s)", (ids,))
-            shift = cur.fetchone() or {}
-            scheduled_start = time_to_minutes(shift.get("start"))
+            cur.execute("SELECT start_time FROM volunteer_schedule_assignments WHERE id=any(%s)", (ids,))
+            starts = [time_to_minutes(r.get("start_time")) for r in cur.fetchall() or []]
+            scheduled_start = min((v for v in starts if v is not None), default=None)
             if scheduled_start is not None:
                 start = max(start, scheduled_start)
     return start
