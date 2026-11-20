@@ -74,7 +74,7 @@ def _master_table_dates(days=90):
     for offset in range(days + 1):
         day = today + timedelta(days=offset)
         info = get_special_day_info(day) or {}
-        if info.get("template_type") not in ("lunar_1_15", "buddhist_festival"):
+        if not info.get("setup_shifu"):
             continue
         title = (info.get("festival_name") or info.get("name") or
                  info.get("title") or info.get("lunar_text") or "大日子")

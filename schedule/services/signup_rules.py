@@ -37,7 +37,8 @@ def is_supply_signup_open(target_date):
 
 def can_signup_supply_setup(target_date):
 
-    return is_supply_signup_open(target_date)
+    return (is_supply_signup_open(target_date)
+            and get_special_day_info(target_date).get("setup_shifu", False))
 
 
 # ======================================================
@@ -47,6 +48,10 @@ def can_signup_supply_setup(target_date):
 def can_signup_supply_remove(target_date):
 
     now = malaysia_now()
+    info = get_special_day_info(target_date)
+    # 十一月十五至十七连续供奉，十八由负责人安排收供台。
+    if (info.get("lunar_month"), info.get("lunar_day")) in ((11, 15), (11, 17)):
+        return False
 
     if not is_supply_signup_open(target_date):
         return False

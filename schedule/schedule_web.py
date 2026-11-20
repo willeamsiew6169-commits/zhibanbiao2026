@@ -1109,7 +1109,7 @@ def build_signup_notice_whatsapp(date_str):
     supply_people = list(dict.fromkeys(setup_people + [str(r.get('name') or '').strip() for r in supply_signup_rows if r.get('name')]))
     remove_people = [name.strip() for name in str((setup_row or {}).get('remove_people') or '').splitlines() if name.strip()]
     # 普通日如有实际供台安排也应显示；无收供台安排则不显示空栏目。
-    setup_notice = ('设师父供台：\n' + ('　'.join(supply_people) if supply_people else '尚未安排') + '\n\n') if (big_day or supply_people) else ''
+    setup_notice = ('设师父供台：\n' + ('　'.join(supply_people) if supply_people else '尚未安排') + '\n\n') if (day_info.get('setup_shifu') or supply_people) else ''
     remove_notice = ('12:00pm~2:00pm\n师父供台:\n' + '　'.join(remove_people) + '\n\n12pm的香结束之后，请下供桌。\n\n') if remove_people else ''
 
     # 卫生：已发布排班可能给同一人多条地点记录，通知必须逐条对应，

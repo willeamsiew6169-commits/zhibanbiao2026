@@ -274,6 +274,7 @@ body { background-color: #F0F8F1 !important; }
             {% if multi_day_signup_open %}
             <a
                 class="btn-tool btn-blue"
+                style="background:#ea580c !important;color:#fff;grid-column:1 / -1;"
                 href="/volunteer/prebook">
                 <span class="action-main-text">📅 下个月多日报名</span>
                 <span class="action-sub-text">一次报名多个日期</span>
@@ -1725,6 +1726,17 @@ VOLUNTEER_PREBOOK_HTML = """
       href="{{ url_for('static', filename='css/toolbox.css') }}">
 
 <style>
+.prebook-role-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.prebook-role{position:relative;display:block;cursor:pointer;min-width:0;}
+.prebook-role input{position:absolute;opacity:0;width:1px;height:1px;}
+.prebook-role span{display:block;text-align:center;padding:18px 8px;border:2px solid;border-radius:14px;font-size:26px;font-weight:bold;}
+.prebook-role.duty span{color:#15803d;background:#f0fdf4;border-color:#86efac;}
+.prebook-role.cleaning span{color:#1d4ed8;background:#eff6ff;border-color:#93c5fd;}
+.prebook-role.duty input:checked + span{background:#15803d;color:white;border-color:#15803d;}
+.prebook-role.cleaning input:checked + span{background:#2563eb;color:white;border-color:#2563eb;}
+.prebook-role input:checked + span::before{content:"✓ ";}
+.prebook-role input:focus-visible + span{outline:3px solid #111827;outline-offset:3px;}
+
 .prebook-wrap{
     max-width:900px;
     margin:auto;
@@ -1922,12 +1934,12 @@ function reloadPrebookPage() {
 }
 
 function toggleTimeFields() {
-    const role = document.querySelector("select[name='role']").value;
+    const role = document.querySelector("input[name='role']:checked").value;
 
     const startGroup = document.getElementById("start-time-group");
     const endGroup = document.getElementById("end-time-group");
 
-    if (role === "卫生" || role === "供台" || role === "整理佛台") {
+    if (role === "卫生") {
         startGroup.style.display = "none";
         endGroup.style.display = "none";
     } else {
@@ -1976,12 +1988,11 @@ document.addEventListener("DOMContentLoaded", function () {
     document.getElementById("year").addEventListener("change", reloadPrebookPage);
     document.getElementById("month").addEventListener("change", reloadPrebookPage);
 
-    const roleSelect = document.querySelector("select[name='role']");
     const startSelect = document.getElementById("start_time");
 
-    if (roleSelect) {
-        roleSelect.addEventListener("change", toggleTimeFields);
-    }
+    document.querySelectorAll("input[name='role']").forEach(function (input) {
+        input.addEventListener("change", toggleTimeFields);
+    });
 
     if (startSelect) {
         startSelect.addEventListener("change", updateEndTimes);
@@ -2101,16 +2112,16 @@ document.addEventListener("DOMContentLoaded", function () {
         <div class="form-group">
             <label class="form-label">岗位</label>
 
-            <select
-                class="form-select"
-                name="role"
-                onchange="toggleTimeFields()">
-
-                <option value="值班">值班</option>
-                <option value="卫生">卫生</option>
-                <option value="供台">供台</option>
-
-            </select>
+            <div class="prebook-role-grid" role="group" aria-label="岗位">
+                <label class="prebook-role duty">
+                    <input type="radio" name="role" value="值班" checked required>
+                    <span>🤝 值班</span>
+                </label>
+                <label class="prebook-role cleaning">
+                    <input type="radio" name="role" value="卫生">
+                    <span>🧹 卫生</span>
+                </label>
+            </div>
         </div>
 
         <div class="form-grid">

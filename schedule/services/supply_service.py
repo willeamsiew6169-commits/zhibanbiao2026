@@ -25,7 +25,7 @@ def _get_special_dates(today, end_date):
     while current_date <= end_date:
         info = get_special_day_info(current_date)
 
-        if info["template_type"] in ("lunar_1_15", "buddhist_festival"):
+        if info.get("setup_shifu"):
             special_dates.append({
                 "date": current_date,
                 "type": info["template_type"],

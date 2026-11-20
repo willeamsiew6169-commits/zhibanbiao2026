@@ -107,6 +107,21 @@ SPECIAL_DAYS = {
         "setup_shifu": True,
         "remove_next_day": True,
     },
+    # 十一月十五设供台，连续供奉至阿弥陀佛圣诞日。
+    (11, 15): {
+        "name": "农历十五",
+        "template_type": "lunar_1_15",
+        "start_time": "06:00",
+        "setup_shifu": True,
+        "remove_next_day": False,
+    },
+    (11, 17): {
+        "name": "阿弥陀佛圣诞日",
+        "template_type": "buddhist_festival",
+        "start_time": "06:00",
+        "setup_shifu": False,
+        "remove_next_day": True,
+    },
     (12, 9): {
         "name": "释迦摩尼佛成道日",
         "template_type": "buddhist_festival",

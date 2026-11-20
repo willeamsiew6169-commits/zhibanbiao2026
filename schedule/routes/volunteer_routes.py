@@ -502,6 +502,12 @@ def volunteer_signup():
             </a>
             """
 
+        # 连续供奉期间不得重复设台或提前收台；其余日期原逻辑不变。
+        if (special_info.get("lunar_month"), special_info.get("lunar_day")) in ((11, 15), (11, 17)):
+            allowed = can_signup_supply_setup(date_obj) if supply_task == "setup" else can_signup_supply_remove(date_obj)
+            if not allowed:
+                return '❌ 当天不开放此供台工作 / Not available<br><a href="/volunteer">返回</a>', 400
+
         if supply_task == "setup":
 
             start_time = "6:00am"
@@ -2763,6 +2769,7 @@ def volunteer_monthly_signup_list():
                 where extract(year from signup_date) = %s
                   and extract(month from signup_date) = %s
                   and coalesce(status, 'pending') <> 'cancelled'
+                  and role in ('值班', '卫生')
             """, (year, month))
             summary = cur.fetchone()
 
@@ -2772,6 +2779,7 @@ def volunteer_monthly_signup_list():
                 where extract(year from signup_date) = %s
                   and extract(month from signup_date) = %s
                   and coalesce(status, 'pending') <> 'cancelled'
+                  and role in ('值班', '卫生')
                 group by role
             """, (year, month))
             role_rows = cur.fetchall()
@@ -2782,8 +2790,6 @@ def volunteer_monthly_signup_list():
     role_counts = {r["role"]: r["cnt"] for r in role_rows}
     duty_count = role_counts.get("值班", 0)
     cleaning_count = role_counts.get("卫生", 0)
-    offering_count = role_counts.get("供台", 0)
-    meal_count = role_counts.get("膳食", 0)
 
     return render_template_string("""
     <style>
@@ -2841,7 +2847,8 @@ def volunteer_monthly_signup_list():
     }
 
     .row label {
-        width:80px;
+        min-width:100px;
+        white-space:nowrap;
         font-size:28px;
         font-weight:bold;
         color:#5c3b1e;
@@ -2849,6 +2856,8 @@ def volunteer_monthly_signup_list():
 
     .row select {
         width:180px;
+        min-width:0;
+        max-width:100%;
         font-size:24px;
         padding:10px;
         border-radius:10px;
@@ -2980,7 +2989,7 @@ def volunteer_monthly_signup_list():
                 <form method="get">
                     <div class="row">
                         <label>年份：</label>
-                        <select name="year">
+                        <select name="year" onchange="this.form.submit()">
                             {% for y in range(year - 1, year + 2) %}
                             <option value="{{ y }}" {% if y == year %}selected{% endif %}>
                                 {{ y }}
@@ -2991,7 +3000,7 @@ def volunteer_monthly_signup_list():
 
                     <div class="row">
                         <label>月份：</label>
-                        <select name="month">
+                        <select name="month" onchange="this.form.submit()">
                             {% for m in range(1, 13) %}
                             <option value="{{ m }}" {% if m == month %}selected{% endif %}>
                                 {{ m }}月
@@ -3000,9 +3009,7 @@ def volunteer_monthly_signup_list():
                         </select>
                     </div>
 
-                    <button type="submit" class="search-btn">
-                        🔍 查看
-                    </button>
+                    <noscript><button type="submit" class="search-btn">🔍 查看</button></noscript>
                 </form>
             </div>
 
@@ -3011,13 +3018,13 @@ def volunteer_monthly_signup_list():
                     <div class="summary-item">
                         <div class="summary-icon">👥</div>
                         <div class="summary-num">{{ total_signup }}</div>
-                        <div class="summary-label">总人次</div>
+                        <div class="summary-label">值班及卫生人次</div>
                     </div>
 
                     <div class="summary-item">
                         <div class="summary-icon">📅</div>
                         <div class="summary-num">{{ total_days }}</div>
-                        <div class="summary-label">有报名天数</div>
+                        <div class="summary-label">值班及卫生报名天数</div>
                     </div>
                 </div>
 
@@ -3026,8 +3033,6 @@ def volunteer_monthly_signup_list():
                 <div class="role-grid">
                     <div><span>👤 值班</span><b>{{ duty_count }}</b></div>
                     <div><span>🧹 卫生</span><b>{{ cleaning_count }}</b></div>
-                    <div><span>🙏 供台</span><b>{{ offering_count }}</b></div>
-                    <div><span>🍱 膳食</span><b>{{ meal_count }}</b></div>
                 </div>
             </div>
 
@@ -3063,9 +3068,7 @@ def volunteer_monthly_signup_list():
     total_signup=total_signup,
     total_days=total_days,
     duty_count=duty_count,
-    cleaning_count=cleaning_count,
-    offering_count=offering_count,
-    meal_count=meal_count)
+    cleaning_count=cleaning_count)
 
 @schedule_bp.route("/volunteer/prebook", methods=["GET", "POST"])
 def volunteer_prebook():
@@ -3073,8 +3076,10 @@ def volunteer_prebook():
     if request.method == "GET":
         today = malaysia_today()
 
-        year = int(request.args.get("year", today.year))
-        month = int(request.args.get("month", today.month))
+        # Default to next month, including December-to-January rollover.
+        next_month = today.replace(day=1) + timedelta(days=32)
+        year = int(request.args.get("year", next_month.year))
+        month = int(request.args.get("month", next_month.month))
 
         keyword = request.args.get("keyword", "").strip()
         branch = request.args.get("branch", "CHE").strip().upper()
@@ -3112,6 +3117,9 @@ def volunteer_prebook():
     role = request.form.get("role", "").strip()
     start_time = request.form.get("start_time", "").strip()
     end_time = request.form.get("end_time", "").strip()
+
+    if role not in ("值班", "卫生"):
+        return "❌ 多日报名仅开放值班及卫生<br><a href='/volunteer/prebook'>返回</a>", 400
 
     if not days:
         return "❌ 请选择至少一个日期<br><a href='/volunteer/prebook'>返回</a>"
