@@ -292,9 +292,7 @@ def eligible_duty_assignment_ids(assignments):
 
 
 def _available_duty_ids(volunteer, assignments):
-    ids = eligible_duty_assignment_ids(assignments)
-    if not ids:
-        return []
+    """Offer unused duty segments, even when they touch an already closed shift."""
     rows = db_query("""SELECT end_time FROM attendance WHERE date=%s AND volunteer_id=%s AND role='值班'""",
                     (now_date_str(), volunteer["编号"]), fetchall=True) or []
     if any(not r.get("end_time") for r in rows):
@@ -302,7 +300,8 @@ def _available_duty_ids(volunteer, assignments):
     logs = db_query("""SELECT assignment_id FROM volunteer_attendance_logs WHERE attendance_date=%s AND volunteer_id=%s AND actual_role='值班'""",
                     (now_date_str(), volunteer["编号"]), fetchall=True) or []
     used = {int(r["assignment_id"]) for r in logs if r.get("assignment_id") is not None}
-    return [aid for aid in ids if not used.intersection(int(a["id"]) for a in same_role_contiguous_group(assignments, next(a for a in assignments if a.get("id") is not None and int(a["id"]) == aid)))]
+    remaining = [a for a in assignments if a.get("id") is not None and int(a["id"]) not in used]
+    return eligible_duty_assignment_ids(remaining)
 
 
 def _close_previous_roles(cur, volunteer_id, new_role):
@@ -393,7 +392,18 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
         if role == "值班" and int(selected["id"]) not in available:
             return False, "本轮值班尚未开放、已经签到或距离结束不足30分钟。"
 
-        group = same_role_contiguous_group(assignments, selected)
+        # A closed earlier duty shift must not block a newly added adjacent shift.
+        # Keep completed segments out of this new check-in's grouping and logs.
+        if role == "值班":
+            used_rows = db_query("""
+                SELECT assignment_id FROM volunteer_attendance_logs
+                WHERE volunteer_id=%s AND attendance_date=%s AND actual_role='值班'
+            """, (volunteer["编号"], now_date_str()), fetchall=True) or []
+            used_ids = {int(r["assignment_id"]) for r in used_rows if r.get("assignment_id") is not None}
+            group_pool = [a for a in assignments if a.get("id") is not None and int(a["id"]) not in used_ids]
+        else:
+            group_pool = assignments
+        group = same_role_contiguous_group(group_pool, selected)
         group_ids = [int(a["id"]) for a in group]
         # Any segment already checked in means the group cannot be started again.
         existing_log = db_query("""
@@ -915,6 +925,72 @@ def _scheduled_end_minutes(cur, row):
     return max(ends), ids
 
 
+def _refresh_open_duty_group(cur, row):
+    """Before auto checkout, include duty segments appended after the original check-in.
+
+    Only extend a still-open attendance row; never retroactively reopen completed
+    attendance or join a separate shift across a gap.
+    """
+    if row.get("role") != "值班":
+        return
+    old_ids = _assignment_ids_from_remark(row.get("remark"))
+    if not old_ids:
+        return  # Walk-in / legacy attendance: leave unchanged.
+    cur.execute("""
+        SELECT id, volunteer_id, name, assignment_date, role, assigned_place,
+               start_time, end_time, status
+        FROM volunteer_schedule_assignments
+        WHERE assignment_date::text=%s AND volunteer_id=%s AND role='值班'
+          AND COALESCE(status, 'assigned') <> 'cancelled'
+        ORDER BY id
+    """, (str(row["date"]), row["volunteer_id"]))
+    assignments = cur.fetchall() or []
+    anchor = next((a for a in assignments if int(a["id"]) in old_ids), None)
+    if anchor is None:
+        return  # Removed/cancelled original assignment; don't infer replacement.
+    group = same_role_contiguous_group(assignments, anchor)
+    new_segments = [a for a in group if int(a["id"]) not in old_ids]
+    if not new_segments:
+        return
+    # Do not attach a segment already claimed by a separate attendance.
+    new_ids = [int(a["id"]) for a in new_segments]
+    cur.execute("""
+        SELECT assignment_id FROM volunteer_attendance_logs
+        WHERE assignment_id=ANY(%s) AND volunteer_id=%s AND attendance_date=%s
+        LIMIT 1
+    """, (new_ids, row["volunteer_id"], row["date"]))
+    if cur.fetchone():
+        return
+    # Use the original check-in timestamp, not the moment the new shift was added.
+    cur.execute("""
+        SELECT check_in_time FROM volunteer_attendance_logs
+        WHERE assignment_id=ANY(%s) AND volunteer_id=%s AND attendance_date=%s
+        ORDER BY id LIMIT 1
+    """, (old_ids, row["volunteer_id"], row["date"]))
+    source_log = cur.fetchone()
+    if not source_log or not source_log.get("check_in_time"):
+        return
+    all_ids = sorted(set(old_ids + new_ids))
+    from psycopg2.extras import execute_values
+    execute_values(cur, """
+        INSERT INTO volunteer_attendance_logs
+        (assignment_id, volunteer_id, name, attendance_date, actual_role,
+         actual_place, walk_in, remarks, check_in_time)
+        VALUES %s
+    """, [(
+        a["id"], row["volunteer_id"], row["name"], row["date"],
+        "值班", a["assigned_place"], False,
+        "签到后新增连续值班，系统自动关联", source_log["check_in_time"]
+    ) for a in new_segments])
+    import re
+    remark = re.sub(r"assignment_ids=\d+(?:,\d+)*",
+                    "assignment_ids=" + ",".join(map(str, all_ids)),
+                    str(row.get("remark") or ""), count=1)
+    cur.execute("""UPDATE attendance SET remark=%s WHERE id=%s
+                   AND (end_time IS NULL OR end_time='')""", (remark, row["id"]))
+    row["remark"] = remark
+
+
 def auto_signout_unfinished_today():
     """Close each role at its scheduled end when a web request processes it."""
     if not ENABLE_AUTO_SIGNOUT:
@@ -928,6 +1004,7 @@ def auto_signout_unfinished_today():
             cur.execute("""SELECT * FROM attendance WHERE date=%s AND (end_time IS NULL OR end_time='')
                            FOR UPDATE SKIP LOCKED""", (today,))
             for row in cur.fetchall() or []:
+                _refresh_open_duty_group(cur, row)
                 cutoff = _role_cutoff_minutes(cur, row)
                 if cutoff is not None and minute >= cutoff:
                     if _close_attendance_row(cur, row, cutoff, "系统自动签退（服务计至岗位结束）"):
