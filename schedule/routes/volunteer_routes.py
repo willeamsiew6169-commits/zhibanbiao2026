@@ -9,7 +9,7 @@ from utils import apply_branch_prefix
 from schedule.blueprint import schedule_bp
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta, date, timezone
-from flask import request, redirect, url_for, render_template_string, redirect, session, jsonify
+from flask import request, redirect, url_for, render_template_string, redirect, session, jsonify, abort
 from schedule.helpers import (
     find_volunteer_by_keyword,
     build_monthly_signup_text,
@@ -263,6 +263,176 @@ def lock_and_count_cleaning(cur, signup_date):
     return int(cur.fetchone()['cnt'] or 0)
 
 
+# 义工报名独立登录；不改变签到系统及负责人登录权限。
+from attendance_service import find_volunteer, verify_pin_for_volunteer
+from datetime import timezone as _login_timezone
+
+# PostgreSQL shared across Render workers; table is installed separately via SQL.
+# No automatic schema changes and no changes to attendance or signup data.
+def _login_gate(identifier, ip, *, success=False):
+    """Atomic account/IP login throttle. Return seconds remaining when blocked."""
+    from datetime import datetime, timedelta
+    now = datetime.now(_login_timezone.utc)
+    keys = [('account', identifier, 5), ('ip', ip, 20)]
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Deterministic lock order prevents deadlocks on concurrent logins.
+            for kind, value, limit in sorted(keys):
+                cur.execute("""INSERT INTO volunteer_login_limits (scope, subject, failures, window_start, locked_until)
+                               VALUES (%s,%s,0,%s,NULL) ON CONFLICT (scope,subject) DO NOTHING""",
+                            (kind, value, now))
+            records = {}
+            for kind, value, limit in sorted(keys):
+                cur.execute("""SELECT failures, window_start, locked_until FROM volunteer_login_limits
+                               WHERE scope=%s AND subject=%s FOR UPDATE""", (kind, value))
+                records[(kind, value)] = cur.fetchone()
+            remaining = max((max(0, int((r['locked_until'] - now).total_seconds()) + 1)
+                             for r in records.values() if r['locked_until'] and r['locked_until'] > now), default=0)
+            if remaining:
+                return remaining
+            for kind, value, limit in keys:
+                r = records[(kind, value)]
+                if success:
+                    # Only clear the authenticated account, not the shared IP budget.
+                    if kind == 'account':
+                        cur.execute("""UPDATE volunteer_login_limits SET failures=0, window_start=%s, locked_until=NULL
+                                       WHERE scope=%s AND subject=%s""", (now, kind, value))
+                    continue
+                recent = r['window_start'] and r['window_start'] > now - timedelta(minutes=15)
+                failures = (int(r['failures']) if recent else 0) + 1
+                until = now + timedelta(minutes=15) if failures >= limit else None
+                cur.execute("""UPDATE volunteer_login_limits SET failures=%s, window_start=%s, locked_until=%s
+                               WHERE scope=%s AND subject=%s""",
+                            (failures, r['window_start'] if recent else now, until, kind, value))
+            return 0
+
+
+def _login_locked(identifier, ip):
+    """Read shared lock state before checking a PIN; no failure is counted here."""
+    from datetime import datetime
+    now = datetime.now(_login_timezone.utc)
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""SELECT locked_until FROM volunteer_login_limits
+                           WHERE (scope='account' AND subject=%s) OR (scope='ip' AND subject=%s)""",
+                        (identifier, ip))
+            return max((max(0, int((r['locked_until'] - now).total_seconds()) + 1)
+                        for r in cur.fetchall() if r['locked_until'] and r['locked_until'] > now), default=0)
+
+
+def _volunteer_identity():
+    return str(session.get("volunteer_signup_id") or "")
+
+
+def _volunteer_self_row(signup_id):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT volunteer_id FROM volunteer_schedule_signups WHERE id=%s", (signup_id,))
+            return cur.fetchone()
+
+
+@schedule_bp.before_request
+def _protect_volunteer_pages():
+    # 仅保护义工端；不改变 /schedule/admin 等管理员路径。
+    if not request.path.startswith('/volunteer'):
+        return None
+    if request.path in ('/volunteer/login', '/volunteer/logout'):
+        return None
+    if not _volunteer_identity():
+        if request.method != 'GET' or request.path == '/volunteer/query_volunteer':
+            return jsonify(ok=False, message='请先登录义工报名系统'), 401
+        return redirect('/volunteer/login')
+    if request.method == 'POST':
+        # 所有义工端写入都要求同一登录会话产生的 CSRF token。
+        import hmac
+        if not hmac.compare_digest(str(request.form.get('_csrf') or ''), str(session.get('volunteer_signup_csrf') or '')):
+            return '❌ 页面已过期，请返回报名首页重新操作', 403
+    if request.endpoint in ('schedule.volunteer_edit_signup', 'schedule.volunteer_edit_signup_post', 'schedule.volunteer_cancel_signup'):
+        row = _volunteer_self_row(request.view_args['signup_id'])
+        if not row or str(row['volunteer_id']) != _volunteer_identity():
+            abort(403)
+    return None
+
+
+@schedule_bp.route('/volunteer/login', methods=['GET', 'POST'])
+def volunteer_signup_login():
+    from html import escape
+    import secrets
+    error = ''
+    if request.method == 'POST':
+        branch = request.form.get('branch', 'CHE').upper()
+        digits = request.form.get('number', '').strip()
+        pin = request.form.get('pin', '').strip()
+        # Use only the trusted server peer address; do not trust user-supplied X-Forwarded-For.
+        ip = request.remote_addr or 'unknown'
+        valid_number = branch in ('CHE', 'STW') and digits.isdigit() and 1 <= len(digits) <= 4
+        volunteer_id = (('STW-' if branch == 'STW' else 'CHE-') + str(int(digits))) if valid_number else 'invalid'
+        if valid_number and branch == 'CHE' and int(digits) >= 800:
+            volunteer_id = str(int(digits))
+        # Hash identifiers at rest so this security-only table stores no plain volunteer numbers/IPs.
+        import hashlib
+        account_key = hashlib.sha256(volunteer_id.encode('utf-8')).hexdigest()
+        ip_key = hashlib.sha256(ip.encode('utf-8')).hexdigest()
+        try:
+            wait = _login_locked(account_key, ip_key)
+            if wait:
+                error = f'登录暂时受限，请约 {max(1, (wait + 59) // 60)} 分钟后重试。'
+            else:
+                authenticated = False
+                if valid_number and pin:
+                    volunteer = find_volunteer(volunteer_id)
+                    has_personal_credential = bool(str(volunteer.get('PIN') or '').strip() or ''.join(c for c in str(volunteer.get('电话号码') or '') if c.isdigit())) if volunteer else False
+                    if volunteer and volunteer.get('状态') in ('在册', '', None) and has_personal_credential and verify_pin_for_volunteer(volunteer, pin):
+                        canonical_id = str(volunteer.get('编号') or '')
+                        matches = find_volunteer_by_keyword(canonical_id)
+                        if len(matches) == 1 and str(matches[0]['id']) == canonical_id:
+                            authenticated = True
+                if authenticated:
+                    _login_gate(account_key, ip_key, success=True)
+                    session['volunteer_signup_id'] = canonical_id
+                    session['volunteer_signup_name'] = str(matches[0]['name'])
+                    session['volunteer_signup_csrf'] = secrets.token_urlsafe(32)
+                    session.permanent = True
+                    return redirect('/volunteer')
+                _login_gate(account_key, ip_key)
+                error = '编号或 PIN 不正确，请重新输入。'
+        except Exception:
+            # Fail closed if database/table is unavailable; never bypass lock checks.
+            import logging
+            logging.exception('Volunteer login security storage unavailable')
+            error = '登录验证暂时无法使用，请稍后重试或联系负责人。'
+    return render_template_string('''<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>义工报名身份验证</title><style>body{font-family:Arial,"Microsoft YaHei",sans-serif;background:#f0f8f1;padding:20px}.box{max-width:480px;margin:7vh auto;background:white;padding:28px;border-radius:20px;box-shadow:0 5px 24px #0001}h1{text-align:center;color:#227a4d;font-size:28px}label{display:block;margin:18px 0 8px;font-size:20px}input,button{box-sizing:border-box;font-size:23px;padding:15px;border-radius:12px}input{width:100%;border:1px solid #bbb}.row{display:flex;gap:10px}.row input{flex:1;min-width:0}.branch{background:#28a745;color:white;border:0;min-width:90px}button.submit{width:100%;background:#16834a;color:white;border:0;margin-top:24px;font-weight:bold}.error{color:#bd2636;font-size:18px}</style></head><body><main class="box"><h1>🪷 义工报名身份验证</h1><p style="text-align:center">请输入自己的编号和 PIN，验证一次即可报名。</p>{% if error %}<p class="error">{{error}}</p>{% endif %}<form method="post"><label>义工编号</label><div class="row"><button class="branch" type="button" id="branchBtn" onclick="let b=document.getElementById('branch');b.value=b.value==='CHE'?'STW':'CHE';this.textContent=b.value;this.style.background=b.value==='CHE'?'#28a745':'#dc3545'">CHE</button><input type="hidden" name="branch" id="branch" value="CHE"><input name="number" inputmode="numeric" pattern="[0-9]+" required autofocus placeholder="例如：208"></div><label>个人 PIN</label><input name="pin" type="password" inputmode="numeric" autocomplete="off" required><button class="submit" type="submit">进入义工报名</button></form></main></body></html>''', error=error)
+
+
+@schedule_bp.route('/volunteer/logout', methods=['POST'])
+def volunteer_signup_logout():
+    import hmac
+    if not hmac.compare_digest(str(request.form.get('_csrf') or ''), str(session.get('volunteer_signup_csrf') or '')):
+        abort(403)
+    for key in ('volunteer_signup_id', 'volunteer_signup_name', 'volunteer_signup_csrf'):
+        session.pop(key, None)
+    return redirect('/volunteer/login')
+
+
+@schedule_bp.after_request
+def _volunteer_form_identity(response):
+    if not request.path.startswith('/volunteer') or request.path in ('/volunteer/login', '/volunteer/logout'):
+        return response
+    if not _volunteer_identity():
+        return response
+    response.headers['Cache-Control'] = 'private, no-store'
+    if not response.content_type.startswith('text/html'):
+        return response
+    import re
+    from html import escape
+    html = response.get_data(as_text=True)
+    token = escape(str(session.get('volunteer_signup_csrf') or ''), quote=True)
+    html = re.sub(r'(<form\b[^>]*\bmethod=["\']post["\'][^>]*>)', lambda m: m.group(1) + '<input type="hidden" name="_csrf" value="'+token+'">', html, flags=re.I)
+    response.set_data(html)
+    response.headers['Cache-Control'] = 'private, no-store'
+    return response
+
+
 @schedule_bp.route("/volunteer")
 def volunteer_home():
 
@@ -345,6 +515,7 @@ def volunteer_home():
         
     return render_template_string(
     VOLUNTEER_SIGNUP_HTML,
+    login_id=_volunteer_identity(), login_name=session.get("volunteer_signup_name", ""),
     default_date=default_date,
     schedule_label=schedule_label,
     times=TIME_OPTIONS,
@@ -376,7 +547,7 @@ def volunteer_signup():
         if _signup_timing:
             print(f"[signup-timing] {stage}: {time.perf_counter() - _signup_t0:.3f}s", flush=True)
 
-    keyword = request.form.get("keyword", "").strip()
+    keyword = _volunteer_identity()
     signup_date = request.form.get("signup_date", "").strip()
     role = request.form.get("role", "").strip()
 
@@ -401,7 +572,7 @@ def volunteer_signup():
     end_time = request.form.get("end_time", "").strip()
     branch = request.form.get("branch", "CHE").strip().upper()
 
-    keyword = apply_branch_prefix(keyword, branch)
+    keyword = _volunteer_identity()
     daily_quote = get_daily_dharma()
 
     if keyword.isdigit() and branch == "STW":
@@ -635,6 +806,10 @@ def volunteer_signup():
                     if str(conflict.get('start_time')) != start_time or str(conflict.get('end_time')) != end_time:
                         return duty_conflict_message(conflict)
 
+            # 同一天的膳食报名先加锁，避免并发重复提交。
+            if role == "膳食":
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext('meal_signup'), hashtext(%s))", (str(signup_date),))
+
             # ============================================================
             # 检查重复报名
             #
@@ -688,7 +863,57 @@ def volunteer_signup():
 
             # 派餐义工普通报名最多9位；负责人可从后台特批第10位。
             if role == "膳食":
-                cur.execute("SELECT pg_advisory_xact_lock(hashtext('meal_signup'), hashtext(%s))", (str(signup_date),))
+                if existing:
+                    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>派餐义工 · 已报名</title>
+<style>
+* { box-sizing:border-box; }
+body { margin:0; min-height:100vh; padding:24px 16px; display:flex;
+       align-items:center; justify-content:center; font-family:"Microsoft YaHei","Noto Sans SC",Arial,sans-serif;
+       color:#344054; background:linear-gradient(145deg,#edf7ff,#f6f9ff 55%,#eaf5f0); }
+.card { width:100%; max-width:620px; background:white; border-radius:24px;
+        box-shadow:0 16px 48px rgba(41,80,110,.13); overflow:hidden; text-align:center; }
+.head { padding:30px 22px 22px; background:#fff8ec; border-top:5px solid #e8a83d; }
+.icon { display:grid; place-items:center; width:74px; height:74px; margin:0 auto 14px;
+        border-radius:50%; background:#ffedc9; font-size:40px; }
+h1 { margin:0; color:#9a5a0c; font-size:clamp(25px,5vw,32px); line-height:1.4; }
+.content { padding:26px 28px 30px; }
+.confirm { padding:18px 16px; border-radius:16px; background:#edf9f2; border:1px solid #bfe7cd;
+           color:#176b3d; font-size:21px; font-weight:700; line-height:1.65; }
+.tip { margin:20px 0; font-size:18px; line-height:1.8; color:#566273; }
+.thanks { margin:0 0 22px; font-size:18px; color:#90612e; }
+.actions { display:grid; gap:12px; }
+.btn { display:block; padding:16px 14px; border-radius:14px; color:#fff; text-decoration:none;
+       font-size:20px; font-weight:700; line-height:1.4; }
+.btn-green { background:#21885a; }
+.btn-blue { background:#2779ba; }
+.btn:hover { filter:brightness(1.06); }
+.btn:focus-visible { outline:3px solid #2b6089; outline-offset:3px; }
+@media(max-width:480px) { body {padding:14px;} .head {padding:24px 14px 20px;}
+  .content {padding:20px 16px 24px;} .confirm {font-size:18px;}
+  .tip,.thanks {font-size:16px;} .btn {font-size:18px;} }
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="head"><div class="icon" aria-hidden="true">⚠️</div>
+    <h1>您已经提交报名了！</h1></div>
+  <div class="content">
+    <div class="confirm">✅ 您已成功报名当天的派餐义工，<br>无需重复报名。</div>
+    <p class="tip">如需更改，请先进入「我的报名」取消原有报名，再重新报名。</p>
+    <p class="thanks">🙏 感恩您的发心！</p>
+    <div class="actions">
+      <a class="btn btn-green" href="/volunteer/my_schedule_search">📋 查看／修改／取消</a>
+      <a class="btn btn-blue" href="/volunteer">← 返回义工报名</a>
+    </div>
+  </div>
+</main>
+</body>
+</html>"""
                 cur.execute("""
                     select count(*) as cnt
                     from volunteer_schedule_signups
@@ -1296,7 +1521,7 @@ def volunteer_signup():
 @schedule_bp.route("/volunteer/query_volunteer")
 def query_volunteer_api():
 
-    keyword = request.args.get("keyword", "").strip()
+    keyword = _volunteer_identity()
     branch = request.args.get("branch", "CHE").strip()
 
     if not keyword:
@@ -1592,7 +1817,7 @@ def add_meal_leader():
         return redirect(url_for("schedule.schedule_admin"))
 
     signup_date = request.form.get("date")
-    keyword = request.form.get("keyword", "").strip()
+    keyword = request.form.get("volunteer_id", "").strip()
 
     matches = find_volunteer_by_keyword(keyword)
 
@@ -1626,7 +1851,7 @@ def add_meal_leader():
 
 @schedule_bp.route("/volunteer/my_schedule")
 def volunteer_my_schedule():
-    keyword = request.args.get("keyword", "").strip()
+    keyword = _volunteer_identity()
 
     if not keyword:
         return "❌ 请输入义工编号 / 姓名 / 电话<br><a href='/volunteer'>返回</a>"
@@ -3081,7 +3306,7 @@ def volunteer_prebook():
         year = int(request.args.get("year", next_month.year))
         month = int(request.args.get("month", next_month.month))
 
-        keyword = request.args.get("keyword", "").strip()
+        keyword = _volunteer_identity()
         branch = request.args.get("branch", "CHE").strip().upper()
 
         special_days = {}
@@ -3098,6 +3323,7 @@ def volunteer_prebook():
 
         return render_template_string(
             VOLUNTEER_PREBOOK_HTML,
+            login_id=_volunteer_identity(), login_name=session.get("volunteer_signup_name", ""),
             default_year=year,
             default_month=month,
             times=TIME_OPTIONS,
@@ -3107,9 +3333,9 @@ def volunteer_prebook():
         )
 
     # POST 提交报名
-    keyword = request.form.get("keyword", "").strip()
+    keyword = _volunteer_identity()
     branch = request.form.get("branch", "CHE").strip().upper()
-    keyword = apply_branch_prefix(keyword, branch)
+    keyword = _volunteer_identity()
 
     year = int(request.form.get("year"))
     month = int(request.form.get("month"))
@@ -3274,6 +3500,7 @@ def volunteer_prebook():
 
 @schedule_bp.route("/volunteer/my_schedule_search")
 def volunteer_my_schedule_search():
+    return redirect("/volunteer/my_schedule")
     return render_template_string("""
 <!doctype html>
 <html>

@@ -245,6 +245,7 @@ body { background-color: #F0F8F1 !important; }
 
     <div class="card">
 
+        <form method="post" action="/volunteer/logout" style="text-align:right"><button type="submit" style="font-size:16px;padding:8px 14px">退出义工登录</button></form>
         <div class="admin-link">
             <a href="/schedule/admin">🔐 管理员入口</a>
         </div>
@@ -349,38 +350,10 @@ body { background-color: #F0F8F1 !important; }
             method="post"
             action="/volunteer/signup">
 
-            <div class="form-group">
-                <label class="form-label">
-                    义工编号 / 姓名 / 电话
-                </label>
-
-                <div class="branch-search-row">
-
-                    <button
-                        type="button"
-                        id="branch_btn"
-                        onclick="toggleBranch()"
-                        class="branch-toggle-btn">
-                        CHE
-                    </button>
-
-                    <input
-                        type="hidden"
-                        id="branch"
-                        name="branch"
-                        value="CHE">
-
-                    <input
-                        class="form-input"
-                        name="keyword"
-                        id="keyword"
-                        required
-                        placeholder="例如：108 / 张三 / 0123456789"
-                        oninput="lookupVolunteer()">
-
-                </div>
-
-                <div id="volunteer_lookup_result" class="lookup-result"></div>
+            <div class="form-group"><label class="form-label">当前报名义工</label>
+                <div class="lookup-result" style="color:#176b39;font-weight:bold">{{ login_id }}　{{ login_name }}</div>
+                <input type="hidden" name="keyword" id="keyword" value="{{ login_id }}">
+                <input type="hidden" name="branch" id="branch" value="CHE">
             </div>
 
             <div class="signup-form-grid">
@@ -2016,37 +1989,10 @@ document.addEventListener("DOMContentLoaded", function () {
 
     <form method="post" action="/volunteer/prebook">
 
-        <div class="form-group">
-            <label class="form-label">
-                义工编号 / 姓名 / 电话
-            </label>
-
-            <div class="branch-search-row">
-
-                <button
-                    type="button"
-                    id="multi_branch_btn"
-                    onclick="toggleMultiBranch()"
-                    class="branch-toggle-btn"
-                    style="background:{{ '#dc3545' if branch == 'STW' else '#28a745' }};">
-                    {{ branch }}
-                </button>
-
-                <input
-                    type="hidden"
-                    id="multi_branch"
-                    name="branch"
-                    value="{{ branch }}">
-
-                <input
-                    class="form-input"
-                    name="keyword"
-                    id="keyword"
-                    value="{{ keyword }}"
-                    required
-                    placeholder="例如：108 / 张三 / 0123456789">
-
-            </div>
+        <div class="form-group"><label class="form-label">当前报名义工</label>
+            <p style="font-size:24px;color:#176b39;font-weight:bold">{{ login_id }}　{{ login_name }}</p>
+            <input type="hidden" name="keyword" id="keyword" value="{{ login_id }}">
+            <input type="hidden" name="branch" id="multi_branch" value="CHE">
         </div>
 
         <div class="month-grid">

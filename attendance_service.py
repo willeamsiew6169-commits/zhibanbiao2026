@@ -848,7 +848,7 @@ def _role_cutoff_minutes(cur, row):
         return 14 * 60
     if role == "佛学班":
         d = day if isinstance(day, datetime.date) else datetime.date.fromisoformat(str(day))
-        return 18 * 60 if d.weekday() == 5 else (14 * 60 + 30 if d.weekday() == 6 else None)
+        return 18 * 60 if d.weekday() == 5 else (12 * 60 + 30 if d.weekday() == 6 else None)
     if role == "供台":
         # Distinguish setup vs removal using the actual manager's assigned list.
         cur.execute("SELECT setup_people, remove_people FROM schedule_day_flags WHERE flag_date=%s", (day,))

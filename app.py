@@ -359,6 +359,14 @@ PAGE = """
       border: 1px solid #f9e7eb;
     }
     .sign-home-page .sign-page .form-input { background: #fff; }
+    .attendance-list-highlight {background:#e8f8ee!important;border:2px solid #28a46a!important;}
+    .attendance-list-highlight summary {color:#126b39;font-size:22px!important;padding:9px 5px;}
+    .admin-corner {position:absolute;top:16px;right:20px;z-index:5;}
+    .admin-corner .admin-small-btn {font-size:13px!important;padding:7px 13px!important;width:auto!important;min-height:0!important;background:rgba(255,255,255,.18)!important;color:#fff!important;border:1px solid rgba(255,255,255,.4)!important;border-radius:20px!important;box-shadow:none!important;}
+    .admin-corner #adminBox {position:absolute;right:0;top:100%;width:260px;max-width:calc(100vw - 40px);padding:16px;background:#fff;border-radius:14px;box-shadow:0 8px 26px rgba(30,20,80,.22);color:#333;box-sizing:border-box;}
+    .sign-page {position:relative;}
+    @media(max-width:700px){.admin-corner{top:10px;right:12px}.admin-corner .admin-small-btn{font-size:12px!important;padding:6px 10px!important;}}
+
 
     /* 签到岗位：手机整行大按钮，查询成功后直接显示。 */
     .signin-role-list{display:grid;gap:14px;margin:12px 0 18px}
@@ -574,6 +582,17 @@ PAGE = """
       }
 
   }
+
+    /* 验证 PIN 后的签到确认弹窗；仅前端展示，不改变后台签到规则。 */
+    .signin-modal-mask{position:fixed;inset:0;background:rgba(15,23,42,.64);z-index:10000;display:none;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
+    .signin-modal-card{width:min(100%,520px);max-height:90vh;overflow-y:auto;background:white;border-radius:22px;padding:24px;box-sizing:border-box;box-shadow:0 20px 60px rgba(0,0,0,.3);color:#172033}
+    .signin-modal-card h2{font-size:27px;margin:0 0 18px;text-align:center}
+    .signin-modal-choice{display:block;width:100%;border:2px solid #16834a;background:#e5f8ed;color:#115d35;border-radius:16px;text-align:left;padding:17px;margin:12px 0;font-size:21px;font-weight:800;cursor:pointer}
+    .signin-modal-choice .shift-details{display:block;font-size:17px;font-weight:600;margin-top:5px}
+    .signin-modal-confirm{display:block;width:100%;background:#138447;color:#fff;border:0;border-radius:16px;padding:18px;font-size:24px;font-weight:900;cursor:pointer;margin-top:15px}
+    .signin-modal-cancel{display:block;width:100%;background:#f1f3f5;color:#495057;border:0;border-radius:14px;padding:13px;font-size:18px;cursor:pointer;margin-top:12px}
+    .signin-modal-card .form-input{width:100%;box-sizing:border-box;font-size:21px;min-height:54px}
+    @media(max-width:700px){.signin-modal-card{padding:20px}.signin-modal-card h2{font-size:24px}}
   </style>
 <style>#signOutDialog,#signOutBtn,#signoutRoleGroup,#listSignoutMask{display:none!important}</style>
 </head>
@@ -581,6 +600,59 @@ PAGE = """
 <body class="sign-home-page">
 
 <div class="page sign-page">
+
+    <div class="admin-corner">
+
+
+
+
+      <div class="btn-row single-btn-row">
+        <button
+            type="button"
+            class="btn-tool admin-small-btn"
+            onclick="toggleAdminBox()">
+            🔐 {{ "管理员" if t.html_lang.startswith("zh") else "Admin" }}
+        </button>
+      </div>
+
+      <div id="adminBox" style="display:none; margin-top:16px;">
+
+        <form method="post" action="{{ url_for('admin.admin_report') }}">
+
+          <div class="form-group">
+            <label class="form-label">{{ t.admin_pin }}</label>
+            <input
+              class="form-input"
+              id="admin_pin"
+              name="admin_pin"
+              type="password"
+              inputmode="numeric"
+              pattern="[0-9]*"
+              autocomplete="new-password"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+              value=""
+              placeholder="{{ t.pin_placeholder }}"
+              readonly
+              onfocus="this.removeAttribute('readonly');"
+              required
+            >
+          </div>
+
+          <div class="btn-row">
+            <button class="btn-tool btn-purple" type="submit">
+              {{ t.admin_login }}
+            </button>
+          </div>
+
+        </form>
+
+      </div>
+
+
+    </div>
+
 
   <div class="card center hero-card">
       <div class="hero-icon">🌸</div>
@@ -657,7 +729,7 @@ PAGE = """
     </div>
   </div>
 
-  <div class="card" style="padding:14px 18px;">
+  <div class="card attendance-list-highlight" style="padding:14px 18px;">
     <details id="todayAttendanceDetails">
       <summary style="cursor:pointer;font-weight:700;font-size:18px;">👥 {{ '查看今日签到名单' if t.html_lang.startswith('zh') else 'View today’s attendance' }}（<span id="liveListCount">{{ today_count }}</span>）</summary>
       <div id="todayAttendanceList" style="margin-top:12px;">{{ '点击展开后加载名单…' if t.html_lang.startswith('zh') else 'Loading on expand…' }}</div>
@@ -740,11 +812,11 @@ PAGE = """
         </div>
 
       </div>
-      <div class="btn-row single-btn-row">
+      <div class="btn-row single-btn-row" id="lookupRetryRow" style="display:none;">
         <button type="button"
                 class="btn-tool btn-primary"
                 onclick="lookupVolunteer()">
-            {{ t.search_volunteer }}
+            {{ '重新查询' if t.html_lang.startswith('zh') else 'Retry lookup' }}
         </button>
         </div>
 
@@ -804,58 +876,6 @@ PAGE = """
     </div>
   </div>
 
-    <div class="card" style="margin-bottom:14px;padding:12px 18px;text-align:right">
-
-
-
-
-      <div class="btn-row single-btn-row">
-        <button
-            type="button"
-            class="btn-tool btn-purple" style="width:auto;padding:10px 16px"
-            onclick="toggleAdminBox()">
-            {{ t.admin_entry }}
-        </button>
-      </div>
-
-      <div id="adminBox" style="display:none; margin-top:16px;">
-
-        <form method="post" action="{{ url_for('admin.admin_report') }}">
-
-          <div class="form-group">
-            <label class="form-label">{{ t.admin_pin }}</label>
-            <input
-              class="form-input"
-              id="admin_pin"
-              name="admin_pin"
-              type="password"
-              inputmode="numeric"
-              pattern="[0-9]*"
-              autocomplete="new-password"
-              autocorrect="off"
-              autocapitalize="off"
-              spellcheck="false"
-              value=""
-              placeholder="{{ t.pin_placeholder }}"
-              readonly
-              onfocus="this.removeAttribute('readonly');"
-              required
-            >
-          </div>
-
-          <div class="btn-row">
-            <button class="btn-tool btn-purple" type="submit">
-              {{ t.admin_login }}
-            </button>
-          </div>
-
-        </form>
-
-      </div>
-
-
-    </div>
-
   <div class="two-card-grid">
 
     <div class="card center">
@@ -891,6 +911,13 @@ PAGE = """
 </div>
 
   <div style="display:none" aria-hidden="true"><button id="signOutBtn"></button><div id="signoutRoleGroup"></div><select id="signoutRole"></select><div id="listSignoutMask" style="display:none"></div><input id="listPinInput"><input id="listSignoutRow"><input id="listSignoutPin"><div id="listSignoutTarget"></div><form id="listQuickSignoutForm"></form><form id="quickSignOutForm"><input id="signout_volunteer_id"><input id="signout_pin"><input id="signout_assignment_id"><input id="signout_role"></form></div>
+<div id="signinModal" class="signin-modal-mask" role="dialog" aria-modal="true" aria-labelledby="signinModalTitle" style="display:none;">
+  <div class="signin-modal-card">
+    <h2 id="signinModalTitle"></h2>
+    <div id="signinModalContent"></div>
+    <button type="button" class="signin-modal-cancel" onclick="closeSigninModal()">{{ '暂不签到' if t.html_lang.startswith('zh') else 'Not now' }}</button>
+  </div>
+</div>
 <script>
 const LIST_LANG_ZH = {{ t.html_lang.startswith('zh')|tojson }};
 let listSignoutId = null;
@@ -1036,6 +1063,7 @@ const TXT = {
 
 let verifiedLookupKey = null;
 let lookupRequestSerial = 0;
+let autoLookupTimer = null;
 function currentLookupKey() {
   return JSON.stringify([
     document.getElementById('branch').value,
@@ -1044,12 +1072,14 @@ function currentLookupKey() {
   ]);
 }
 function invalidateLookup() {
+  closeSigninModal();
   verifiedLookupKey = null;
   window.lastAttendanceLookup = null;
   document.getElementById('signOutBtn').style.display = 'none';
   document.getElementById('signoutRoleGroup').style.display = 'none';
   document.getElementById('assignment_id').value = '';
   document.getElementById('personBox').style.display = 'none';
+  document.getElementById('lookupRetryRow').style.display = 'none';
   const roleSelect = document.getElementById('role');
   roleSelect.innerHTML = '';
   roleSelect.add(new Option(TXT.lookup_placeholder, ''));
@@ -1058,8 +1088,10 @@ function invalidateLookup() {
   toggleCardNo();
 }
 async function lookupVolunteer() {
+  clearTimeout(autoLookupTimer);
   invalidateLookup();
   const requestSerial = ++lookupRequestSerial;
+  document.getElementById('lookupRetryRow').style.display = 'none';
   const lookupKey = currentLookupKey();
   const id = document.getElementById('volunteer_id').value.trim();
   const branch = document.getElementById('branch').value;
@@ -1085,12 +1117,22 @@ async function lookupVolunteer() {
   const formData = new FormData();
   formData.append('pin', pin);
 
-  const res = await fetch('/api/volunteer/' + encodeURIComponent(finalId), {
-    method: 'POST',
-    body: formData
-  });
-
-  const data = await res.json();
+  let data;
+  try {
+    const res = await fetch('/api/volunteer/' + encodeURIComponent(finalId), {
+      method: 'POST',
+      body: formData
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    data = await res.json();
+  } catch (error) {
+    if (currentLookupKey() !== lookupKey || requestSerial !== lookupRequestSerial) return;
+    box.style.display = 'block';
+    box.className = 'alert alert-danger';
+    box.textContent = LIST_LANG_ZH ? '查询暂时失败，请点击重新查询。' : 'Lookup failed. Please retry.';
+    document.getElementById('lookupRetryRow').style.display = 'flex';
+    return;
+  }
   if (currentLookupKey() !== lookupKey || requestSerial !== lookupRequestSerial) return;
   box.style.display = 'block';
 
@@ -1192,6 +1234,7 @@ async function lookupVolunteer() {
       box.innerHTML = html;
     }
 
+     if (pin && data.volunteer.pin_ok) showSigninModal(data);
   } else {
     box.className = 'alert alert-danger';
     updateSigninOnlyVisibility(false);
@@ -1207,6 +1250,80 @@ function roleSortMinutes(value) {
   if (match[3]) hour = hour % 12 + (match[3].toLowerCase() === 'pm' ? 12 : 0);
   return hour * 60 + Number(match[2]);
 }
+
+// 智能排序仅影响弹窗显示；最终签到仍由原有表单和后台校验。
+let signinModalChoices = [];
+function closeSigninModal(){document.getElementById('signinModal').style.display='none';}
+function signinModalNowMinutes(){
+  const parts = new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Kuala_Lumpur',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date());
+  return Number(parts.find(p=>p.type==='hour').value)*60+Number(parts.find(p=>p.type==='minute').value);
+}
+function showSigninModal(data){
+  if (verifiedLookupKey !== currentLookupKey() || !data.volunteer.pin_ok) return;
+  const title=document.getElementById('signinModalTitle');
+  const content=document.getElementById('signinModalContent');
+  content.replaceChildren();
+  const modal=document.getElementById('signinModal');
+  if ((data.open_roles || []).length) {
+    title.textContent=LIST_LANG_ZH?'🟡 您目前正在服务中':'🟡 Currently checked in';
+    const p=document.createElement('p');p.style.cssText='text-align:center;font-size:20px;line-height:1.6';
+    p.textContent=LIST_LANG_ZH?'请先完成当前岗位签退，再签到其他岗位。':'Please check out of the current role before checking in again.';
+    content.appendChild(p);modal.style.display='flex';return;
+  }
+  const now=signinModalNowMinutes();
+  const defaults={'卫生':'08:00','佛台':'08:00','供花':'08:00','供果':'08:00','供台':'06:00','膳食':'08:00','佛学班':'10:00'};
+  signinModalChoices=(data.eligible_roles||[]).map((item,index)=>{
+    const shifts=(data.today_assignments||[]).filter(a=>a.role===item.role && a.state==='pending' && (item.role!=='值班'||(data.eligible_duty_assignment_ids||[]).includes(Number(a.id))));
+    shifts.sort((a,b)=>roleSortMinutes(a.start_time)-roleSortMinutes(b.start_time));
+    const shift=shifts[0];
+    const start=shift?roleSortMinutes(shift.start_time):roleSortMinutes(defaults[item.role]);
+    const end=shift?roleSortMinutes(shift.end_time):9999;
+    const current=now>=start && now<end;
+    return {...item,shift,index,start,current,distance:current?0:Math.abs(now-start)};
+  }).sort((a,b)=>Number(b.current)-Number(a.current)||a.distance-b.distance||a.index-b.index);
+  if (!signinModalChoices.length){
+    title.textContent=LIST_LANG_ZH?'⚠️ 当前没有可签到岗位':'⚠️ No eligible roles';
+    modal.style.display='flex';return;
+  }
+  if (signinModalChoices.length===1){showSigninModalConfirm(0);return;}
+  title.textContent=LIST_LANG_ZH?'请选择签到岗位':'Choose a role';
+  signinModalChoices.forEach((item,i)=>{
+    const btn=document.createElement('button');btn.type='button';btn.className='signin-modal-choice';
+    const icons={'卫生':'🧹','佛台':'🙏','值班':'🏠','供台':'🌸','供花':'💐','供果':'🍎','膳食':'🍽️','佛学班':'📖'};
+    btn.textContent=(icons[item.role]||'✅')+' '+item.label;
+    if(item.shift){const details=document.createElement('span');details.className='shift-details';details.textContent=[item.shift.assigned_place,[item.shift.start_time,item.shift.end_time].filter(Boolean).join(' ～ ')].filter(Boolean).join(' · ');btn.appendChild(details);}
+    btn.addEventListener('click',()=>showSigninModalConfirm(i));content.appendChild(btn);
+  });
+  modal.style.display='flex';
+}
+function showSigninModalConfirm(index){
+  const item=signinModalChoices[index];if(!item)return;
+  const content=document.getElementById('signinModalContent');content.replaceChildren();
+  document.getElementById('signinModalTitle').textContent=LIST_LANG_ZH?'🟢 当前可签到':'🟢 Ready to check in';
+  const info=document.createElement('div');info.style.cssText='text-align:center;font-size:22px;font-weight:800;line-height:1.7';
+  info.textContent=item.label;
+  content.appendChild(info);
+  if(item.shift){const detail=document.createElement('div');detail.style.cssText='text-align:center;font-size:19px;margin:8px 0 20px';detail.textContent=[item.shift.assigned_place,[item.shift.start_time,item.shift.end_time].filter(Boolean).join(' ～ ')].filter(Boolean).join(' · ');content.appendChild(detail);}
+  let cardInput=null;
+  if(item.role==='值班'){
+    const label=document.createElement('label');label.textContent=LIST_LANG_ZH?'义工卡号':'Volunteer card number';label.style.cssText='display:block;font-size:20px;font-weight:700;margin-top:14px';
+    cardInput=document.createElement('input');cardInput.className='form-input';cardInput.placeholder=LIST_LANG_ZH?'请输入义工卡号':'Enter card number';cardInput.value=document.getElementById('card_no').value;
+    content.appendChild(label);content.appendChild(cardInput);
+  }
+  const confirm=document.createElement('button');confirm.type='button';confirm.className='signin-modal-confirm';confirm.textContent=LIST_LANG_ZH?'✅ 确认签到':'✅ Confirm check-in';
+  confirm.addEventListener('click',()=>{
+    if(verifiedLookupKey!==currentLookupKey()){closeSigninModal();alert(TXT.lookup_required_alert);return;}
+    if(cardInput){if(!cardInput.value.trim()){cardInput.focus();return;}document.getElementById('card_no').value=cardInput.value.trim();}
+    document.getElementById('role').value=item.role;
+    toggleCardNo();refreshRoleAction();
+    // 旧函数 toggleCardNo 不会清空卡号；复用原来的 quickSignIn 和 POST。
+    closeSigninModal();
+    const form=document.getElementById('role').closest('form');if(form)form.requestSubmit();
+  });content.appendChild(confirm);
+  if(signinModalChoices.length>1){const back=document.createElement('button');back.type='button';back.className='signin-modal-cancel';back.textContent=LIST_LANG_ZH?'← 返回选择岗位':'← Choose another role';back.addEventListener('click',()=>showSigninModal(window.lastAttendanceLookup));content.appendChild(back);}
+  document.getElementById('signinModal').style.display='flex';
+}
+
 function renderSigninRoleButtons(data, verified) {
   const holder = document.getElementById('signinRoleButtons');
   holder.replaceChildren();
@@ -1272,11 +1389,13 @@ function toggleBranch() {
 
   if (branch.value === "CHE") {
     branch.value = "STW";
+    clearTimeout(autoLookupTimer);
     invalidateLookup();
     btn.innerText = "STW";
     btn.className = "btn-tool btn-danger branch-btn";
   } else {
     branch.value = "CHE";
+    clearTimeout(autoLookupTimer);
     invalidateLookup();
     btn.innerText = "CHE";
     btn.className = "btn-tool btn-success branch-btn";
@@ -1467,7 +1586,18 @@ window.addEventListener("load", function() {
 
   if (pinInput) pinInput.value = "";
   ['volunteer_id', 'pin'].forEach(id => {
-    document.getElementById(id).addEventListener('input', invalidateLookup);
+    document.getElementById(id).addEventListener('input', function() {
+      clearTimeout(autoLookupTimer);
+      invalidateLookup();
+      const number = document.getElementById('volunteer_id').value.trim();
+      const pin = document.getElementById('pin').value.trim();
+      if (number && pin) {
+        autoLookupTimer = setTimeout(() => {
+          if (document.getElementById('volunteer_id').value.trim() === number &&
+              document.getElementById('pin').value.trim() === pin) lookupVolunteer();
+        }, 1000);
+      }
+    });
   });
   if (adminPin) adminPin.value = "";
 

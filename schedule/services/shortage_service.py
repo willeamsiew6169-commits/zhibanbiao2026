@@ -136,7 +136,7 @@ def build_shortage_notice_from_assignments(date_str, conn=None):
     if not lines:
         return f"✅ {day_text}没有需要发送的缺义工通知。"
     return (f"师兄们，大家好！🙏\n\n📅 {day_text}（{day.month}月{day.day}日）义工尚需\n\n"
-            + "\n".join(lines) + "\n\n欢迎有空的师兄随喜报名护持。\n\n感恩大家 🙏🙏🙏")
+            + "\n".join(lines) + "\n\n欢迎发心的师兄随喜报名护持。\n\n感恩大家 🙏🙏🙏")
 
 
 def build_signup_shortage_notice(date_str):
