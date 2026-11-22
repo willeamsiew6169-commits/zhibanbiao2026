@@ -14,3 +14,4 @@ opencc-python-reimplemented
 python-dotenv
 supabase
 reportlab
+requests
