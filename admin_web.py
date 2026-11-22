@@ -666,7 +666,9 @@ def admin_report():
     t = get_text()
 
     if pin != ADMIN_PIN:
-        flash(t["admin_pin_wrong"], "bad")
+        # 直接打开旧管理员链接而没有提交 PIN，不属于 PIN 输入错误。
+        if request.method == "POST" or pin:
+            flash(t["admin_pin_wrong"], "bad")
         return redirect(url_for("index"))
 
     policies = get_signin_policies()

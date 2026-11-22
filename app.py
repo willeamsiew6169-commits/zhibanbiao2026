@@ -1300,6 +1300,8 @@ function showSigninModalConfirm(index){
   const item=signinModalChoices[index];if(!item)return;
   const content=document.getElementById('signinModalContent');content.replaceChildren();
   document.getElementById('signinModalTitle').textContent=LIST_LANG_ZH?'🟢 当前可签到':'🟢 Ready to check in';
+  const volunteerName=window.lastAttendanceLookup?.volunteer?.姓名 || '';
+  if(volunteerName){const name=document.createElement('div');name.style.cssText='text-align:center;font-size:24px;font-weight:900;margin:0 0 12px;color:#145b37';name.textContent=(LIST_LANG_ZH?'👤 义工姓名：':'👤 Volunteer: ')+volunteerName;content.appendChild(name);}
   const info=document.createElement('div');info.style.cssText='text-align:center;font-size:22px;font-weight:800;line-height:1.7';
   info.textContent=item.label;
   content.appendChild(info);

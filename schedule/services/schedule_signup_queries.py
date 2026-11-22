@@ -39,7 +39,8 @@ def load_admin_signup_details(date_str):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, volunteer_id, name, role, start_time, end_time,
-                       COALESCE(status, 'pending') AS status, assigned_place
+                       COALESCE(status, 'pending') AS status, assigned_place,
+                        TO_CHAR((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kuala_Lumpur', 'MM/DD FMHH12:MIam') AS signup_created_display
                 FROM volunteer_schedule_signups
                 WHERE signup_date = %s
                 ORDER BY CASE COALESCE(status, 'pending')

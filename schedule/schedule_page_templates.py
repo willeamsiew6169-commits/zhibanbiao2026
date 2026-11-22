@@ -629,6 +629,7 @@ html {
               <th style="padding:9px;border-bottom:1px solid #dce5ee;">报名时段</th>
               <th style="padding:9px;border-bottom:1px solid #dce5ee;">安排地点</th>
               <th style="padding:9px;border-bottom:1px solid #dce5ee;">状态</th>
+              <th style="padding:9px;border-bottom:1px solid #dce5ee;white-space:nowrap;">报名时间</th>
             </tr></thead>
             <tbody>
             {% for person in signup_details %}
@@ -651,6 +652,7 @@ html {
                   {% elif person.status == 'pending' %}<span style="color:#a66a00;font-weight:700;">🟡 待安排</span>
                   {% else %}{{ person.status }}{% endif %}
                 </td>
+                <td style="padding:9px;white-space:nowrap;">{{ person.signup_created_display or '—' }}</td>
               </tr>
             {% endfor %}
             </tbody>

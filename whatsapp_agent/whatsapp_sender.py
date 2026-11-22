@@ -59,9 +59,20 @@ def ready_page(context):
 
 
 def check_header(page):
-    header = page.locator('header').get_by_text(GROUP, exact=True)
+    # 只检查当前聊天的标题；全页 header 可能包含其他弹窗或侧栏标题。
+    # WhatsApp 更新后，群名有时仅存在于 title 属性而非可见文本节点。
+    header = page.locator('#main header')
     if header.count() != 1 or not header.is_visible():
-        raise RuntimeError('聊天标题不是指定测试群，禁止发送')
+        raise RuntimeError('当前聊天标题未就绪，禁止发送')
+    names = header.locator('[title]')
+    for i in range(names.count()):
+        item = names.nth(i)
+        if item.get_attribute('title') == GROUP and item.is_visible():
+            return
+    exact = header.get_by_text(GROUP, exact=True)
+    if exact.count() == 1 and exact.is_visible():
+        return
+    raise RuntimeError('聊天标题不是指定测试群，禁止发送')
 
 
 def open_test_chat(page):

@@ -536,9 +536,18 @@ def reading():
           .record{border:1px solid #e2e9e2;border-radius:12px;padding:13px;margin:10px 0}
           .record-head{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
           .record-meta{font-size:14px;color:#66736a;margin-bottom:10px;overflow-wrap:anywhere}
+          .record-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:9px;margin-top:12px}
+          .record-grid .record{margin:0;padding:0;background:#f4f8f3;min-width:0;overflow:hidden}
+          .record-grid .record summary{padding:11px 9px;font-size:17px;font-weight:700;list-style:none;text-align:center;overflow-wrap:anywhere}
+          .record-grid .record summary::-webkit-details-marker{display:none}
+          .record-grid .record[open]{grid-column:span 2;background:#fff}
+          .record-grid .record[open] summary{background:#eef7ed}
+          .record-grid .record-meta{padding:9px 11px 0;margin-bottom:7px}
+          .record-grid .actions{padding:0 10px 10px}
+          .record-grid .actions .button-link{flex:1;font-size:13px;padding:7px 5px}
           .muted{color:#718074;font-size:15px}
           details summary{cursor:pointer;font-size:19px;font-weight:700;padding:5px 0}
-          @media(max-width:600px){body{padding:9px;font-size:16px}.card{padding:15px;border-radius:13px}h2{font-size:20px}.name-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.name-item{padding:10px;font-size:16px}.record-head{align-items:flex-start}.actions{width:100%}.actions .button-link{flex:1}}
+          @media(max-width:600px){.record-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.record-grid .record[open]{grid-column:span 2}body{padding:9px;font-size:16px}.card{padding:15px;border-radius:13px}h2{font-size:20px}.name-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.name-item{padding:10px;font-size:16px}.record-head{align-items:flex-start}.actions{width:100%}.actions .button-link{flex:1}}
         </style>
     </head>
     <body><main class="wrap">
@@ -597,16 +606,18 @@ def reading():
       <section class="card">
         <details>
           <summary>📋 {{ t.today_recorded }}（{{ today_records|length }}）</summary>
+          <div class="record-grid">
           {% for r in today_records %}
-          <div class="record">
-            <div class="record-head"><strong>{{ r["姓名"] }}</strong><span class="muted">{{ r["时间"] }}</span></div>
-            <div class="record-meta">{{ r["身份"] }} · {{ r["主题"] }}</div>
+          <details class="record">
+            <summary title="{{ r['身份'] }} · {{ r['主题'] }}">{{ r["姓名"] }}</summary>
+            <div class="record-meta">{{ r["时间"] }}<br>{{ r["身份"] }} · {{ r["主题"] }}</div>
             <div class="actions">
               <a class="button-link edit" href="/reading_edit/{{ r['id'] }}">{{ t.edit }}</a>
               <a class="button-link delete" href="/reading_delete/{{ r['id'] }}" onclick="return confirm({{ t.get("delete_confirm_simple", "确定删除这笔共修记录吗？" if not t.get("html_lang", "zh").startswith("en") else "Delete this study record?")|tojson }})">{{ t.delete_record }}</a>
             </div>
-          </div>
+          </details>
           {% else %}<p class="muted">今日暂无记录。</p>{% endfor %}
+          </div>
         </details>
       </section>
     </main>
