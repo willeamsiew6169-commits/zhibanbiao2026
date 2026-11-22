@@ -111,9 +111,9 @@ def index():
         {% for e in current %}<div class="hf-event"><b>{{e.location_name}}</b>｜{{e.team_name}}<br>
         ⏰ {{(e.starts_at|string)[:5]}}–{{(e.ends_at|string)[:5]}}<br>
         {% if e.maps_url %}<a href="{{e.maps_url}}" rel="noopener noreferrer" target="_blank">📍 地图导航</a>　{% endif %}
-        <a class="btn" href="{{url_for('hongfa.join',event_id=e.id)}}">🪷 现场签到</a></div>
+        </div>
         {% else %}<p>今日暂无已发布的弘法活动。</p>{% endfor %}
-        <p class="hf-muted">现场签到仅限活动当天，并须在负责人设定的签到时间内输入有效现场码。</p></div>
+        <p class="hf-muted">现场签到请扫描负责人展示的当天二维码。</p></div>
         <div class="card"><h2>📅 未来六天弘法安排</h2>
         {% for e in upcoming %}<div class="hf-event"><b>{{e.event_date}}｜{{e.team_name}}</b><br>
         📍 {{e.location_name}}<br>⏰ {{(e.starts_at|string)[:5]}}–{{(e.ends_at|string)[:5]}}
@@ -198,7 +198,7 @@ def dashboard():
         AND e.location_id IS NOT NULL AND e.team_id=ANY(%s) ORDER BY t.id''',
         (today, who['team_ids']), fetchall=True) or []
     return render('''<div class="card"><b style="font-size:24px">👤 {{display_name}}</b><div>{{role_label}} · {{who.id}}</div></div>
-        {% for e in today_events %}<a class="hf-tile hf-orange" style="margin:12px 0;min-height:65px" href="{{url_for('hongfa.event_code',event_id=e.id)}}">🔐 今日签到码｜{{e.team_name}}</a>{% endfor %}
+        {% for e in today_events %}<a class="hf-tile hf-orange" style="margin:12px 0;min-height:65px" href="{{url_for('hongfa.event_code',event_id=e.id)}}">📱 今日签到二维码｜{{e.team_name}}</a>{% endfor %}
         <div class="card"><h2>常用功能</h2><div class="hf-menu">
         <a class="hf-tile" href="/hongfa/plans"><span>📅</span>{{'审核发布' if who.secretary else '提交安排'}}</a>
         <a class="hf-tile hf-blue" href="/hongfa/week"><span>📋</span>每周时间表</a>

@@ -9,6 +9,7 @@ from flask import request, redirect, url_for, abort, session
 from psycopg2.extras import RealDictCursor
 from db import db_query, get_conn
 from attendance_service import find_volunteer, verify_pin_for_volunteer
+from .qr_signing import valid_qr
 
 TZ = ZoneInfo('Asia/Kuala_Lumpur')
 
@@ -34,14 +35,9 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
                     not leader and not who['secretary'] and row['team_id'] not in who['team_ids']): abort(403)
         return row
 
-    def check_code(e, code):
-        now=datetime.now(TZ)
-        digest=hashlib.sha256(f"{e['id']}:{code}".encode()).hexdigest()
-        return (e['status']=='published' and e['location_id'] and not e['closed_at'] and
-                e['event_date']==now.date() and e['code_hash'] and
-                e['code_valid_from'] and e['code_valid_until'] and
-                e['code_valid_from'] <= now <= e['code_valid_until'] and
-                hmac.compare_digest(e['code_hash'],digest))
+    def check_qr(e, token):
+        return (e['status']=='published' and e['location_id'] and not e['closed_at']
+                and e['event_date']==datetime.now(TZ).date() and valid_qr(e,token))
 
     def volunteer_id_from_form():
         """CHE 包含纯义工 8xx；STW 仍使用 STW-数字。"""
@@ -99,12 +95,14 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
     @bp.route('/join/<int:event_id>',methods=['GET','POST'])
     def join(event_id):
         e=event(event_id)
+        if request.method=='GET' and not check_qr(e,request.args.get('token','')):
+            abort(403,description='请扫描负责人现场展示的今日二维码。')
         error=''; guest_token=None
         if request.method=='POST':
             if not valid_csrf(): abort(400)
-            code=(request.form.get('code') or '').strip()
-            if not check_code(e,code):
-                error='现场码无效、签到时间未到／已过，或活动已结束。'
+            token=(request.form.get('token') or '').strip()
+            if not check_qr(e,token):
+                error='二维码无效、不是今天的二维码，或活动已结束。'
             else:
                 kind=request.form.get('kind')
                 if kind=='volunteer':
@@ -114,7 +112,7 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
                         error='义工编号或 PIN 不正确。'
                     else:
                         person_key='v:'+vid.upper()
-                        error=_insert_attendance(e,person_key,vid,None,None,None)
+                        error=_insert_attendance(e,person_key,vid,None,None,None,token=token)
                         if not error:
                             session['hongfa_book_volunteer'] = {'event_id': e['id'], 'vid': vid, 'date': e['event_date'].isoformat(), 'issued': datetime.now(TZ).timestamp()}
                 elif kind=='guest':
@@ -125,7 +123,7 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
                     else:
                         guest_token=secrets.token_urlsafe(18)
                         person_key='g:'+phone
-                        error=_insert_attendance(e,person_key,None,name,phone,hashlib.sha256(guest_token.encode()).hexdigest())
+                        error=_insert_attendance(e,person_key,None,name,phone,hashlib.sha256(guest_token.encode()).hexdigest(),token=token)
                         if error: guest_token=None
                 else: error='请选择签到身份。'
         return render('''<div class="card hf-public"><h2>🪷 现场弘法签到</h2>
@@ -137,7 +135,7 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
           {% if book_access %}<p><a class="btn" style="display:block;text-align:center;font-size:21px;padding:17px" href="{{url_for('hongfa.books')}}">📚 结缘经书／快速扣书</a></p>{% endif %}
           <p><a class="btn" href="{{url_for('hongfa.self_checkout')}}">👋 前往自助签退</a></p>
           {% else %}<form id="hf-form-join" method="post"><input type="hidden" name="csrf_token" value="{{csrf}}">
-          <div class="hf-field"><label for="hf-code">🔐 现场签到码</label><input id="hf-code" name="code" required inputmode="numeric" autocomplete="off" maxlength="4" minlength="4" pattern="[0-9]{4}" placeholder="负责人提供的4位数字"></div>
+          <input type="hidden" name="token" value="{{token}}">
           {{identity_ui|safe}}
           <div id="hf-vol-join">
             <div class="hf-field"><label for="hf-number-join">义工编号</label>
@@ -152,27 +150,66 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
             <div class="hf-field"><label for="hf-phone-join">电话号码</label><input id="hf-phone-join" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="例如 012-3456789"></div>
             <p class="hf-hint">新人签到成功后，请保存页面显示的签退凭证。</p>
           </div>
-          <button class="hf-submit" type="submit">✅ 确认签到</button></form>{% endif %}</div>''',e=e,error=error,success=request.method=='POST' and not error,guest_token=guest_token,book_access=(request.method=='POST' and not error and request.form.get('kind')=='volunteer'),csrf=csrf_token(),identity_ui=identity_ui('join'))
+          <button class="hf-submit" type="submit">✅ 确认签到</button></form>{% endif %}</div>''',e=e,error=error,token=(request.args.get('token') if request.method=='GET' else request.form.get('token','')),success=request.method=='POST' and not error,guest_token=guest_token,book_access=(request.method=='POST' and not error and request.form.get('kind')=='volunteer'),csrf=csrf_token(),identity_ui=identity_ui('join'))
 
-    def _insert_attendance(e,person_key,vid,name,phone,token_hash):
+    def _insert_attendance(e,person_key,vid,name,phone,token_hash,token=None,operator=None):
         # 数据库唯一索引 + 人员键事务锁，避免并发重复；日期跨活动检查在同一事务中。
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',(person_key,))
-                    cur.execute('SELECT status,closed_at,code_hash,code_valid_from,code_valid_until FROM hongfa_events WHERE id=%s FOR UPDATE',(e['id'],))
+                    cur.execute('SELECT id,event_date,location_id,status,closed_at FROM hongfa_events WHERE id=%s FOR UPDATE',(e['id'],))
                     locked=cur.fetchone()
-                    if not locked or locked['status']!='published' or locked['closed_at'] or locked['code_hash']!=e['code_hash'] or locked['code_valid_from']!=e['code_valid_from'] or locked['code_valid_until']!=e['code_valid_until'] or not check_code(e,request.form.get('code','').strip()):
-                        return '现场码已变更或活动已关闭，请重新进入。'
+                    if not locked or locked['status']!='published' or locked['closed_at'] or not locked['location_id'] or locked['event_date']!=datetime.now(TZ).date() or (operator is None and not valid_qr(locked,token)):
+                        return '签到已关闭或二维码无效，请重新进入。'
                     cur.execute('''SELECT 1 FROM hongfa_attendance a JOIN hongfa_events ev ON ev.id=a.event_id
                       WHERE a.person_key=%s AND ev.event_date=%s LIMIT 1''',(person_key,e['event_date']))
                     if cur.fetchone(): return '今天已经有弘法签到记录，不能重复签到。'
                     cur.execute('''INSERT INTO hongfa_attendance(event_id,person_key,volunteer_id,guest_name,guest_phone,guest_checkout_hash)
-                      VALUES (%s,%s,%s,%s,%s,%s)''',(e['id'],person_key,vid,name,phone,token_hash))
+                      VALUES (%s,%s,%s,%s,%s,%s) RETURNING id''',(e['id'],person_key,vid,name,phone,token_hash))
+                    inserted_id=cur.fetchone()['id']
+                    if operator:
+                        cur.execute('INSERT INTO hongfa_checkin_audit(attendance_id,operator_id,method) VALUES (%s,%s,%s)',(inserted_id,operator,'leader'))
             return ''
         except Exception as ex:
             if getattr(ex,'pgcode',None)=='23505': return '该人员已经签到，请勿重复。'
             raise
+
+    @bp.route('/attendance/<int:event_id>/leader-checkin',methods=['GET','POST'])
+    @guard
+    def leader_checkin(who,event_id):
+        e=event(event_id,who,leader=True)
+        if e['status']!='published' or e['closed_at'] or not e['location_id'] or e['event_date']!=datetime.now(TZ).date():
+            abort(409)
+        error=''; candidate=None; success=False
+        if request.method=='POST':
+            vid=volunteer_id_from_form()
+            vol=find_volunteer(vid) if vid else None
+            if not vol or str(vol.get('编号','')).upper()!=vid.upper() or vol.get('状态') not in ('在册','',None):
+                error='找不到有效在册义工。'
+            elif request.form.get('action')=='lookup':
+                candidate={'id':vid,'name':next((str(vol[k]).strip() for k in ('中文姓名','姓名','名字','name') if vol.get(k)),vid)}
+            elif request.form.get('action')=='confirm':
+                if request.form.get('confirm_present')!='yes':
+                    error='请先确认义工本人已在现场。'
+                else:
+                    error=_insert_attendance(e,'v:'+vid.upper(),vid,None,None,None,operator=who['id'])
+                    success=not error
+            else: abort(400)
+        return page('''<div class="card hf-public"><h2>👥 负责人现场义工签到</h2>
+          <div class="hf-sub"><b>{{e.team_name}}</b>｜{{e.event_date}}｜{{e.location_name}}</div>
+          {% if error %}<p class="warn">{{error}}</p>{% endif %}
+          {% if success %}<h3>✅ 现场签到成功</h3>{% endif %}
+          <form method="post"><input type="hidden" name="csrf_token" value="{{csrf}}">
+          <div class="hf-branch-row"><input type="hidden" name="branch" id="leader-branch" value="{{request.form.get('branch','CHE')}}">
+          <button type="button" onclick="var b=document.getElementById('leader-branch');b.value=b.value==='CHE'?'STW':'CHE';this.textContent=b.value;this.style.background=b.value==='CHE'?'#16854e':'#bb3030'">{{request.form.get('branch','CHE')}}</button>
+          <input name="number" inputmode="numeric" pattern="[0-9]+" required placeholder="输入义工编号数字" value="{{request.form.get('number','')}}"></div>
+          <button name="action" value="lookup">🔎 查询姓名</button>
+          {% if candidate %}<div class="hf-sub"><b style="font-size:23px">{{candidate.name}}｜{{candidate.id}}</b></div>
+          
+          <label><input type="checkbox" name="confirm_present" value="yes" required style="width:auto"> 我确认义工本人已到现场</label><br>
+          <button name="action" value="confirm">✅ 确认签到</button>{% endif %}
+          </form><p><a href="{{url_for('hongfa.event_attendance',event_id=e.id)}}">查看出席记录</a></p></div>''',e=e,error=error,success=success,candidate=candidate,request=request)
 
     @bp.route('/checkout',methods=['GET','POST'])
     def self_checkout():
@@ -249,11 +286,12 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
     def event_attendance(who,event_id):
         e=event(event_id,who)
         rows=db_query('''SELECT volunteer_id,guest_name,guest_phone,check_in_at,check_out_at,checkout_method,
-          ROUND(EXTRACT(EPOCH FROM (COALESCE(check_out_at,now())-check_in_at))/3600.0,2) AS hours
+          ROUND(EXTRACT(EPOCH FROM (COALESCE(check_out_at,now())-check_in_at))/3600.0,2) AS hours,
+          (SELECT operator_id FROM hongfa_checkin_audit h WHERE h.attendance_id=hongfa_attendance.id) AS checkin_operator
           FROM hongfa_attendance WHERE event_id=%s ORDER BY check_in_at''',(event_id,),fetchall=True) or []
         return page('''<div class="card"><h2>👥 {{e.team_name}}｜{{e.event_date}}</h2>
           <p>实际出席 {{rows|length}} 人</p>
-          {% for a in rows %}<p>{{a.volunteer_id or a.guest_name}}｜{{a.check_in_at}} → {{a.check_out_at or '未签退'}}
+          {% for a in rows %}<p>{{a.volunteer_id or a.guest_name}}｜{{a.check_in_at}} → {{a.check_out_at or '未签退'}}{% if a.checkin_operator %}｜负责人代签到：{{a.checkin_operator}}{% endif %}
           {% if a.check_out_at %}｜{{a.hours}} 小时{% endif %}</p>{% else %}<p>暂无签到。</p>{% endfor %}
           {% if e.team_id in who.team_ids and e.status=='published' and not e.closed_at and e.event_date == today %}
           <form method="post" action="{{url_for('hongfa.close_event',event_id=e.id)}}" onsubmit="return confirm('确定结束活动？未签退人员将以当前实际时间签退。')">

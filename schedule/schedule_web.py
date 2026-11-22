@@ -368,13 +368,59 @@ def get_fixed_buddha_for_date(date_str):
     return get_base_fixed_buddha_for_date(date_str)
 
 
-def delete_buddha_override(date_str):
-    """恢复指定日期的固定轮值。"""
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute('DELETE FROM schedule_buddha_overrides WHERE duty_date=%s', (date_str,))
-        conn.commit()
+def _sync_buddha_assignments(cur, date_str, names):
+    """仅同步该日期的整理佛台名单；不触碰其他岗位、报名或签到记录。"""
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("buddha:" + date_str,))
+    cur.execute("""
+        SELECT id, name, remarks FROM volunteer_schedule_assignments
+        WHERE assignment_date=%s AND role='整理佛台'
+          AND COALESCE(status,'assigned') <> 'cancelled'
+        ORDER BY id FOR UPDATE
+    """, (date_str,))
+    rows = cur.fetchall()
+    cur.execute("SELECT is_published, extra_buddha_person FROM schedule_day_flags WHERE flag_date=%s", (date_str,))
+    flag = cur.fetchone() or {}
+    # 未生成排班时仅保存覆盖名单；正式排班生成时原有 builder 会读取它。
+    if not rows and not flag.get('is_published'):
+        return False
 
+    extra = str(flag.get('extra_buddha_person') or '').strip()
+    desired = list(dict.fromkeys([str(n).strip() for n in names if str(n).strip()] + ([extra] if extra else [])))
+    existing = set()
+    changed = False
+    for row in rows:
+        name = str(row.get('name') or '').strip()
+        if name not in desired or name in existing:
+            cur.execute("DELETE FROM volunteer_schedule_assignments WHERE id=%s", (row['id'],))
+            changed = True
+        else:
+            existing.add(name)
+    for name in desired:
+        if name in existing:
+            continue
+        cur.execute("SELECT id FROM volunteers WHERE name=%s AND status='在册' ORDER BY id LIMIT 1", (name,))
+        person = cur.fetchone()
+        cur.execute("""
+            INSERT INTO volunteer_schedule_assignments
+                (volunteer_id, name, assignment_date, role, shift_label,
+                 assigned_place, status, remarks, created_at)
+            VALUES (%s,%s,%s,'整理佛台','整理佛台','整理佛台',
+                    'assigned','负责人佛台特别安排',NOW())
+        """, ((person or {}).get('id'), name, date_str))
+        changed = True
+    return changed and bool(flag.get('is_published'))
+
+
+def delete_buddha_override(date_str):
+    """恢复指定日期的固定轮值，并同步已生成的佛台排班。"""
+    names = get_base_fixed_buddha_for_date(date_str)
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute('DELETE FROM schedule_buddha_overrides WHERE duty_date=%s', (date_str,))
+            republish = _sync_buddha_assignments(cur, date_str, names)
+        conn.commit()
+    if republish:
+        mark_schedule_need_republish(date_str)
 
 
 
@@ -403,17 +449,21 @@ def save_prebook_record(record):
     
 
 def save_buddha_override(date_str, final_names):
-    """按日期保存云端佛台覆盖名单，空名单也必须保存。"""
+    """保存云端佛台覆盖名单，并在同一事务同步已生成的佛台排班。"""
     names = list(dict.fromkeys(str(n).strip() for n in final_names if str(n).strip()))
     with get_conn() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 INSERT INTO schedule_buddha_overrides (duty_date, names, updated_at)
                 VALUES (%s, %s::jsonb, NOW())
                 ON CONFLICT (duty_date) DO UPDATE
                 SET names=EXCLUDED.names, updated_at=NOW()
             """, (date_str, __import__('json').dumps(names, ensure_ascii=False)))
+            republish = _sync_buddha_assignments(cur, date_str, names)
         conn.commit()
+    if republish:
+        mark_schedule_need_republish(date_str)
+
 
 
 def delete_prebook_record(record):

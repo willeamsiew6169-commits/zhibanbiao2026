@@ -245,6 +245,10 @@ body { background-color: #F0F8F1 !important; }
 
     <div class="card">
 
+        <div class="admin-link">
+            <a href="/schedule/admin">🔐 管理员入口</a>
+        </div>
+
         <div class="volunteer-hero">
             <div class="volunteer-lotus">🪷</div>
             <div class="volunteer-title">蕉赖共修会义工报名</div>
@@ -274,7 +278,7 @@ body { background-color: #F0F8F1 !important; }
             {% if multi_day_signup_open %}
             <a
                 class="btn-tool btn-blue"
-                style="background:#ea580c !important;color:#fff;grid-column:1 / -1;"
+                style="background:#ea580c !important;color:#fff;{% if not meal_signup_open %}grid-column:1 / -1;{% endif %}"
                 href="/volunteer/prebook">
                 <span class="action-main-text">📅 下个月多日报名</span>
                 <span class="action-sub-text">一次报名多个日期</span>
@@ -327,10 +331,6 @@ body { background-color: #F0F8F1 !important; }
             <a class="btn-tool btn-blue" href="/volunteer/guide">
                 📖 义工须知
             </a>
-        </div>
-
-        <div class="admin-link">
-            <a href="/schedule/admin">🔐 管理员入口</a>
         </div>
 
     </div>

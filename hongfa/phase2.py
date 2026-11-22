@@ -149,7 +149,7 @@ def register_phase2(bp, actor, render, csrf_token, valid_csrf):
           <button name="decision" value="published">批准发布</button>
           <button name="decision" value="rejected" style="background:#a33">退回</button></form>{% endif %}
           {% if e.status == 'published' and e.location_name and e.event_date >= today and not who.secretary %}
-          <a class="hf-code-button" href="{{url_for('hongfa.event_code',event_id=e.id)}}">🔐 生成／查看签到码</a>{% endif %}
+          <a class="hf-code-button" href="{{url_for('hongfa.event_code',event_id=e.id)}}">📱 查看今日签到二维码</a>{% endif %}
           </div>{% else %}<p>暂无安排。</p>{% endfor %}</div>''',
           who=who, error=error, teams=teams, locations=locations, rows=rows, today=datetime.now(TZ).date())
 
@@ -321,59 +321,24 @@ def register_phase2(bp, actor, render, csrf_token, valid_csrf):
           grid=grid, whatsapp=whatsapp, start=start, end=end-timedelta(days=1),
           prev=start-timedelta(days=7), nxt=end)
 
-    @bp.route('/plans/<int:event_id>/code',methods=['GET','POST'])
+    @bp.route('/plans/<int:event_id>/code',methods=['GET'])
     @guard()
     def event_code(who,event_id):
+        from .qr_signing import qr_token, qr_png_data
         e=event_for(who,event_id,leader_only=True)
-        if e['status'] != 'published' or not e['location_id'] or e['closed_at']:
+        if e['status']!='published' or not e['location_id'] or e['closed_at']:
             abort(409)
-        today=datetime.now(TZ).date()
-        # 现场码仅当天生成；不在数据库保存明文。
-        if e['event_date'] != today:
-            return page('''<div class="card"><h2>🔐 今日签到码｜{{e.team_name}}</h2>
-              <p>{{e.event_date}}｜{{e.location_name}}</p>
-              <p>⏳ 活动当天才可以生成签到码。</p></div>''',e=e)
-        secret=current_app.secret_key
-        if not secret:
-            abort(503,description='服务器尚未配置固定 SECRET_KEY，无法安全生成签到码。')
-        key=secret.encode('utf-8') if isinstance(secret,str) else secret
-        # 同一活动同一天使用同一4位码，刷新页面不会改变。
-        seed=hmac.new(key,f'hongfa-code-v1:{event_id}:{e["event_date"]}'.encode(),hashlib.sha256).digest()
-        code=f'{1000+int.from_bytes(seed[:8],"big")%9000:04d}'
-        digest=hashlib.sha256(f'{event_id}:{code}'.encode()).hexdigest()
-        error=''
-        if request.method=='POST':
-            if not e['starts_at'] or not e['ends_at']:
-                error='活动尚未设置开始及结束时间。'
-            else:
-                start=datetime.combine(today,e['starts_at'].replace(tzinfo=None),tzinfo=TZ)-timedelta(minutes=30)
-                end=datetime.combine(today,e['ends_at'].replace(tzinfo=None),tzinfo=TZ)+timedelta(minutes=30)
-                # 活动开始/结束时间自动延伸30分钟，但窗口仅限当天。
-                start=max(start,datetime.combine(today,datetime.min.time(),tzinfo=TZ))
-                end=min(end,datetime.combine(today,datetime.max.time(),tzinfo=TZ))
-                if start>=end:
-                    error='活动时间设置不正确。'
-                else:
-                    # 已生成时不重复写入；旧6位码须明确点击替换。
-                    replace_old=request.form.get('replace_old')=='1'
-                    db_query('''UPDATE hongfa_events SET code_hash=%s,code_valid_from=%s,code_valid_until=%s
-                      WHERE id=%s AND status='published' AND closed_at IS NULL
-                      AND (code_hash IS NULL OR (%s AND code_hash<>%s))''',
-                      (digest,start,end,event_id,replace_old,digest))
-            e=event_for(who,event_id,leader_only=True)
-        ready=(e['code_hash']==digest and e['code_valid_from'] and e['code_valid_until'])
-        legacy=bool(e['code_hash'] and not ready)
-        return page('''<div class="card" style="max-width:640px;margin:auto;text-align:center">
-          <h2 style="font-size:28px">🔐 今日签到码｜{{e.team_name}}</h2>
-          <p style="font-size:19px">{{e.event_date}}｜{{e.location_name}}</p>
-          {% if error %}<p class="warn">{{error}}</p>{% endif %}
-          {% if ready %}<p style="font-size:20px">今日签到码</p>
-          <div style="font-size:64px;font-weight:800;letter-spacing:10px;color:#137e4c">{{code}}</div>
-          <p>有效时间：{{e.code_valid_from.strftime('%H:%M')}} – {{e.code_valid_until.strftime('%H:%M')}}</p>
-          {% else %}{% if legacy %}<p class="warn">此活动已有旧版现场码，点击下方按钮将替换旧码。</p>{% endif %}
-          <form method="post"><input type="hidden" name="csrf_token" value="{{csrf}}">
-          {% if legacy %}<input type="hidden" name="replace_old" value="1">{% endif %}
-          <button style="font-size:23px;padding:16px 25px" type="submit">🟢 一键生成今日签到码</button></form>{% endif %}
-          <p style="font-size:18px"><a href="{{url_for('hongfa.join',event_id=e.id)}}">📱 师兄现场签到</a>　
-          <a href="{{url_for('hongfa.event_attendance',event_id=e.id)}}">👥 查看出席</a></p>
-          </div>''',e=e,error=error,code=code,ready=ready,legacy=legacy)
+        if e['event_date']!=datetime.now(TZ).date():
+            return page('<div class="card"><h2>📱 今日签到二维码</h2><p>活动当天才显示二维码。</p></div>')
+        token=qr_token(e['id'],e['event_date'])
+        join_url=url_for('hongfa.join',event_id=e['id'],token=token,_external=True)
+        png=qr_png_data(join_url)
+        return page('''<div class="card" style="max-width:600px;text-align:center;margin:auto">
+          <h2>📱 今日签到二维码｜{{e.team_name}}</h2>
+          <p>{{e.event_date}}｜📍 {{e.location_name}}</p>
+          <img src="data:image/png;base64,{{png}}" alt="现场签到二维码" style="width:min(90%,360px);height:auto">
+          <p>请让现场义工扫描此二维码，并输入本人编号及 PIN。</p>
+          <p>当天二维码保持不变；活动结束后自动失效。</p>
+          <a class="btn" href="{{url_for('hongfa.leader_checkin',event_id=e.id)}}">👥 现场义工签到（无需扫码）</a>
+          <p><a href="{{url_for('hongfa.event_attendance',event_id=e.id)}}">查看出席</a></p>
+          </div>''',e=e,png=png)

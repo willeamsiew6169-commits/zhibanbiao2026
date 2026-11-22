@@ -3449,6 +3449,18 @@ def volunteer_day_info():
 
     cleaning_open, cleaning_cutoff_hour, _ = cleaning_signup_window(date_obj)
 
+    # 卫生有效报名满3位时隐藏按钮；沿用报名提交时相同的人数口径。
+    if cleaning_open:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT count(*) AS cnt
+                    FROM volunteer_schedule_signups
+                    WHERE signup_date = %s AND role = '卫生'
+                      AND coalesce(status, 'pending') <> 'cancelled'
+                """, (date_obj,))
+                cleaning_open = int(cur.fetchone()['cnt'] or 0) < 3
+
     return {
         "ok": True,
         "cleaning_signup_open": cleaning_open,
