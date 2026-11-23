@@ -1264,12 +1264,6 @@ function showSigninModal(data){
   const content=document.getElementById('signinModalContent');
   content.replaceChildren();
   const modal=document.getElementById('signinModal');
-  if ((data.open_roles || []).length) {
-    title.textContent=LIST_LANG_ZH?'🟡 您目前正在服务中':'🟡 Currently checked in';
-    const p=document.createElement('p');p.style.cssText='text-align:center;font-size:20px;line-height:1.6';
-    p.textContent=LIST_LANG_ZH?'请先完成当前岗位签退，再签到其他岗位。':'Please check out of the current role before checking in again.';
-    content.appendChild(p);modal.style.display='flex';return;
-  }
   const now=signinModalNowMinutes();
   const defaults={'卫生':'08:00','佛台':'08:00','供花':'08:00','供果':'08:00','供台':'06:00','膳食':'08:00','佛学班':'10:00'};
   signinModalChoices=(data.eligible_roles||[]).map((item,index)=>{
@@ -1306,6 +1300,17 @@ function showSigninModalConfirm(index){
   info.textContent=item.label;
   content.appendChild(info);
   if(item.shift){const detail=document.createElement('div');detail.style.cssText='text-align:center;font-size:19px;margin:8px 0 20px';detail.textContent=[item.shift.assigned_place,[item.shift.start_time,item.shift.end_time].filter(Boolean).join(' ～ ')].filter(Boolean).join(' · ');content.appendChild(detail);}
+  // 转换岗位：后台会在新岗位签到事务中结束上一岗位；不在前端提前签退。
+  const openRoles=(window.lastAttendanceLookup?.open_roles||[])
+    .filter(role=>!(role==='值班' && item.role==='供台') && !(role==='供台' && item.role==='值班'));
+  if(openRoles.length){
+    const note=document.createElement('div');
+    note.style.cssText='margin:14px 0;padding:13px;background:#fff8e6;border:1px solid #f1d99b;border-radius:12px;font-size:18px;line-height:1.6;text-align:center';
+    note.textContent=LIST_LANG_ZH
+      ? '确认后将自动结束「'+openRoles.map(r=>ROLE_LABELS[r]||r).join('、')+'」，并开始「'+item.label+'」签到。'
+      : 'Confirm to automatically check out of '+openRoles.map(r=>ROLE_LABELS[r]||r).join(', ')+' and check in to '+item.label+'.';
+    content.appendChild(note);
+  }
   let cardInput=null;
   if(item.role==='值班'){
     const label=document.createElement('label');label.textContent=LIST_LANG_ZH?'义工卡号':'Volunteer card number';label.style.cssText='display:block;font-size:20px;font-weight:700;margin-top:14px';
