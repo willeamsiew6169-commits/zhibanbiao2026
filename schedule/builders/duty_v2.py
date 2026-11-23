@@ -4,6 +4,25 @@ from schedule.builders.time_utils import parse_min, min_to_ampm
 PLACES = ("观音堂", "活动中心")
 BOUNDARIES = (600, 840)  # 绿/橙/黄班边界
 
+MEAL_CENTER_IDS = frozenset({"STW-158", "CHE-228", "CHE-116", "CHE-184", "CHE-50"})
+
+def is_meal_center_day(target_date):
+    """只在初一、十五、观音三大日及恩师涅槃日生效。"""
+    if not target_date:
+        return False
+    from datetime import date
+    from lunar_rules import get_special_day_info
+    day = date.fromisoformat(str(target_date)[:10])
+    info = get_special_day_info(day)
+    return (info.get("lunar_day") in (1, 15)
+            or (info.get("lunar_month"), info.get("lunar_day"))
+            in {(2, 19), (6, 19), (9, 19), (10, 6)})
+
+def is_fixed_center(person, meal_center_day=False):
+    return (_id(person) == "STW-152"
+            or (meal_center_day and _id(person) in MEAL_CENTER_IDS
+                and _start(person) is not None and _start(person) < 780))
+
 
 def shift_of(t):
     return "绿" if t < 600 else "橙" if t < 840 else "黄"
@@ -26,11 +45,11 @@ def _history_score(p, place, history):
     return counts.get(place, 0)
 
 
-def _options(person):
+def _options(person, meal_center_day=False):
     s, e = _start(person), _end(person)
     if s is None or e is None or e <= s:
         return []
-    fixed = "活动中心" if _id(person) == "STW-152" else None
+    fixed = "活动中心" if is_fixed_center(person, meal_center_day) else None
     places = (fixed,) if fixed else PLACES
     opts = [[(s, e, place)] for place in places]
     # 非必要不拆；仅有实际换岗意义的切点。跨班界线在输出时单独切开。
@@ -48,7 +67,7 @@ def _options(person):
     return opts
 
 
-def _score(assignments, fixed, history, existing=(), cleaning=None):
+def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_day=False):
     all_segments = list(fixed)
     for _, segments in assignments:
         all_segments.extend(segments)
@@ -110,11 +129,11 @@ def _score(assignments, fixed, history, existing=(), cleaning=None):
         (p1, seg1), (p2, seg2) = assignments
         if (_start(p1) == _start(p2) and _end(p1) == _end(p2)
                 and _end(p1) - _start(p1) >= 240
-                and _id(p1) != "STW-152" and _id(p2) != "STW-152"):
+                and not is_fixed_center(p1, meal_center_day) and not is_fixed_center(p2, meal_center_day)):
             rotation_penalty = sum(len(segs) == 1 for _, segs in assignments)
     # 同日轮替按编号汇总，已发布记录仅作为参考。
     by_id = {}
-    active = {_id(person) for person, _ in assignments} - {"", "STW-152"}
+    active = {_id(person) for person, _ in assignments if not is_fixed_center(person, meal_center_day)} - {""}
     for row in existing:
         identity = _id(row)
         a,b = _start(row),_end(row)
@@ -144,9 +163,10 @@ def _split_shift(segments):
             yield s,e,place
 
 
-def plan(people, existing=(), history=None, cleaning=None):
+def plan(people, existing=(), history=None, cleaning=None, target_date=None):
     """people: 本次允许安排的义工；existing: 已发布、不可修改的地点区间。"""
     history = history or {}
+    meal_center_day = is_meal_center_day(target_date)
     existing = list(existing)
     fixed = []
     for row in existing:
@@ -154,21 +174,21 @@ def plan(people, existing=(), history=None, cleaning=None):
         place = row.get("assigned_place") or row.get("place")
         if s is not None and e is not None and e > s and place in PLACES:
             fixed.append((s,e,place))
-    people = [p for p in people if _options(p)]
+    people = [p for p in people if _options(p, meal_center_day)]
     # 先安排时间覆盖较长的人，确保少人日的基本覆盖。
     people.sort(key=lambda p: (_start(p), -(_end(p)-_start(p)), _id(p), str(p.get("name") or "")))
     chosen = []
     for p in people:
-        options = _options(p)
-        best = min(options, key=lambda segs: _score(chosen+[(p,segs)], fixed, history, existing, cleaning))
+        options = _options(p, meal_center_day)
+        best = min(options, key=lambda segs: _score(chosen+[(p,segs)], fixed, history, existing, cleaning, meal_center_day))
         chosen.append((p,best))
     # 未发布完整排班可反复改善，补排时 existing 永远不变。
     for _ in range(5):
         improved = False
         for i,(p,current) in enumerate(chosen):
-            options = _options(p)
-            best = min(options, key=lambda segs: _score(chosen[:i]+[(p,segs)]+chosen[i+1:], fixed, history, existing, cleaning))
-            if _score(chosen[:i]+[(p,best)]+chosen[i+1:], fixed, history, existing, cleaning) < _score(chosen,fixed,history,existing,cleaning):
+            options = _options(p, meal_center_day)
+            best = min(options, key=lambda segs: _score(chosen[:i]+[(p,segs)]+chosen[i+1:], fixed, history, existing, cleaning, meal_center_day))
+            if _score(chosen[:i]+[(p,best)]+chosen[i+1:], fixed, history, existing, cleaning, meal_center_day) < _score(chosen,fixed,history,existing,cleaning,meal_center_day):
                 chosen[i] = (p,best)
                 improved = True
         if not improved:
@@ -181,13 +201,13 @@ def plan(people, existing=(), history=None, cleaning=None):
             for j in range(i+1,len(chosen)):
                 p1,s1 = chosen[i]
                 p2,s2 = chosen[j]
-                current_score = _score(chosen, fixed, history, existing, cleaning)
+                current_score = _score(chosen, fixed, history, existing, cleaning, meal_center_day)
                 best = None
-                for a in _options(p1):
-                    for b in _options(p2):
+                for a in _options(p1, meal_center_day):
+                    for b in _options(p2, meal_center_day):
                         candidate = list(chosen)
                         candidate[i],candidate[j] = (p1,a),(p2,b)
-                        score = _score(candidate, fixed, history, existing, cleaning)
+                        score = _score(candidate, fixed, history, existing, cleaning, meal_center_day)
                         if score < current_score:
                             current_score,best = score,candidate
                 if best is not None:
@@ -199,8 +219,8 @@ def plan(people, existing=(), history=None, cleaning=None):
     if len(chosen) == 2 and not fixed:
         p1, _ = chosen[0]
         p2, _ = chosen[1]
-        best_pair = min(((a,b) for a in _options(p1) for b in _options(p2)),
-                        key=lambda pair: _score([(p1,pair[0]),(p2,pair[1])], fixed, history, existing, cleaning))
+        best_pair = min(((a,b) for a in _options(p1, meal_center_day) for b in _options(p2, meal_center_day)),
+                        key=lambda pair: _score([(p1,pair[0]),(p2,pair[1])], fixed, history, existing, cleaning, meal_center_day))
         chosen = [(p1,best_pair[0]), (p2,best_pair[1])]
     result = []
     for person,segments in chosen:

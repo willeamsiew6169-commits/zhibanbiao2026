@@ -32,7 +32,7 @@ PAGE = '''<!doctype html>
 {% else %}
 <section class="report-card"><div class="section-top"><span class="icon">📅</span><div><h2>选择报表期间</h2><p>选择需要下载的年份与月份</p></div></div><div class="report-row"><div class="field"><label for="year">报表年份</label><select id="year">{% for y in years %}<option value="{{y}}" {% if y==current_year %}selected{% endif %}>{{y}} 年</option>{% endfor %}</select></div><div class="field"><label for="month">报表月份</label><select id="month">{% for m in range(1,13) %}<option value="{{m}}" {% if m==current_month %}selected{% endif %}>{{m}} 月</option>{% endfor %}</select></div></div></section>
 <section class="report-card"><div class="section-top"><span class="icon">📥</span><div><h2>下载 Excel 报表</h2><p>保留原有 Excel 报表格式</p></div></div><div class="button-grid"><a class="report-button" id="month-download" href="#">📄 下载月报 Excel ↓</a><a class="report-button alt" id="year-download" href="#">📚 下载年报 Excel ↓</a></div><div class="report-note">ℹ️ 月报每次从 Supabase 实时生成，报名资料尚未核实，月明细报名栏显示「—」，不可据此判断报名异常。年报仍下载 Supabase Storage 中已上传的文件，不会自动更新。</div></section>
-<section class="report-card footer"><a href="{{ url_for('admin.admin_home') }}">← 返回管理员中心</a><a href="{{ url_for('reports.logout') }}">退出报表中心 ↗</a></section>
+<section class="report-card footer"><a href="/schedule/admin">← 返回负责人排班系统</a><a href="{{ url_for('reports.logout') }}">退出报表中心 ↗</a></section>
 <script>
 function updateReportLinks(){
  const y=document.getElementById('year').value;

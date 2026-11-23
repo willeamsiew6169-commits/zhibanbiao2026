@@ -49,12 +49,13 @@ def build_roster_message(date_obj, arranged, special_info, remove_info, kind):
     if special_info.get("setup_shifu") or setup_people:
         master.extend(["6:00am~8:00am 或", "6:00am~完成供台工作", "设师父供台:", setup_people or "待安排"])
     if remove_info.get("need_remove_today_after_12") or remove_people:
-        master.extend(["12:00pm~2:00pm", "收师父供台:", remove_people or "待安排", "12pm的香结束之后，请下供桌。"])
+        master.extend(["12:00pm~2:00pm", "请下师父供台:", remove_people or "待安排", "12pm的香结束之后，请下供桌。"])
     master_section = "\n\n".join(["\n".join(master)]) if master else ""
 
     green_section = ""
     if arranged.get("绿观音堂") or arranged.get("绿活动中心") or big_day:
-        green_section = f"""8:00am~10:00am
+        green_section = f"""［值班］
+8:00am~10:00am
 🟢 观音堂:
 {format_shift_block(arranged.get('绿观音堂', []))}
 
@@ -84,14 +85,13 @@ def build_roster_message(date_obj, arranged, special_info, remove_info, kind):
         f"•二楼卫生: {format_people_inline(arranged.get('二楼卫生', []))}",
         f"•楼梯卫生: {format_people_inline(arranged.get('楼梯卫生', []), sep='/')}",
         "每日卫生义工请注意：清理完卫生之后，请把卫生用具包括吸尘机放回原位（活动中心store里面的小房间）",
-        "［值班］",
     ])
     if green_section:
         sections.append(green_section)
     orange_icon = "🔴" if kind == "festival" else "🟠"
     sections.extend([
-        f"10:00am-2:00pm\n\n{orange_icon} 观音堂:\n{format_shift_block(arranged.get('橙观音堂', []))}\n\n{orange_icon} 活动中心:\n{format_shift_block(arranged.get('橙活动中心', []))}",
-        f"2:00pm~6:00pm\n\n🟡 观音堂:\n{format_shift_block(arranged.get('黄观音堂', []))}\n\n🟡 活动中心:\n{format_shift_block(arranged.get('黄活动中心', []))}",
+        f"［值班］\n10:00am-2:00pm\n\n{orange_icon} 观音堂:\n{format_shift_block(arranged.get('橙观音堂', []))}\n\n{orange_icon} 活动中心:\n{format_shift_block(arranged.get('橙活动中心', []))}",
+        f"［值班］\n2:00pm~6:00pm\n\n🟡 观音堂:\n{format_shift_block(arranged.get('黄观音堂', []))}\n\n🟡 活动中心:\n{format_shift_block(arranged.get('黄活动中心', []))}",
         WHATSAPP_FOOTER,
     ])
     # 日期行不插空行；岗位标题紧接时间，卫生地点连续显示。

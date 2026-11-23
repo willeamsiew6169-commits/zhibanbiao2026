@@ -247,7 +247,7 @@ def patch_schedule_for_date(date_str, only_signup_id=None):
                 """, (date_str,), fetchall=True) or []
                 arranged = plan([person], existing=existing,
                                 history=load_place_history_cache(),
-                                cleaning=_v2_cleaning_rows(cleaning_rows))
+                                cleaning=_v2_cleaning_rows(cleaning_rows), target_date=date_str)
                 target_rows = [dict(item, assigned_place=key[1:],
                                     shift_label=key[0]) for key,item in arranged]
                 return sync_patch_assignments(date_str, target_rows,
@@ -347,6 +347,12 @@ def patch_schedule_for_date(date_str, only_signup_id=None):
                         if str(volunteer_id or "").strip().upper() == "STW-152":
                             return "活动中心"
 
+                        from schedule.builders.duty_v2 import MEAL_CENTER_IDS, is_meal_center_day
+                        if (is_meal_center_day(date_str)
+                                and str(volunteer_id or "").strip().upper() in MEAL_CENTER_IDS
+                                and start_min < 780):
+                            return "活动中心"
+
                         rows = db_query("""
                             select assigned_place, count(*) as cnt
                             from volunteer_schedule_assignments
@@ -400,7 +406,12 @@ def patch_schedule_for_date(date_str, only_signup_id=None):
                             # 两段时尽量换地点；STW-152 除外
                             if (
                                 last_place is not None
-                                and str(signup.get("volunteer_id") or "").strip().upper() != "STW-152"
+                                and not (
+                                    str(signup.get("volunteer_id") or "").strip().upper() == "STW-152"
+                                    or (is_meal_center_day(date_str)
+                                        and str(signup.get("volunteer_id") or "").strip().upper() in MEAL_CENTER_IDS
+                                        and start_min < 780)
+                                )
                                 and place == last_place
                             ):
                                 place = "活动中心" if place == "观音堂" else "观音堂"
@@ -766,7 +777,7 @@ def _replace_duty_signup_atomic(signup_id, date_str):
                   AND COALESCE(status,'assigned') <> 'cancelled'
             """, (date_str,))
             arranged = plan([person], existing=existing, history=history,
-                            cleaning=_v2_cleaning_rows(cur.fetchall()))
+                            cleaning=_v2_cleaning_rows(cur.fetchall()), target_date=date_str)
             if not arranged:
                 raise ValueError('V2 未能生成有效值班安排，保留原有记录')
 
@@ -1113,7 +1124,7 @@ def _v2_cleaning_rows(rows):
     return _v2_cleaning_context(result)
 
 
-def auto_assign_new_duty(result):
+def auto_assign_new_duty(result, target_date=None):
     """V2：覆盖优先、历史公平、按需换岗；仅处理本次 result 的值班人员。"""
     from schedule.builders.duty_v2 import plan
     duty_keys = [f"{shift}{place}" for shift in ("绿", "橙", "黄")
@@ -1122,7 +1133,7 @@ def auto_assign_new_duty(result):
             if isinstance(person, dict)]
     # 历史仅作次级决策，不改变数据库中的任何历史记录。
     history = load_place_history_cache()
-    rows = plan(pool, history=history, cleaning=_v2_cleaning_context(result))
+    rows = plan(pool, history=history, cleaning=_v2_cleaning_context(result), target_date=target_date)
     for key in duty_keys:
         result[key] = []
     for key, person in rows:
@@ -2471,14 +2482,14 @@ def assign_jobs(fixed_people, signup_df, special_info, patch_mode=False, cleanin
         # assignments 只保存每人一条，防止重复签到和历史统计失真。
 
     if patch_mode:
-        result = auto_assign_new_duty(result)
+        result = auto_assign_new_duty(result, target_date=target_date)
     else:
-        result = auto_assign_duty(result)
+        result = auto_assign_duty(result, target_date=target_date)
 
     return result
 
     
-def auto_assign_duty(result):
+def auto_assign_duty(result, target_date=None):
     """V2：覆盖优先、历史公平、按需换岗；仅处理本次 result 的值班人员。"""
     from schedule.builders.duty_v2 import plan
     duty_keys = [f"{shift}{place}" for shift in ("绿", "橙", "黄")
@@ -2487,7 +2498,7 @@ def auto_assign_duty(result):
             if isinstance(person, dict)]
     # 历史仅作次级决策，不改变数据库中的任何历史记录。
     history = load_place_history_cache()
-    rows = plan(pool, history=history, cleaning=_v2_cleaning_context(result))
+    rows = plan(pool, history=history, cleaning=_v2_cleaning_context(result), target_date=target_date)
     for key in duty_keys:
         result[key] = []
     for key, person in rows:

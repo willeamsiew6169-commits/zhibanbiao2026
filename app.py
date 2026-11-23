@@ -28,6 +28,7 @@ from manifest import manifest_bp
 from db import db_query, get_conn
 from library_web import library_bp
 from reading_web import reading_bp
+from calendar_web import calendar_bp
 from xfz_web import xfz_bp
 from donation_web import donation_bp
 from hongfa.routes import hongfa_bp
@@ -121,6 +122,7 @@ app.register_blueprint(schedule_bp)
 app.register_blueprint(manifest_bp)
 app.register_blueprint(finance_bp)
 app.register_blueprint(reading_bp)
+app.register_blueprint(calendar_bp)
 app.register_blueprint(library_bp)
 app.register_blueprint(member_bp)
 app.register_blueprint(people_bp)
@@ -896,6 +898,14 @@ PAGE = """
       </div>
     </div>
 
+    {% if calendar_is_open %}
+    <div class="card center">
+      <h2 class="section-title">📅 {{ '日历领取' if t.html_lang.startswith('zh') else 'Calendar Collection' }}</h2>
+      <div class="page-subtitle">{{ '领取登记、佛友领取及弘法日历管理' if t.html_lang.startswith('zh') else 'Calendar collection and distribution' }}</div>
+      <div class="btn-row single-btn-row"><a class="btn-tool btn-primary small-action-btn" href="/calendar">{{ '进入日历领取' if t.html_lang.startswith('zh') else 'Open calendar collection' }}</a></div>
+    </div>
+    {% endif %}
+
     <div class="card center">
       <h2 class="section-title">📜 {{ '经文组合记录' if t.html_lang.startswith('zh') else 'XFZ Records' }}</h2>
       <div class="page-subtitle">{{ '结缘、烧送与库存管理' if t.html_lang.startswith('zh') else 'Offerings, burning & balance' }}</div>
@@ -1234,13 +1244,48 @@ async function lookupVolunteer() {
       box.innerHTML = html;
     }
 
-     if (pin && data.volunteer.pin_ok) showSigninModal(data);
+     if (pin && data.volunteer.pin_ok) {
+      showCalendarClaim(box, finalId, pin, lookupKey);
+      showSigninModal(data);
+    }
   } else {
     box.className = 'alert alert-danger';
     updateSigninOnlyVisibility(false);
     window.lastAttendanceLookup = null;
     box.innerHTML = `${TXT.not_found_id}：${finalId}`;
   }
+}
+
+async function showCalendarClaim(box, number, pin, lookupKey) {
+  try {
+    const f=new FormData();f.set('number',number);f.set('pin',pin);
+    const response=await fetch('/calendar/lookup',{method:'POST',body:f});
+    const data=await response.json();
+    if (!data.ok || data.status || currentLookupKey()!==lookupKey) return;
+    const panel=document.createElement('div');
+    panel.style.cssText='margin-top:14px;padding:14px;border:2px solid #a6d6b3;border-radius:12px;background:#f1fff4';
+    const heading=document.createElement('div');heading.style.cssText='font-size:20px;font-weight:800;margin-bottom:8px';
+    heading.textContent=LIST_LANG_ZH?'📅 '+data.year+'年日历：尚未领取':'📅 '+data.year+' calendar: Not collected';
+    panel.appendChild(heading);
+    const tip=document.createElement('div');tip.style.cssText='margin-bottom:10px;font-size:15px';
+    tip.textContent=LIST_LANG_ZH?'领取日历后再点击登记；不影响正常签到。':'Record only after collecting; check-in is unaffected.';
+    panel.appendChild(tip);
+    for (const [status,label] of [['claimed',LIST_LANG_ZH?'✅ 已领取1本':'✅ Collected one'],['declined',LIST_LANG_ZH?'⚪ 不需要':'⚪ Not needed']]) {
+      const btn=document.createElement('button');btn.type='button';btn.textContent=label;
+      btn.style.cssText='padding:11px 13px;margin:3px;border:0;border-radius:10px;background:'+(status==='claimed'?'#248a4a':'#69766c')+';color:white;font-size:17px;font-weight:bold';
+      btn.addEventListener('click',async()=>{
+        if(currentLookupKey()!==lookupKey)return;
+        panel.querySelectorAll('button').forEach(b=>b.disabled=true);
+        try {const post=new FormData();post.set('number',number);post.set('pin',pin);post.set('status',status);
+          const r=await fetch('/calendar/personal',{method:'POST',body:post});const x=await r.json();
+          heading.textContent=x.message;
+          if(x.ok){panel.querySelectorAll('button').forEach(b=>b.remove());return;}
+        }catch(e){heading.textContent=LIST_LANG_ZH?'网络异常，请重新查询确认':'Network error; please check again';}
+        panel.querySelectorAll('button').forEach(b=>b.disabled=false);
+      });panel.appendChild(btn);
+    }
+    box.appendChild(panel);
+  }catch(e){/* 日历服务异常不影响签到 */}
 }
 
 function roleSortMinutes(value) {
@@ -1973,8 +2018,18 @@ def index():
     special_names = special_day_info.get("special_names", [])
     buddhist_day = " / ".join(special_names)
 
+    # 日历卡片仅在负责人开启领取期间显示；查询失败时不影响签到。
+    try:
+        calendar_is_open = bool(db_query(
+            "SELECT 1 FROM calendar_campaigns WHERE is_open = true LIMIT 1",
+            fetchone=True,
+        ))
+    except Exception:
+        calendar_is_open = False
+
     return render_template_string(
         PAGE,
+        calendar_is_open=calendar_is_open,
         t=get_text(),
         roles=ROLES,
         role_label=role_label,

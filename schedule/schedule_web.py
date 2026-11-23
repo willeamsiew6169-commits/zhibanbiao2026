@@ -3650,11 +3650,38 @@ def public_reports():
             60 * 60
         )
 
+        download_url = signed["signedURL"]
+        # 2026-11 起的月报与年月报表中心共用实时生成入口；历史文件和年报不变。
+        match = __import__('re').fullmatch(r'(\d{4})_(\d{2})_month_report\.xlsx', filename)
+        if match and (int(match.group(1)), int(match.group(2))) >= (2026, 11):
+            if session.get('reports_admin_authorized') is True:
+                download_url = url_for('reports.download', kind='month',
+                                       year=int(match.group(1)), month=int(match.group(2)))
+            else:
+                # 实时报表要求管理员 PIN；未验证时进入验证页，避免下载时报 403。
+                download_url = url_for('reports.home')
+
         report_files.append({
             "filename": filename,
             "display_name": display_report_name(filename),
-            "url": signed["signedURL"]
+            "url": download_url
         })
+
+    # 即使尚未上传 Storage 文件，新月份也应出现在资料中心。
+    now = malaysia_now()
+    for year in range(2026, now.year + 1):
+        for month in range(1, 13):
+            if (year, month) < (2026, 11) or (year, month) > (now.year, now.month):
+                continue
+            filename = f"{year}_{month:02d}_month_report.xlsx"
+            if any(item["filename"] == filename for item in report_files):
+                continue
+            live_url = (url_for('reports.download', kind='month', year=year, month=month)
+                        if session.get('reports_admin_authorized') is True
+                        else url_for('reports.home'))
+            report_files.append({"filename": filename,
+                                 "display_name": display_report_name(filename),
+                                 "url": live_url})
 
     report_files.sort(
         key=lambda x: x["filename"],

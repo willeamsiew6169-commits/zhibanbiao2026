@@ -666,12 +666,18 @@ def admin_report():
     t = get_text()
 
     if pin != ADMIN_PIN:
-        # 直接打开旧管理员链接而没有提交 PIN，不属于 PIN 输入错误。
-        if request.method == "POST" or pin:
-            flash(t["admin_pin_wrong"], "bad")
+        flash(t["admin_pin_wrong"], "bad")
         return redirect(url_for("index"))
 
     policies = get_signin_policies()
+    # 日历模块异常或尚未建表时，不影响管理员其他工具。
+    try:
+        calendar_campaign = db_query(
+            "SELECT year, is_open FROM calendar_campaigns ORDER BY year DESC LIMIT 1",
+            fetchone=True,
+        )
+    except Exception:
+        calendar_campaign = None
 
     return render_template_string("""
 <!doctype html>
@@ -775,13 +781,33 @@ def admin_report():
         {% endfor %}
     </div>
 
+    <div class="card">
+        <div class="section-title">📅 日历领取管理 / Calendar</div>
+        {% if calendar_campaign %}
+        <p class="admin-desc">{{ calendar_campaign.year }}年：
+          <strong>{{ '🟢 领取开放中' if calendar_campaign.is_open else '🔴 已关闭' }}</strong>
+        </p>
+        <form method="post" action="/calendar/admin/quick-toggle"
+              onsubmit="return confirm({{ ('确定关闭日历领取？签到首页将隐藏日历卡片。' if calendar_campaign.is_open else '确定重新开放日历领取？')|tojson }});">
+            <input type="hidden" name="admin_pin" value="{{ pin }}">
+            <input type="hidden" name="year" value="{{ calendar_campaign.year }}">
+            <button type="submit" class="btn-tool {{ 'btn-danger' if calendar_campaign.is_open else 'btn-success' }}">
+              {{ '🔒 关闭日历领取' if calendar_campaign.is_open else '🟢 重新开放日历领取' }}
+            </button>
+        </form>
+        {% else %}
+        <p class="admin-desc">尚未建立日历年度。</p>
+        {% endif %}
+        <a class="btn-tool btn-primary" href="/calendar" style="margin-top:12px;">📋 进入日历管理（库存／名单／新年度）</a>
+    </div>
+
     <a class="admin-home-float" href="/">🏠 {{ t["back_home"] }}</a>
 
 </div>
 
 </body>
 </html>
-""", t=t, pin=pin, policies=policies)
+""", t=t, pin=pin, policies=policies, calendar_campaign=calendar_campaign)
 
 
 @admin_bp.route("/admin/signin-policy", methods=["POST"])

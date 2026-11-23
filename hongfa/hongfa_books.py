@@ -17,34 +17,14 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
         def wrapped(*args, **kwargs):
             who = actor()
             if not who:
-                grant = session.get('hongfa_book_volunteer')
-                if not isinstance(grant, dict):
-                    return redirect(url_for('hongfa.login'))
-                try:
-                    event_id = int(grant['event_id'])
-                    vid = str(grant['vid'])
-                    issued = float(grant['issued'])
-                    if not 0 <= datetime.now(TZ).timestamp() - issued <= 8 * 3600 or grant['date'] != datetime.now(TZ).date().isoformat():
-                        raise ValueError()
-                except (ValueError, TypeError, KeyError):
-                    session.pop('hongfa_book_volunteer', None)
-                    abort(403)
-                verified = db_query('''SELECT e.team_id FROM hongfa_attendance a
-                    JOIN hongfa_events e ON e.id=a.event_id
-                    WHERE e.id=%s AND e.event_date=%s AND e.status='published'
-                      AND e.closed_at IS NULL AND a.volunteer_id=%s LIMIT 1''',
-                    (event_id, datetime.now(TZ).date(), vid), fetchone=True)
-                if not verified:
-                    abort(403)
-                who = {'id': vid, 'secretary': False, 'team_ids': [verified['team_id']], 'book_volunteer': True, 'book_event': event_id}
-
+                return redirect(url_for('hongfa.login'))
             if request.method == 'POST' and not valid_csrf():
                 abort(400)
             return fn(who, *args, **kwargs)
         return wrapped
 
     def books_page(who, message='', error=''):
-        is_volunteer = who.get('book_volunteer', False)
+        is_volunteer = False
         teams = db_query('SELECT id,name FROM hongfa_teams WHERE active=true ORDER BY id', fetchall=True) or []
         teams = [t for t in teams if t['id'] in who['team_ids']]
         items = db_query('SELECT id,title FROM hongfa_items WHERE active=true ORDER BY title', fetchall=True) or []
@@ -75,7 +55,7 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
         .hb-area{padding-bottom:85px}.hb-hidden{display:none!important}
         @media(max-width:520px){.hb-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hb-name{font-size:15px;min-height:54px}.hb-step button{width:37px}}
         </style><div class="card hb-area"><h2>📚 弘法书籍｜快速登记</h2>
-        {% if not is_volunteer %}<p><a href="/hongfa/book-menu">⬅ 返回书籍管理</a></p>{% endif %}
+        {% if not is_volunteer %}<p><a href="/hongfa/book-menu">⬅ 返回书籍管理</a></p>{% endif %}<p><a class="btn" href="/hongfa/books/report">📊 书籍报表（月报／年报／Excel）</a></p>
         <p class="hf-muted">{% if is_volunteer %}已绑定今日签到，可登记本组结缘书籍。{% else %}负责人可扣书、点货及调整库存。{% endif %}</p>
         {% if error %}<p class="warn">{{error}}</p>{% endif %}{% if message %}<p style="color:#16854e">{{message}}</p>{% endif %}
         {% if not is_volunteer %}<p><a class="btn" id="hb-manage-link" href="{{url_for('hongfa.books_manage')}}">⚙️ 管理书籍</a></p>{% endif %}
@@ -83,7 +63,7 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
         <label>弘法组</label><select id="hb-team" onchange="hbCart={};hbDraw()">{% for t in teams %}<option value="{{t.id}}">{{t.name}}</option>{% endfor %}</select>
         {% if not is_volunteer and (who.secretary or who.team_ids) %}<p><a class="btn" href="{{url_for('hongfa.books_add')}}" style="font-size:19px;font-weight:750">➕ 新增书籍</a></p>{% endif %}
         <div class="hb-tabs"><button id="hb-out-btn" class="on" onclick="hbTab('out')">📖 结缘扣书</button>{% if not is_volunteer %}<button id="hb-stock-btn" onclick="hbTab('stock')">📦 点货／补货</button>{% endif %}</div>
-        <div id="hb-out-note" class="hf-muted">仅允许登记本组今天已发布且尚未结束的弘法活动；一次可选多种书。</div>
+        <div id="hb-out-note" class="hf-muted">仅允许登记本组今天已发布且尚未结束的弘法活动；一次可选多种书。</div><div id="hb-stock-note" class="hf-muted hb-hidden">直接输入每种书的实际库存总数；可一次填写多种。留空不修改，填 0 表示实际为零。切换分类或搜索不会清除已填写数量。</div>
         <input id="hb-search" placeholder="🔍 输入书名立即搜索" oninput="hbDraw()">
         <div class="hb-filters" id="hb-filters"></div><div id="hb-picked"></div><div id="hb-books" class="hb-grid"></div>
         <div id="hb-bottom" class="hb-bottom"><button id="hb-submit" onclick="hbSubmit()">确认结缘（0本）</button></div>
@@ -91,11 +71,13 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
         {% endif %}</div>
         <script>
         const hbItems={{items|tojson}},hbStock={{stock|tojson}},hbEvents={{events|tojson}},hbCategories={{categories|tojson}},hbFavorites={{favorites|tojson}};
-        let hbCart={},hbView='out',hbFilter='常用',hbBusy=false;
+        let hbCart={},hbCounts={},hbView='out',hbFilter='常用',hbBusy=false;
         const hbEl=id=>document.getElementById(id);
         function hbCategory(name,id){const saved=hbCategories.find(x=>x.item_id===id);if(saved)return saved.category;if(name.includes('佛言佛语'))return '佛言佛语';if(name.includes('白话佛法'))return '白话佛法';if(/手册|指南|小本|入门/.test(name))return '手册／小本';if(/[\u4e00-\u9fff]/.test(name))return '其他中文';return '英文';}
-        function hbTab(v){hbView=v;hbCart={};hbFilter='常用';hbEl('hb-out-btn').classList.toggle('on',v==='out');hbEl('hb-stock-btn')?.classList.toggle('on',v==='stock');hbEl('hb-out-note').classList.toggle('hb-hidden',v!=='out');hbDraw();}
+        function hbTab(v){hbView=v;hbCart={};hbFilter='常用';hbEl('hb-out-btn').classList.toggle('on',v==='out');hbEl('hb-stock-btn')?.classList.toggle('on',v==='stock');hbEl('hb-out-note').classList.toggle('hb-hidden',v!=='out');hbEl('hb-stock-note').classList.toggle('hb-hidden',v!=='stock');hbDraw();}
         function hbSetFilter(v){hbFilter=v;hbDraw();}
+        function hbCount(id,value){const k=hbEl('hb-team').value+':'+id;if(value==='')delete hbCounts[k];else hbCounts[k]=value;hbUpdateSubmit();}
+        function hbUpdateSubmit(){const t=hbEl('hb-team').value;const n=Object.keys(hbCounts).filter(k=>k.startsWith(t+':')).length;hbEl('hb-submit').textContent=hbView==='stock'?'保存全部点货数量（'+n+'种）':'确认结缘（'+Object.values(hbCart).reduce((a,b)=>a+b,0)+'本）';hbEl('hb-submit').disabled=hbBusy||(hbView==='stock'?!n:!Object.keys(hbCart).length);}
         function hbChange(id,d){hbCart[id]=Math.max(0,(hbCart[id]||0)+d);if(!hbCart[id])delete hbCart[id];hbDraw();}
         function hbDraw(){if(!hbEl('hb-team'))return;const t=hbEl('hb-team').value,q=hbEl('hb-search').value.trim().toLowerCase();
           const filters=[...new Set(['常用','全部','佛言佛语','白话佛法','手册／小本','其他中文','英文',...hbCategories.map(x=>x.category)])];
@@ -106,19 +88,20 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
           let arr=hbItems.filter(x=>q?x.title.toLowerCase().includes(q):(hbFilter==='全部'||hbCategory(x.title,x.id)===hbFilter||hbFilter==='常用'));
           if(!q&&hbFilter==='常用'){arr=arr.filter(x=>fav.includes(x.id));if(!arr.length)arr=hbItems.slice(0,12);else arr.sort((a,b)=>fav.indexOf(a.id)-fav.indexOf(b.id));}
           arr.sort((a,b)=>(hbCart[b.id]||0)-(hbCart[a.id]||0));
-          const card=x=>{const n=hbCart[x.id]||0,bal=hbStock[t+':'+x.id];return `<div class="hb-book"><div class="hb-name"></div><div class="hb-sub">库存：${bal===undefined?'未点货':bal+'本'}</div><div class="hb-step"><button type="button" onclick="hbChange(${x.id},-1)">－</button><b>${n}</b><button type="button" onclick="hbChange(${x.id},1)">＋</button></div></div>`;};
+          const card=x=>{const n=hbCart[x.id]||0,bal=hbStock[t+':'+x.id];const count=hbCounts[t+':'+x.id];return `<div class="hb-book"><div class="hb-name"></div><div class="hb-sub">库存：${bal===undefined?'未点货':bal+'本'}</div>${hbView==='stock'?`<label class="hb-sub" for="hb-count-${x.id}">实际总数（留空不修改）</label><input id="hb-count-${x.id}" type="number" min="0" max="1000000" step="1" inputmode="numeric" placeholder="${bal===undefined?'未点货':bal}" value="${count===undefined?'':count}" oninput="hbCount(${x.id},this.value)" style="width:100%;margin:3px 0 0">`:`<div class="hb-step"><button type="button" onclick="hbChange(${x.id},-1)">－</button><b>${n}</b><button type="button" onclick="hbChange(${x.id},1)">＋</button></div>`}</div>`;};
           hbEl('hb-books').innerHTML=arr.map(card).join('')||'<p>没有找到书籍。</p>';
           hbEl('hb-books').querySelectorAll('.hb-name').forEach((e,i)=>e.textContent=arr[i].title);
           const chosen=hbItems.filter(x=>hbCart[x.id]>0);hbEl('hb-picked').innerHTML=chosen.length?'<div class="hb-picked"><b>✅ 已选书籍</b><div id="hb-picked-list"></div></div>':'';
           if(chosen.length){hbEl('hb-picked-list').textContent=chosen.map(x=>x.title+' × '+hbCart[x.id]).join('；');}
-          const sum=Object.values(hbCart).reduce((a,b)=>a+b,0);hbEl('hb-submit').textContent=hbView==='stock'?'保存点货数量':'确认结缘（'+sum+'本）';hbEl('hb-submit').disabled=!sum||hbBusy;
-          if(hbView==='stock')hbEl('hb-out-note').classList.add('hb-hidden');
+          hbUpdateSubmit();
+          
         }
-        function hbSubmit(){if(hbBusy)return;const t=hbEl('hb-team').value,lines=Object.entries(hbCart).filter(x=>x[1]>0).map(x=>({item_id:Number(x[0]),quantity:x[1]}));if(!lines.length)return;
+        function hbSubmit(){if(hbBusy)return;const t=hbEl('hb-team').value;const lines=hbView==='stock'?Object.entries(hbCounts).filter(([k])=>k.startsWith(t+':')).map(([k,v])=>({item_id:Number(k.split(':')[1]),quantity:Number(v)})):Object.entries(hbCart).filter(x=>x[1]>0).map(x=>({item_id:Number(x[0]),quantity:x[1]}));if(!lines.length)return;
+          if(hbView==='stock'&&lines.some(x=>!Number.isSafeInteger(x.quantity)||x.quantity<0||x.quantity>1000000)){alert('请输入0至1000000之间的实际库存整数。');return;}
           if(hbView==='out'&&!hbEvents[t]){alert('本组今天没有可登记的已发布活动。');return;}
           if(hbView==='out')for(const x of lines){const b=hbStock[t+':'+x.item_id];if(b===undefined){alert('请先点货：'+hbItems.find(i=>i.id===x.item_id).title);return;}if(b<x.quantity){alert('库存不足：'+hbItems.find(i=>i.id===x.item_id).title);return;}}
-          if(hbView==='stock'){const next=prompt('请输入所选书籍的实际库存总数（一次只能选择一种书）');if(next===null)return;if(lines.length!==1||!/^(0|[1-9][0-9]*)$/.test(next)||Number(next)>1000000){alert('请只选择一本书，并输入正确的实际数量。');return;}lines[0].quantity=Number(next);}
-          if(!confirm(hbView==='out'?'确认结缘并扣除 '+lines.reduce((s,x)=>s+x.quantity,0)+' 本？':'确认保存实际点货数量？'))return;
+          
+          if(!confirm(hbView==='out'?'确认结缘并扣除 '+lines.reduce((s,x)=>s+x.quantity,0)+' 本？':'确认更新 '+lines.length+' 种书籍的实际库存总数？未填写的书籍保持不变。'))return;
           hbBusy=true;hbEl('hb-form-team').value=t;hbEl('hb-mode').value=hbView;hbEl('hb-lines').value=JSON.stringify(lines);hbEl('hb-form').submit();}
         hbDraw();
         </script>''', who=who, csrf=csrf_token(), request_key=secrets.token_urlsafe(24),
@@ -127,6 +110,8 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
     @bp.route('/books', methods=['GET', 'POST'])
     @guard
     def books(who):
+        if not (who.get('secretary') or who.get('team_ids')):
+            abort(403)
         if request.method == 'GET':
             return books_page(who, message=('✅ 新书籍已加入目录，请到点货／补货设置库存。' if request.args.get('added') == '1' else ('✅ 已保存库存记录。' if request.args.get('saved') == '1' else '')))
         try:
@@ -136,10 +121,8 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
             mode = request.form.get('mode')
             if mode not in ('out', 'stock'):
                 raise ValueError('操作无效。')
-            if who.get('book_volunteer') and mode != 'out':
-                abort(403)
             lines = json.loads(request.form.get('lines') or '[]')
-            if not isinstance(lines, list) or not 1 <= len(lines) <= 60:
+            if not isinstance(lines, list) or not 1 <= len(lines) <= (1000 if mode == 'stock' else 60):
                 raise ValueError('请选择书籍。')
             parsed = {}
             for line in lines:
@@ -150,8 +133,6 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
                 if mode == 'out' and qty < 1:
                     raise ValueError('结缘数量必须大于零。')
                 parsed[item_id] = qty
-            if mode == 'stock' and len(parsed) != 1:
-                raise ValueError('点货每次只能选择一本书。')
             reqkey = (request.form.get('request_key') or '').strip()
             if len(reqkey) < 20:
                 raise ValueError('请求编号无效。')
@@ -172,8 +153,6 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
                         if not row:
                             raise ValueError('本组今天没有可登记的弘法活动。')
                         event_id = row['id']
-                        if who.get('book_volunteer') and event_id != who['book_event']:
-                            abort(403)
                     cur.execute('SELECT id FROM hongfa_items WHERE id=ANY(%s) AND active=true', (list(parsed),))
                     if len(cur.fetchall()) != len(parsed):
                         raise ValueError('书籍目录已变更，请刷新。')
@@ -192,7 +171,7 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
                         else:
                             delta = qty - balance
                             typ = 'adjust_in' if delta >= 0 else 'adjust_out'
-                        if delta == 0:
+                        if delta == 0 and (mode != 'stock' or row['entries']):
                             continue
                         cur.execute('''INSERT INTO hongfa_stock_movements
                             (team_id,item_id,event_id,quantity,movement_type,created_by,request_key)

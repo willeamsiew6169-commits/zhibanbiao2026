@@ -113,8 +113,6 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
                     else:
                         person_key='v:'+vid.upper()
                         error=_insert_attendance(e,person_key,vid,None,None,None,token=token)
-                        if not error:
-                            session['hongfa_book_volunteer'] = {'event_id': e['id'], 'vid': vid, 'date': e['event_date'].isoformat(), 'issued': datetime.now(TZ).timestamp()}
                 elif kind=='guest':
                     name=(request.form.get('name') or '').strip()[:100]
                     phone=''.join(c for c in (request.form.get('phone') or '') if c.isascii() and c.isdigit())
@@ -132,7 +130,6 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
           {% if success %}<h3>✅ 签到成功</h3>
           <p>签到已记录，请在弘法结束后自行签退。</p>
           {% if guest_token %}<p><b>新人签退凭证（请立即保存）：</b><br><span style="overflow-wrap:anywhere">{{guest_token}}</span></p>{% endif %}
-          {% if book_access %}<p><a class="btn" style="display:block;text-align:center;font-size:21px;padding:17px" href="{{url_for('hongfa.books')}}">📚 结缘经书／快速扣书</a></p>{% endif %}
           <p><a class="btn" href="{{url_for('hongfa.self_checkout')}}">👋 前往自助签退</a></p>
           {% else %}<form id="hf-form-join" method="post"><input type="hidden" name="csrf_token" value="{{csrf}}">
           <input type="hidden" name="token" value="{{token}}">
@@ -150,7 +147,7 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
             <div class="hf-field"><label for="hf-phone-join">电话号码</label><input id="hf-phone-join" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="例如 012-3456789"></div>
             <p class="hf-hint">新人签到成功后，请保存页面显示的签退凭证。</p>
           </div>
-          <button class="hf-submit" type="submit">✅ 确认签到</button></form>{% endif %}</div>''',e=e,error=error,token=(request.args.get('token') if request.method=='GET' else request.form.get('token','')),success=request.method=='POST' and not error,guest_token=guest_token,book_access=(request.method=='POST' and not error and request.form.get('kind')=='volunteer'),csrf=csrf_token(),identity_ui=identity_ui('join'))
+          <button class="hf-submit" type="submit">✅ 确认签到</button></form>{% endif %}</div>''',e=e,error=error,token=(request.args.get('token') if request.method=='GET' else request.form.get('token','')),success=request.method=='POST' and not error,guest_token=guest_token,csrf=csrf_token(),identity_ui=identity_ui('join'))
 
     def _insert_attendance(e,person_key,vid,name,phone,token_hash,token=None,operator=None):
         # 数据库唯一索引 + 人员键事务锁，避免并发重复；日期跨活动检查在同一事务中。
@@ -406,6 +403,12 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
           <form method="post"><input type="hidden" name="csrf_token" value="{{csrf}}"><input name="title" maxlength="150" placeholder="书名" required><button>新增书名</button></form>
           {% for r in rows %}<p>{{r.title}}</p>{% endfor %}</div>''',rows=rows,error=error)
 
+    from .hongfa_book_reports import register_book_reports
+    register_book_reports(bp, actor, render)
+
+    from .hongfa_attendance_reports import register_attendance_reports
+    register_attendance_reports(bp, actor, render)
+
     @bp.route('/report')
     @guard
     def report(who):
@@ -436,7 +439,7 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
               LEFT JOIN hongfa_attendance a ON a.event_id=e.id
               WHERE e.status='published' AND e.closed_at IS NOT NULL AND e.event_date < %s
               GROUP BY l.id,l.name ORDER BY visits DESC,l.name''',(last,),fetchall=True) or []
-        return page('''<div class="card"><h2>📊 弘法月报｜{{month}}</h2>
+        return page('''<div class="card"><h2>📊 弘法月报｜{{month}}</h2><p><a class="btn" href="{{url_for('hongfa.attendance_reports')}}">👥 义工出席月报／年报与 Excel 下载</a></p>
           <form method="get"><input type="month" name="month" value="{{month}}"><button>查询</button></form>
           <h3>出席及实际时数（仅已签退计算时数）</h3>
           {% for r in rows %}<p>{{r.event_date}}｜{{r.team_name}}｜{{r.location_name or 'Off'}}｜{{r.attendees}} 人｜{{r.total_hours}} 小时</p>{% else %}<p>暂无活动。</p>{% endfor %}
