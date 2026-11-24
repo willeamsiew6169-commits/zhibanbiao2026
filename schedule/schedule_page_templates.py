@@ -12,6 +12,7 @@ h1{font-size:30px;margin:0 0 26px}.links{display:grid;gap:16px}
 .back{display:inline-block;margin-top:25px;color:#275de4;font-size:19px;text-decoration:none}
 </style></head><body><main><h1>{{ title }}</h1><div class="links">
 {% for item in links %}<a href="{{ item.url }}">{{ item.label }}</a>{% endfor %}
+{% if request.path == "/schedule/management/fixed" %}<a href="/schedule/flower-fruit" style="background:#b94b80">🌸 供花供果排班</a>{% endif %}
 </div><a class="back" href="/schedule#management-functions">⬅ 返回负责人首页</a>
 </main></body></html>"""
 
@@ -618,15 +619,15 @@ html {
     </div>
 
     <div class="info-box" style="margin-top:14px;">
-        <b>👥 当日义工报名详情（{{ override_date }} {{ weekday_label }}）</b>
-        <div style="font-size:13px;color:#64748b;margin:5px 0 10px;">显示所有报名记录，包括待安排、已安排及已取消。</div>
+        <b>👥 当日义工安排详情（{{ override_date }} {{ weekday_label }}）</b>
+        <div style="font-size:13px;color:#64748b;margin:5px 0 10px;">显示报名记录及当天整理佛台、供台安排，包括待安排、已安排及已取消。</div>
         {% if signup_details %}
         <div style="overflow-x:auto;">
           <table style="width:100%;border-collapse:collapse;font-size:14px;min-width:590px;">
             <thead><tr style="background:#edf3f9;text-align:left;">
               <th style="padding:9px;border-bottom:1px solid #dce5ee;">义工姓名</th>
-              <th style="padding:9px;border-bottom:1px solid #dce5ee;">报名岗位</th>
-              <th style="padding:9px;border-bottom:1px solid #dce5ee;">报名时段</th>
+              <th style="padding:9px;border-bottom:1px solid #dce5ee;">服务岗位</th>
+              <th style="padding:9px;border-bottom:1px solid #dce5ee;">服务时段</th>
               <th style="padding:9px;border-bottom:1px solid #dce5ee;">安排地点</th>
               <th style="padding:9px;border-bottom:1px solid #dce5ee;">状态</th>
               <th style="padding:9px;border-bottom:1px solid #dce5ee;white-space:nowrap;">报名时间</th>
@@ -635,16 +636,20 @@ html {
             {% for person in signup_details %}
               <tr style="border-bottom:1px solid #edf1f5;{% if person.status == 'cancelled' %}opacity:.55;{% endif %}">
                 <td style="padding:9px;">{{ person.name or person.volunteer_id or '—' }}</td>
-                <td style="padding:9px;">{{ person.role or '—' }}</td>
+                <td style="padding:9px;">
+                  {% set role_colors = {'值班':('#ffedd5','#9a3412'),'卫生':('#dbeafe','#1e40af'),'整理佛台':('#ede9fe','#6b21a8'),'设师父供台':('#fce7f3','#9d174d'),'收师父供台':('#efdfd0','#78350f'),'膳食':('#fef9c3','#854d0e'),'膳食组':('#fef9c3','#854d0e'),'派餐义工':('#fef9c3','#854d0e')} %}
+                  {% set colors = role_colors.get(person.role, ('#f1f5f9','#334155')) %}
+                  <span style="display:inline-block;padding:5px 9px;border-radius:7px;white-space:nowrap;font-weight:600;background:{{ colors[0] }};color:{{ colors[1] }};">{{ person.role or '—' }}</span>
+                </td>
                 <td style="padding:9px;white-space:nowrap;">{{ person.start_time|string if person.start_time else '—' }} ～ {{ person.end_time|string if person.end_time else '—' }}</td>
                 <td style="padding:9px;">
                   {% if person.assignment_places %}
                     <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;">
                       {% for place in person.assignment_places %}
-                        <span style="display:inline-block;white-space:nowrap;padding:5px 9px;border-radius:7px;font-size:13px;line-height:1.4;{% if '观音堂' in place %}background:#ffedd5;color:#9a3412;{% elif '活动中心' in place %}background:#fef9c3;color:#854d0e;{% else %}background:#e8f3ff;color:#1e40af;{% endif %}">{{ place }}</span>
+                        <span style="display:inline-block;white-space:nowrap;padding:5px 9px;border-radius:7px;font-size:13px;line-height:1.4;{% if person.role == "值班" and "活动中心" in place %}background:#fef9c3;color:#854d0e;{% else %}background:{{ colors[0] }};color:{{ colors[1] }};{% endif %}">{{ place }}</span>
                       {% endfor %}
                     </div>
-                  {% else %}{{ person.assigned_place or '—' }}{% endif %}
+                  {% elif person.assigned_place %}<span style="display:inline-block;white-space:nowrap;padding:5px 9px;border-radius:7px;font-size:13px;line-height:1.4;{% if person.role == "值班" and "活动中心" in person.assigned_place %}background:#fef9c3;color:#854d0e;{% else %}background:{{ colors[0] }};color:{{ colors[1] }};{% endif %}">{{ person.assigned_place }}</span>{% else %}—{% endif %}
                 </td>
                 <td style="padding:9px;white-space:nowrap;">
                   {% if person.status == 'assigned' %}<span style="color:#16803c;font-weight:700;">🟢 已安排</span>
@@ -658,7 +663,7 @@ html {
             </tbody>
           </table>
         </div>
-        {% else %}<div style="color:#64748b;">这一天暂时没有报名记录。</div>{% endif %}
+        {% else %}<div style="color:#64748b;">这一天暂时没有义工安排记录。</div>{% endif %}
     </div>
 
     {% if actual_visible %}

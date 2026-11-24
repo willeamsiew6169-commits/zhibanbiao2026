@@ -551,6 +551,10 @@ def volunteer_signup():
     signup_date = request.form.get("signup_date", "").strip()
     role = request.form.get("role", "").strip()
 
+    # 师父供台只由负责人安排，禁止义工通过旧表单自行报名。
+    if role == "供台":
+        return "❌ 师父供台由负责人统一安排，请选择其他报名岗位。<br><a href='/volunteer'>返回</a>", 403
+
     supply_task = (
         request.form.get("supply_task", "")
         .strip()

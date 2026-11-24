@@ -237,6 +237,27 @@ body { background-color: #F0F8F1 !important; }
         font-size:19px;
     }
 }
+/* Mobile navigation clearance and scrollable confirmation. */
+@media (max-width:700px), (pointer:coarse){
+    .volunteer-wrap{
+        padding-bottom:96px;
+        padding-bottom:calc(96px + env(safe-area-inset-bottom, 0px));
+    }
+    .confirm-overlay{
+        box-sizing:border-box;
+        padding-bottom:96px;
+        padding-bottom:calc(96px + env(safe-area-inset-bottom, 0px));
+        max-height:100vh;
+        max-height:100dvh;
+        overflow-y:auto;
+    }
+    .confirm-box{
+        box-sizing:border-box;
+        min-height:0;
+        max-height:100%;
+        overflow-y:auto;
+    }
+}
 </style>
 </head>
 
@@ -418,22 +439,6 @@ body { background-color: #F0F8F1 !important; }
                             <span class="choice-help">Cleaning</span>
 
                         </button>
-
-                        {% if supply_signup_available %}
-
-                        <button
-                            type="button"
-                            class="choice-btn"
-                            data-role="供台"
-                            onclick="selectRole(this)">
-
-                            <span class="choice-icon">🛕</span>
-                            <span class="choice-label">供台</span>
-                            <span class="choice-help">Offering Table</span>
-
-                        </button>
-
-                        {% endif %}
 
                         {% if meal_signup_open %}
 
@@ -1833,6 +1838,13 @@ VOLUNTEER_PREBOOK_HTML = """
     .day-card{
         font-size:24px;
         padding:14px 0;
+    }
+}
+/* Leave room below the final buttons on mobile. */
+@media (max-width:700px), (pointer:coarse){
+    .prebook-wrap{
+        padding-bottom:96px;
+        padding-bottom:calc(96px + env(safe-area-inset-bottom, 0px));
     }
 }
 </style>

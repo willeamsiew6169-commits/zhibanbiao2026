@@ -380,6 +380,51 @@ def run_morning_trigger_if_due(last_completed_slot):
     return last_completed_slot
 
 
+def save_browser_download(download):
+    """Save manual browser downloads without changing the sending workflow."""
+    target = None
+    try:
+        folder = Path.home() / 'Downloads'
+        # Respect a relocated Windows Downloads known folder when available.
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r'Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders') as key:
+                value, _ = winreg.QueryValueEx(key, '{374DE290-123F-4565-9164-39C4925E467B}')
+                folder = Path(os.path.expandvars(value))
+        except (ImportError, OSError):
+            pass
+        folder.mkdir(parents=True, exist_ok=True)
+        name = re.split(r'[/\\]', download.suggested_filename or '')[-1]
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name).rstrip(' .') or 'download'
+        if name.split('.')[0].upper() in {'CON', 'PRN', 'AUX', 'NUL', *('COM'+str(i) for i in range(1,10)), *('LPT'+str(i) for i in range(1,10))}:
+            name = '_' + name
+        original = Path(name)
+        index = 0
+        while True:
+            candidate = folder / (name if index == 0 else f'{original.stem} ({index}){original.suffix}')
+            try:
+                with candidate.open('xb'):
+                    pass
+                target = candidate
+                break
+            except FileExistsError:
+                index += 1
+        download.save_as(str(target))
+        LOG.info('文件下载已保存：%s', target)
+    except Exception:
+        if target is not None:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+        LOG.exception('文件下载保存失败；继续原有发送流程')
+
+
+def attach_download_handler(page):
+    page.on('download', save_browser_download)
+
+
 def main():
     _lock_handle = acquire_single_instance_lock()
     if not URL.startswith('https://') or not TOKEN or not GROUP:
@@ -391,8 +436,11 @@ def main():
     print('测试群：', GROUP, '；轮询：', POLL, '秒')
     with sync_playwright() as pw:
         context = pw.chromium.launch_persistent_context(
-            str(BASE / 'wa_browser_profile'), headless=False)
+            str(BASE / 'wa_browser_profile'), headless=False, accept_downloads=True)
         try:
+            context.on('page', attach_download_handler)
+            for existing_page in context.pages:
+                attach_download_handler(existing_page)
             if not context.pages:
                 page = context.new_page()
                 page.goto('https://web.whatsapp.com/', wait_until='domcontentloaded')

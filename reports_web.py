@@ -31,8 +31,8 @@ PAGE = '''<!doctype html>
 <section class="report-card login-wrap"><div class="section-top"><span class="icon">🔐</span><div><h2>负责人验证</h2><p>请输入管理员 PIN 进入报表中心</p></div></div><form method="post" action="{{ url_for('reports.login') }}"><div class="field"><label for="admin_pin">管理员 PIN</label><input id="admin_pin" name="admin_pin" type="password" required autocomplete="off" placeholder="请输入管理员 PIN"></div><button class="report-button" type="submit">🔓 进入报表中心</button></form>{% if error %}<p class="error" role="alert">PIN 不正确，请重试。</p>{% endif %}</section>
 {% else %}
 <section class="report-card"><div class="section-top"><span class="icon">📅</span><div><h2>选择报表期间</h2><p>选择需要下载的年份与月份</p></div></div><div class="report-row"><div class="field"><label for="year">报表年份</label><select id="year">{% for y in years %}<option value="{{y}}" {% if y==current_year %}selected{% endif %}>{{y}} 年</option>{% endfor %}</select></div><div class="field"><label for="month">报表月份</label><select id="month">{% for m in range(1,13) %}<option value="{{m}}" {% if m==current_month %}selected{% endif %}>{{m}} 月</option>{% endfor %}</select></div></div></section>
-<section class="report-card"><div class="section-top"><span class="icon">📥</span><div><h2>下载 Excel 报表</h2><p>保留原有 Excel 报表格式</p></div></div><div class="button-grid"><a class="report-button" id="month-download" href="#">📄 下载月报 Excel ↓</a><a class="report-button alt" id="year-download" href="#">📚 下载年报 Excel ↓</a></div><div class="report-note">ℹ️ 月报每次从 Supabase 实时生成，报名资料尚未核实，月明细报名栏显示「—」，不可据此判断报名异常。年报仍下载 Supabase Storage 中已上传的文件，不会自动更新。</div></section>
-<section class="report-card footer"><a href="/schedule/admin">← 返回负责人排班系统</a><a href="{{ url_for('reports.logout') }}">退出报表中心 ↗</a></section>
+<section class="report-card"><div class="section-top"><span class="icon">📥</span><div><h2>下载 Excel 报表</h2><p>保留原有 Excel 报表格式</p></div></div><div class="button-grid"><a class="report-button" id="month-download" href="#">📄 下载月报 Excel ↓</a><a class="report-button alt" id="year-download" href="#">📚 下载年报 Excel ↓</a></div><div class="report-note">ℹ️ 月报每次从 Supabase 实时生成，报名资料尚未核实，月明细报名栏显示「—」，不可据此判断报名异常。年报每次从 Supabase 实时生成；2026年11月15日起的云端实际签到纳入年报。</div></section>
+<section class="report-card footer"><a href="/admin-home">← 返回管理员首页</a><a href="{{ url_for('reports.logout') }}">退出报表中心 ↗</a></section>
 <script>
 function updateReportLinks(){
  const y=document.getElementById('year').value;
@@ -98,23 +98,7 @@ def download(kind):
         # 月报实时生成；年报仍使用原有 Supabase Storage 下载逻辑。
         return _generate_live_month(year, month, download_name=f'{year}_{month:02d}_month_report.xlsx')
 
-    # 与 upload_reports.py 的 make_remote_name() 保持一致。
-    remote_name = (f'{year}_{month:02d}_month_report.xlsx'
-                   if kind == 'month' else f'{year}_year_report.xlsx')
-    supabase_url = os.getenv('SUPABASE_URL')
-    service_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
-    if not supabase_url or not service_key:
-        abort(503, description='云端报表储存尚未配置')
-    from supabase import create_client
-    try:
-        payload = create_client(supabase_url, service_key).storage.from_('reports').download(remote_name)
-    except Exception as exc:
-        # 不把云端异常/密钥内容暴露给网页。
-        from flask import current_app
-        current_app.logger.warning('报表下载失败 %s: %s', remote_name, type(exc).__name__)
-        abort(404, description=f'尚未找到 {remote_name}，请先从本地上传对应报表。')
-    return send_file(BytesIO(payload), as_attachment=True, download_name=remote_name,
-                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    return _generate_live_year(year, download_name=f"{year}_year_report.xlsx")
 
 
 @reports_bp.route('/preview-month', methods=['GET'])
@@ -152,7 +136,8 @@ def _generate_live_month(year, month, download_name):
         try:
             result = subprocess.run(
                 [sys.executable, '-c', code], cwd=workdir, env=env,
-                capture_output=True, text=True, timeout=90, check=False)
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=90, check=False)
         except subprocess.TimeoutExpired:
             current_app.logger.warning('月报试生成超时 %s-%02d', year, month)
             abort(503, description='试生成超时，请联系管理员核对日志')
@@ -163,6 +148,40 @@ def _generate_live_month(year, month, download_name):
         if not path.is_file():
             abort(503, description='试生成没有输出预期的 Excel')
         # 先读取到内存，再退出临时目录；send_file 不依赖临时文件继续存在。
+        payload = path.read_bytes()
+    return send_file(BytesIO(payload), as_attachment=True,
+                     download_name=download_name,
+                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
+def _generate_live_year(year, download_name):
+    """Read-only annual report in a subprocess, mirroring monthly isolation."""
+    from flask import current_app
+    root = Path(__file__).resolve().parent
+    script = root / 'reports_yearly_live.py'
+    engine = root / 'reports_original_engine.py'
+    if not script.is_file() or not engine.is_file():
+        abort(503, description='实时年报程序尚未安装')
+    with tempfile.TemporaryDirectory(prefix='gyt_year_download_') as workdir:
+        env = os.environ.copy()
+        env['PYTHONPATH'] = str(root) + os.pathsep + env.get('PYTHONPATH', '')
+        env['PYTHONIOENCODING'] = 'utf-8'
+        env['PYTHONUTF8'] = '1'
+        code = f'from reports_yearly_live import generate; generate({year})'
+        try:
+            result = subprocess.run(
+                [sys.executable, '-c', code], cwd=workdir, env=env,
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=180, check=False)
+        except subprocess.TimeoutExpired:
+            current_app.logger.warning('年报生成超时 %s', year)
+            abort(503, description='年报生成超时，请核对日志')
+        if result.returncode != 0:
+            current_app.logger.error('年报生成失败 %s: %s', year, result.stderr[-2000:])
+            abort(503, description='年报生成失败，请联系管理员核对日志')
+        path = Path(workdir) / f'{year}_year_report.xlsx'
+        if not path.is_file():
+            abort(503, description='年报程序没有生成预期 Excel')
         payload = path.read_bytes()
     return send_file(BytesIO(payload), as_attachment=True,
                      download_name=download_name,

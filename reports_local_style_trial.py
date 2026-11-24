@@ -10,7 +10,7 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from openpyxl.comments import Comment
-from reports_excel import prepare_monthly_inputs, ReportDataError, _day, _clock, _hours
+from reports_excel import prepare_monthly_inputs, ReportDataError, _day, _clock, report_hours, pending_note
 from reports_service import load_attendance_rows
 
 
@@ -67,7 +67,7 @@ def generate(year, month):
                 '岗位': str(record.get('role') or '').strip(),
                 '开始时间': _clock(record.get('start_time')),
                 '结束时间': _clock(record.get('end_time')),
-                '时数': _hours(record.get('hours')),
+                '时数': report_hours(record),
                 '义工卡号': '',
                 '备注': str(record.get('remarks') or '').strip(),
             })
@@ -188,6 +188,7 @@ def generate(year, month):
         for cells in detail.iter_rows(min_row=2, min_col=3, max_col=3):
             cells[0].value = '—'
         target = Path(f'{year}_{month:02d}_云端仿本地月报_仅核对.xlsx')
+        pending_note(workbook, sum(r['时数'] == '待结算' for r in rows))
         workbook.save(target)
     print('核对版已生成：', target.resolve())
     print('目标月份记录数：', len(rows))

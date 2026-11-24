@@ -44,6 +44,38 @@ def _hours(value):
     return float(number)
 
 
+def report_hours(record, today=None):
+    """Only today's open cloud attendance may have unsettled hours."""
+    from datetime import timezone, timedelta
+    today = today or datetime.now(timezone(timedelta(hours=8))).date()
+    hours = _hours(record.get('hours'))
+    if hours is None:
+        if (record.get('data_source') == 'cloud'
+                and _day(record['day']) == today
+                and _clock(record.get('start_time'))
+                and not _clock(record.get('end_time'))):
+            return None
+        raise ReportDataError(f"{record.get('day')} {record.get('volunteer_name')} "
+                              f"{record.get('role')}：缺服务时数，请核对")
+    return hours
+
+
+def pending_note(workbook, count):
+    if not count:
+        return
+    from openpyxl.styles import Font, Alignment, PatternFill
+    ws = workbook.create_sheet('服务时数说明')
+    ws['A1'] = '服务时数待结算'
+    ws['A1'].font = Font(bold=True, size=14)
+    ws['A1'].fill = PatternFill('solid', fgColor='D9EAD3')
+    ws['A2'] = f'截至报表生成时，共有{count}笔服务记录尚未签退，已计入出席统计，服务时数待系统结算。'
+    ws['A3'] = '汇总时数仅包含已结算记录；重新下载可取得最新结果。'
+    ws.column_dimensions['A'].width = 85
+    ws['A2'].alignment = Alignment(wrap_text=True, vertical='center')
+    ws.row_dimensions[2].height = 42
+    ws.freeze_panes = 'A2'
+
+
 def prepare_monthly_inputs(year: int, month: int):
     """返回原版统计函数可用的列结构及风险清单。
 
@@ -59,6 +91,7 @@ def prepare_monthly_inputs(year: int, month: int):
     mapped = []
     problems = []
     for index, record in enumerate(records, 1):
+        hours = report_hours(record)
         try:
             d = _day(record['day'])
             if d.year != year or d.month != month:
@@ -67,14 +100,13 @@ def prepare_monthly_inputs(year: int, month: int):
             role = str(record.get('role') or '').strip()
             if not name or not role:
                 raise ReportDataError('缺少姓名或岗位')
-            hours = _hours(record.get('hours'))
             if hours is None:
-                problems.append(f'第{index}笔缺少时数（不自动补零）')
+                problems.append(f'第{index}笔服务时数待结算')
             mapped.append({
                 '日期': d, '姓名': name, '报名': 0, '签到': 1,
                 '岗位': role, '开始时间': _clock(record.get('start_time')),
                 '结束时间': _clock(record.get('end_time')),
-                '时数': hours, '义工卡号': '',
+                '时数': hours if hours is not None else '待结算', '义工卡号': '',
                 '备注': str(record.get('remarks') or '').strip(),
                 '_volunteer_id': record.get('volunteer_id'),
                 '_data_source': record.get('data_source'),

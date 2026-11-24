@@ -14,6 +14,7 @@ from schedule.services.schedule_calendar_queries import (
 from schedule.services.schedule_signup_queries import (
     get_signup_summary_for_date,
     load_admin_signup_details,
+    display_supply_role,
 )
 from schedule.services.schedule_pending_queries import (
     load_pending_signups_for_date,
@@ -1491,9 +1492,12 @@ def schedule_admin():
     )
     _dashboard_loaded = time.perf_counter()
 
-    signup_details = load_admin_signup_details(override_date) if mode in ("day", "signup", "special", "controls") else []
     buddha_names = load_buddha_name_options()
     fixed_buddha_today = get_fixed_buddha_for_date(override_date)
+    signup_details = load_admin_signup_details(
+        override_date, fixed_buddha=fixed_buddha_today if mode == "day" else None,
+        is_published=dashboard["is_published"], big_day=is_big_day(override_date) if mode == "day" else False
+    ) if mode in ("day", "signup", "special", "controls") else []
     # 佛台请假日期独立于负责人主页日期；允许提前安排未来30天。
     buddha_leave_dates = [(malaysia_today() + timedelta(days=i)).isoformat() for i in range(31)] if mode == "special" else []
     requested_leave_date = request.args.get("buddha_leave_date", "")
@@ -3191,7 +3195,7 @@ def schedule_view_assigned():
         "楼梯卫生": [],
     }
 
-    offering_group = []
+    offering_groups = {"设师父供台": [], "收师父供台": []}
 
     duty_groups = {
         "绿": {
@@ -3229,8 +3233,8 @@ def schedule_view_assigned():
         if role == "卫生" and place in cleaning_groups:
             cleaning_groups[place].append(item)
 
-        elif role == "供台" or place == "设师父供台":
-            offering_group.append(item)
+        elif display_supply_role(role, place):
+            offering_groups[display_supply_role(role, place)].append(item)
 
         elif role == "值班":
             shift_key = str(shift or "").replace("班", "")
@@ -3243,6 +3247,17 @@ def schedule_view_assigned():
         else:
             other_groups.setdefault(place, []).append(item)
 
+    flags = load_day_flags(date_str)
+    for role, field in (("设师父供台", "setup_people"), ("收师父供台", "remove_people")):
+        group = offering_groups[role]
+        seen = {str(item.get("name") or "").strip() for item in group}
+        for name in str(flags.get(field) or "").splitlines():
+            name = name.strip()
+            if name and name not in seen:
+                group.append({"name": name, "id": None})
+                seen.add(name)
+    setup_required = bool(flags.get("need_setup_master_table") or get_special_day_info(date.fromisoformat(date_str)).get("setup_shifu"))
+    remove_required = bool(flags.get("need_remove_master_table"))
     other_groups_display = {place: names for place, names in other_groups.items() if place != "整理佛台"}
 
     # 仅合并查看排班页面的连续时段，不修改原始 assignments。
@@ -3483,28 +3498,21 @@ def schedule_view_assigned():
                 {% endif %}
             </div>
 
-            <h2 class="section-title">🙏 供台</h2>
-
+            {% for role, people in offering_groups.items() %}
+            {% if people or (role == '设师父供台' and setup_required) or (role == '收师父供台' and remove_required) %}
+            <h2 class="section-title">🙏 {{ role }}</h2>
             <div class="assignment-section">
-
-                {% if offering_group %}
-                    {% for item in offering_group %}
-                        <div class="person-row">
-                            <div>
-                                <span class="person-name">{{ item.name }}</span>
-                            </div>
-
-                            <a class="edit-link"
-                            href="/schedule/edit_assigned/{{ item.id }}?return_date={{ date_str }}">
-                                ✏️ 调整
-                            </a>
-                        </div>
-                    {% endfor %}
-                {% else %}
-                    <div class="empty-line">暂无安排</div>
-                {% endif %}
-
+                <div class="person-time">{{ '6:00am ~ 8:00am' if role == '设师父供台' else '12:00pm ~ 2:00pm' }}</div>
+                {% for item in people %}
+                <div class="person-row">
+                    <div><span class="person-name">{{ item.name }}</span></div>
+                    {% if item.id %}<a class="edit-link" href="/schedule/edit_assigned/{{ item.id }}?return_date={{ date_str }}">✏️ 调整</a>
+                    {% else %}<a class="edit-link" href="/schedule?mode=special&amp;override_date={{ date_str }}&amp;panel=master-table{% if role == '收师父供台' %}&amp;remove_date={{ date_str }}{% endif %}">供台设置</a>{% endif %}
+                </div>
+                {% else %}<div class="empty-line" style="color:#b91c1c;">尚未安排</div>{% endfor %}
             </div>
+            {% endif %}
+            {% endfor %}
 
         </div>
 
@@ -3623,7 +3631,9 @@ def schedule_view_assigned():
     """,
         date_str=date_str,
         cleaning_groups=cleaning_groups,
-        offering_group=offering_group,
+        offering_groups=offering_groups,
+        setup_required=setup_required,
+        remove_required=remove_required,
         duty_groups=duty_groups,
         other_groups=other_groups,
         other_groups_display=other_groups_display,
@@ -3632,172 +3642,79 @@ def schedule_view_assigned():
 
 @schedule_bp.route("/reports")
 def public_reports():
-
-    supabase = get_supabase_client()
-
-    files = supabase.storage.from_("reports").list()
-
-    report_files = []
-
-    for f in files:
-        filename = f.get("name")
-
-        if not filename or not filename.endswith(".xlsx"):
-            continue
-
-        signed = supabase.storage.from_("reports").create_signed_url(
-            filename,
-            60 * 60
-        )
-
-        download_url = signed["signedURL"]
-        # 2026-11 起的月报与年月报表中心共用实时生成入口；历史文件和年报不变。
-        match = __import__('re').fullmatch(r'(\d{4})_(\d{2})_month_report\.xlsx', filename)
-        if match and (int(match.group(1)), int(match.group(2))) >= (2026, 11):
-            if session.get('reports_admin_authorized') is True:
-                download_url = url_for('reports.download', kind='month',
-                                       year=int(match.group(1)), month=int(match.group(2)))
-            else:
-                # 实时报表要求管理员 PIN；未验证时进入验证页，避免下载时报 403。
-                download_url = url_for('reports.home')
-
-        report_files.append({
-            "filename": filename,
-            "display_name": display_report_name(filename),
-            "url": download_url
-        })
-
-    # 即使尚未上传 Storage 文件，新月份也应出现在资料中心。
     now = malaysia_now()
-    for year in range(2026, now.year + 1):
-        for month in range(1, 13):
-            if (year, month) < (2026, 11) or (year, month) > (now.year, now.month):
+    authorized = session.get('reports_admin_authorized') is True
+    history = {}
+    other_files = []
+    storage_error = False
+    import re
+    try:
+        bucket = get_supabase_client().storage.from_("reports")
+        files = bucket.list()
+        for f in files:
+            filename = f.get("name")
+            if not filename or not filename.endswith(".xlsx"):
                 continue
-            filename = f"{year}_{month:02d}_month_report.xlsx"
-            if any(item["filename"] == filename for item in report_files):
+            monthly = re.fullmatch(r'(\d{4})_(\d{2})_month_report\.xlsx', filename)
+            yearly = re.fullmatch(r'(\d{4})_year_report\.xlsx', filename)
+            if monthly and (int(monthly[1]), int(monthly[2])) >= (2026, 11):
                 continue
-            live_url = (url_for('reports.download', kind='month', year=year, month=month)
-                        if session.get('reports_admin_authorized') is True
-                        else url_for('reports.home'))
-            report_files.append({"filename": filename,
-                                 "display_name": display_report_name(filename),
-                                 "url": live_url})
-
-    report_files.sort(
-        key=lambda x: x["filename"],
-        reverse=True
-    )
-
+            if yearly and int(yearly[1]) >= 2026:
+                continue
+            item = {"filename": filename, "display_name": display_report_name(filename),
+                    "url": bucket.create_signed_url(filename, 3600)["signedURL"]}
+            if monthly or yearly:
+                history.setdefault((monthly or yearly)[1], []).append(item)
+            else:
+                other_files.append(item)
+    except Exception:
+        from flask import current_app
+        current_app.logger.exception('资料中心历史文件读取失败')
+        storage_error = True
+    for items in history.values():
+        items.sort(key=lambda item: item['filename'], reverse=True)
+    periods = [(y, m) for y in range(2026, now.year + 1) for m in range(1, 13)
+               if (2026, 11) <= (y, m) <= (now.year, now.month)]
     return render_template_string("""
-    <!doctype html>
-    <html>
-    <head>
-    <meta charset="utf-8">
+    <!doctype html><html lang="zh"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>文件中心</title>
-
-    <link rel="stylesheet"
-          href="{{ url_for('static', filename='css/toolbox.css') }}">
-
+    <title>观音堂资料中心</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/toolbox.css') }}">
     <style>
-    .reports-wrap{
-        max-width:900px;
-        margin:auto;
-        padding:24px;
-    }
-
-    .file-row{
-        display:flex;
-        justify-content:space-between;
-        align-items:center;
-        gap:18px;
-        padding:18px 0;
-        border-bottom:1px solid #e5e7eb;
-        font-size:26px;
-    }
-
-    .file-row:last-child{
-        border-bottom:none;
-    }
-
-    .file-name{
-        font-weight:bold;
-    }
-
-    .download-btn{
-        min-width:150px;
-    }
-
-    @media (max-width:700px){
-        .file-row{
-            flex-direction:column;
-            align-items:stretch;
-        }
-
-        .download-btn{
-            width:100%;
-        }
-    }
-    </style>
-    </head>
-
-    <body>
-
-    <div class="reports-wrap">
-
-        <div class="card">
-
-            <h1 class="page-title">📚 观音堂资料中心</h1>
-
-            <p class="page-subtitle">
-                提供月报、年报及相关资料下载。
-            </p>
-
-            {% if report_files %}
-
-                {% for f in report_files %}
-                <div class="file-row">
-
-                    <div class="file-name">
-                        📄 {{ f.display_name }}
-                    </div>
-
-                    <a class="btn-tool btn-blue download-btn"
-                    href="{{ f.url }}">
-                        📥 下载
-                    </a>
-
-                </div>
-                {% endfor %}
-
-            {% else %}
-
-                <div class="empty-state">
-                    <div class="empty-icon">📭</div>
-                    <div class="empty-title">
-                        目前还没有上传报表
-                    </div>
-                    <div class="empty-text">
-                        上传月报或年报后，会显示在这里。
-                    </div>
-                </div>
-
-            {% endif %}
-
-            <div class="btn-row">
-                <a class="btn-tool btn-gray btn-full"
-                href="/schedule/admin">
-                    ⬅ 返回负责人页面
-                </a>
-            </div>
-
-        </div>
-
-    </div>
-
-    </body>
-    </html>
-    """, report_files=report_files)
+    body{background:#f7f6f4;font-family:Microsoft YaHei,Arial,sans-serif}
+    .reports-wrap{max-width:850px;margin:auto;padding:18px 14px 80px}
+    .report-card{background:white;border:1px solid #e5e7eb;border-radius:16px;padding:22px;margin:16px 0}
+    .report-card h2{margin:0 0 12px;font-size:24px;color:#752d3d}
+    .report-card p{font-size:16px;color:#666;line-height:1.6}
+    .report-card select{width:100%;font-size:20px;padding:12px;border:1px solid #ccc;border-radius:10px;margin:8px 0 14px;background:white}
+    .report-card .btn-tool{display:block;width:100%;box-sizing:border-box;text-align:center;font-size:20px}
+    .file-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid #eee;font-size:18px}
+    .file-row .btn-tool{width:auto;flex-shrink:0;font-size:16px}
+    details{padding:12px 0;border-bottom:1px solid #eee}summary{cursor:pointer;font-size:22px;font-weight:bold}
+    .back-link{position:fixed;bottom:16px;right:16px;background:#555;color:white;padding:10px 18px;border-radius:12px;text-decoration:none}
+    </style></head><body><main class="reports-wrap">
+    <h1 class="page-title">📚 观音堂资料中心</h1>
+    <section class="report-card"><h2>📊 实时月报</h2><p>2026年11月起，下载时从云端生成最新报表。</p>
+    <form action="{{ url_for('reports.download',kind='month') if authorized else url_for('reports.home') }}" method="get">
+    <select id="period" aria-label="月报年月" onchange="var p=this.value.split('-');this.form.year.value=p[0];this.form.month.value=p[1];">
+    {% for y,m in periods|reverse %}<option value="{{y}}-{{m}}">{{y}}年{{m}}月</option>{% endfor %}</select>
+    <input type="hidden" name="year" value="{{now.year}}"><input type="hidden" name="month" value="{{now.month}}">
+    <button class="btn-tool btn-blue" type="submit">{{ '📥 下载月报 Excel' if authorized else '🔐 验证后下载月报' }}</button></form></section>
+    <section class="report-card"><h2>📈 实时年报</h2><p>2026年起，下载时重新生成全年出席报表。</p>
+    <form action="{{ url_for('reports.download',kind='year') if authorized else url_for('reports.home') }}" method="get">
+    <select name="year" aria-label="年报年份">{% for y in range(now.year,2025,-1) %}<option value="{{y}}">{{y}}年</option>{% endfor %}</select>
+    <button class="btn-tool btn-blue" type="submit">{{ '📥 下载年报 Excel' if authorized else '🔐 验证后下载年报' }}</button></form></section>
+    <section class="report-card"><h2>🗂 历史报表</h2><p>保留原先上传的历史 Excel 文件。</p>
+    {% if storage_error %}<p>历史文件暂时无法完整读取，请稍后重试。</p>{% endif %}
+    {% for year,items in history %}<details><summary>{{year}} 年（{{items|length}} 份）</summary>
+    {% for f in items %}<div class="file-row"><b>{{f.display_name}}</b><a class="btn-tool btn-blue" href="{{f.url}}">下载</a></div>{% endfor %}</details>
+    {% else %}<p>暂无可显示的历史报表。</p>{% endfor %}</section>
+    <section class="report-card"><h2>📁 其他资料</h2>
+    {% for f in other_files %}<div class="file-row"><b>{{f.display_name}}</b><a class="btn-tool btn-blue" href="{{f.url}}">下载</a></div>{% else %}<p>暂无其他 Excel 资料。</p>{% endfor %}</section>
+    <a class="back-link" href="/schedule/admin">⬅ 返回</a></main></body></html>
+    """, now=now, periods=periods, authorized=authorized,
+        history=sorted(history.items(), reverse=True), other_files=other_files,
+        storage_error=storage_error)
 
 
 # 手动查看正式发布后的新增报名；不触发 WhatsApp 自动发送。
@@ -5815,3 +5732,6 @@ from schedule.routes import management_menu_routes  # noqa: F401
 
 # 第六阶段：注册独立负责人辅助路由（原 endpoint 名称不变）
 from schedule.routes import admin_utility_routes  # noqa: F401
+
+from schedule.services.flower_fruit_routes import register_flower_fruit_routes
+register_flower_fruit_routes(schedule_bp)
