@@ -348,7 +348,9 @@ PAGE = """
 <html lang="{{ t.html_lang }}">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <link rel="stylesheet" href="/static/css/volunteer-actions.css">
+  <script defer src="/static/js/volunteer-actions.js"></script>
   <title>{{ t.system_title }}</title>
 
   <link rel="stylesheet" href="{{ url_for('static', filename='css/toolbox.css') }}">
@@ -732,7 +734,7 @@ PAGE = """
   </div>
 
   <div class="card attendance-list-highlight" style="padding:14px 18px;">
-    <details id="todayAttendanceDetails">
+    <details id="todayAttendanceDetails" {% if request.args.get('attendance') == '1' %}open{% endif %}>
       <summary style="cursor:pointer;font-weight:700;font-size:18px;">👥 {{ '查看今日签到名单' if t.html_lang.startswith('zh') else 'View today’s attendance' }}（<span id="liveListCount">{{ today_count }}</span>）</summary>
       <div id="todayAttendanceList" style="margin-top:12px;">{{ '点击展开后加载名单…' if t.html_lang.startswith('zh') else 'Loading on expand…' }}</div>
     </details>
@@ -741,16 +743,16 @@ PAGE = """
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, message in messages %}
       {% if category == 'signin_ok' %}
-      <div id="signinSuccessNotice" class="card" role="status" aria-live="polite"
+      <div id="signinSuccessNotice" class="card" data-vol-result role="status" aria-live="polite"
            style="background:#e8f9ee;border:3px solid #16844a;text-align:center;padding:30px 18px;">
         <div style="font-size:54px;">✅</div>
         <h2 style="color:#126b39;font-size:32px;margin:8px 0;">{{ '签到成功！' if t.html_lang.startswith('zh') else 'Check-in successful!' }}</h2>
         <div style="font-size:22px;line-height:1.8;white-space:pre-line;overflow-wrap:anywhere;">{{ message }}</div>
         <p style="font-size:18px;color:#126b39;">{{ '感恩您的发心！无需重复签到。' if t.html_lang.startswith('zh') else 'Thank you! No need to check in again.' }}</p>
-        <p id="signinSuccessCountdown" style="font-size:17px;color:#555;">{{ '10 秒后自动返回签到首页' if t.html_lang.startswith('zh') else 'Returning to the check-in page in 10 seconds' }}</p>
+        <a class="btn-tool btn-green" href="{{ url_for('index') }}">{{ '完成／返回' if t.html_lang.startswith('zh') else 'Done / Return' }}</a>
       </div>
       {% else %}
-      <div class="alert {{ 'alert-success' if category == 'ok' else 'alert-danger' }}">{{ message }}</div>
+      <div {% if category == 'signin_failed' %}data-vol-result role="alert"{% endif %} class="alert {{ 'alert-success' if category == 'ok' else 'alert-danger' }}">{{ message }}</div>
       {% endif %}
     {% endfor %}
   {% endwith %}
@@ -758,9 +760,11 @@ PAGE = """
   <div class="card" id="signinFormCard">
     <h2 class="section-title">✅ {{ t.check_in }}</h2>
 
-    <form method="post"
+    <form method="post" id="volunteerSigninForm" data-vol-submit
+          data-vol-status="#signinSubmitStatus" data-vol-records="{{ url_for('index', attendance=1) }}#todayAttendanceList"
           action="{{ url_for('do_sign_in') }}"
           onsubmit="return quickSignIn();">
+      <button type="submit" id="signinSubmit" hidden></button>
 
       <input type="hidden" id="assignment_id" name="assignment_id" value="">
 
@@ -801,7 +805,7 @@ PAGE = """
             type="password"
             inputmode="numeric"
             pattern="[0-9]*"
-            autocomplete="new-password"
+            autocomplete="off"
             autocorrect="off"
             autocapitalize="off"
             spellcheck="false"
@@ -921,11 +925,15 @@ PAGE = """
 </div>
 
   <div style="display:none" aria-hidden="true"><button id="signOutBtn"></button><div id="signoutRoleGroup"></div><select id="signoutRole"></select><div id="listSignoutMask" style="display:none"></div><input id="listPinInput"><input id="listSignoutRow"><input id="listSignoutPin"><div id="listSignoutTarget"></div><form id="listQuickSignoutForm"></form><form id="quickSignOutForm"><input id="signout_volunteer_id"><input id="signout_pin"><input id="signout_assignment_id"><input id="signout_role"></form></div>
-<div id="signinModal" class="signin-modal-mask" role="dialog" aria-modal="true" aria-labelledby="signinModalTitle" style="display:none;">
-  <div class="signin-modal-card">
+<div id="signinModal" class="signin-modal-mask vol-dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="signinModalTitle" style="display:none;">
+  <div class="signin-modal-card vol-dialog-card">
     <h2 id="signinModalTitle"></h2>
-    <div id="signinModalContent"></div>
-    <button type="button" class="signin-modal-cancel" onclick="closeSigninModal()">{{ '暂不签到' if t.html_lang.startswith('zh') else 'Not now' }}</button>
+    <div id="signinModalContent" class="vol-dialog-content"></div>
+    <div class="vol-dialog-actions">
+      <p id="signinSubmitStatus" class="vol-action-status" role="status"></p>
+      <button id="signinConfirm" type="button" class="signin-modal-confirm" data-vol-lock="volunteerSigninForm" style="display:none">{{ '✅ 确认签到' if t.html_lang.startswith('zh') else '✅ Confirm check-in' }}</button>
+      <button type="button" class="signin-modal-cancel" data-vol-lock="volunteerSigninForm" onclick="closeSigninModal()">{{ '暂不签到' if t.html_lang.startswith('zh') else 'Not now' }}</button>
+    </div>
   </div>
 </div>
 <script>
@@ -933,6 +941,7 @@ const LIST_LANG_ZH = {{ t.html_lang.startswith('zh')|tojson }};
 let listSignoutId = null;
 const todayDetails = document.getElementById('todayAttendanceDetails');
 const todayList = document.getElementById('todayAttendanceList');
+const attendanceTimeout = () => window.AbortSignal && AbortSignal.timeout ? AbortSignal.timeout(10000) : undefined;
 function listText(zh, en) { return LIST_LANG_ZH ? zh : en; }
 function safeText(v) { return String(v == null ? '' : v); }
 function formatListTime(value) {
@@ -976,7 +985,7 @@ async function loadTodayList() {
   if (todayListBusy) return;
   todayListBusy = true;
   try {
-    const resp=await fetch({{ url_for('today_attendance_list')|tojson }},{cache:'no-store', signal:AbortSignal.timeout(10000)});
+    const resp=await fetch({{ url_for('today_attendance_list')|tojson }},{cache:'no-store', signal:attendanceTimeout()});
     if(!resp.ok) throw new Error('HTTP '+resp.status);
     const data=await resp.json();renderTodayList(data.rows || []);
     todayListLoaded = true;
@@ -985,18 +994,20 @@ async function loadTodayList() {
   } finally { todayListBusy = false; }
 }
 todayDetails.addEventListener('toggle',()=>{if(todayDetails.open)loadTodayList();});
+if (todayDetails.open) loadTodayList();
 // 只更新统计数字和已展开的名单；不刷新整页、不干扰正在输入的编号或 PIN。
 let attendanceRefreshBusy = false;
 async function refreshAttendanceOverview() {
   if (attendanceRefreshBusy || document.hidden) return;
   attendanceRefreshBusy = true;
   try {
-    const resp = await fetch({{ url_for('today_attendance_stats')|tojson }}, {cache:'no-store', signal:AbortSignal.timeout(10000)});
+    const resp = await fetch({{ url_for('today_attendance_stats')|tojson }}, {cache:'no-store', signal:attendanceTimeout()});
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
     if (data.date !== {{ today_date|tojson }}) {
       // 跨午夜时更新日期、农历信息和当日名单；避免在输入中途刷新。
-      if (!document.getElementById('volunteer_id').value.trim() &&
+      if (!document.getElementById('signinSuccessNotice') &&
+          !document.getElementById('volunteer_id').value.trim() &&
           !document.getElementById('pin').value.trim() &&
           document.getElementById('listSignoutMask').style.display === 'none') {
         window.location.reload();
@@ -1245,6 +1256,8 @@ async function lookupVolunteer() {
     }
 
      if (pin && data.volunteer.pin_ok) {
+      const activeField = document.activeElement;
+      if (activeField && (activeField.id === 'pin' || activeField.id === 'volunteer_id')) activeField.blur();
       showCalendarClaim(box, finalId, pin, lookupKey);
       showSigninModal(data);
     }
@@ -1304,10 +1317,13 @@ function signinModalNowMinutes(){
   return Number(parts.find(p=>p.type==='hour').value)*60+Number(parts.find(p=>p.type==='minute').value);
 }
 function showSigninModal(data){
-  if (verifiedLookupKey !== currentLookupKey() || !data.volunteer.pin_ok) return;
+  if (!data || verifiedLookupKey !== currentLookupKey() || !data.volunteer.pin_ok || document.getElementById('volunteerSigninForm').dataset.volBusy) return;
   const title=document.getElementById('signinModalTitle');
   const content=document.getElementById('signinModalContent');
   content.replaceChildren();
+  document.getElementById('signinConfirm').style.display = 'none';
+  document.getElementById('signinSubmitStatus').textContent = LIST_LANG_ZH
+    ? '身份已验证，尚未签到。' : 'Identity verified. Check-in not submitted yet.';
   const modal=document.getElementById('signinModal');
   const now=signinModalNowMinutes();
   const defaults={'卫生':'08:00','佛台':'08:00','供花':'08:00','供果':'08:00','供台':'06:00','膳食':'08:00','佛学班':'10:00'};
@@ -1318,13 +1334,12 @@ function showSigninModal(data){
     const start=shift?roleSortMinutes(shift.start_time):roleSortMinutes(defaults[item.role]);
     const end=shift?roleSortMinutes(shift.end_time):9999;
     const current=now>=start && now<end;
-    return {...item,shift,index,start,current,distance:current?0:Math.abs(now-start)};
+    return {...item,shift,shifts,index,start,current,distance:current?0:Math.abs(now-start)};
   }).sort((a,b)=>Number(b.current)-Number(a.current)||a.distance-b.distance||a.index-b.index);
   if (!signinModalChoices.length){
     title.textContent=LIST_LANG_ZH?'⚠️ 当前没有可签到岗位':'⚠️ No eligible roles';
     modal.style.display='flex';return;
   }
-  if (signinModalChoices.length===1){showSigninModalConfirm(0);return;}
   title.textContent=LIST_LANG_ZH?'请选择签到岗位':'Choose a role';
   signinModalChoices.forEach((item,i)=>{
     const btn=document.createElement('button');btn.type='button';btn.className='signin-modal-choice';
@@ -1338,13 +1353,19 @@ function showSigninModal(data){
 function showSigninModalConfirm(index){
   const item=signinModalChoices[index];if(!item)return;
   const content=document.getElementById('signinModalContent');content.replaceChildren();
+  document.getElementById('signinSubmitStatus').textContent = LIST_LANG_ZH ? '尚未提交签到' : 'Check-in not submitted yet';
   document.getElementById('signinModalTitle').textContent=LIST_LANG_ZH?'🟢 当前可签到':'🟢 Ready to check in';
   const volunteerName=window.lastAttendanceLookup?.volunteer?.姓名 || '';
   if(volunteerName){const name=document.createElement('div');name.style.cssText='text-align:center;font-size:24px;font-weight:900;margin:0 0 12px;color:#145b37';name.textContent=(LIST_LANG_ZH?'👤 义工姓名：':'👤 Volunteer: ')+volunteerName;content.appendChild(name);}
   const info=document.createElement('div');info.style.cssText='text-align:center;font-size:22px;font-weight:800;line-height:1.7';
   info.textContent=item.label;
   content.appendChild(info);
-  if(item.shift){const detail=document.createElement('div');detail.style.cssText='text-align:center;font-size:19px;margin:8px 0 20px';detail.textContent=[item.shift.assigned_place,[item.shift.start_time,item.shift.end_time].filter(Boolean).join(' ～ ')].filter(Boolean).join(' · ');content.appendChild(detail);}
+  const detail=document.createElement('div');detail.style.cssText='text-align:center;font-size:19px;margin:8px 0 20px;white-space:pre-line';
+  const shifts = item.role === '值班' ? item.shifts : item.shifts.slice(0, 1);
+  detail.textContent = shifts.length
+    ? shifts.map(shift => [shift.assigned_place, [shift.start_time, shift.end_time].filter(Boolean).join(' ～ ')].filter(Boolean).join(' · ')).join('\\n')
+    : (LIST_LANG_ZH ? '暂无正式排班时段' : 'No scheduled shift time');
+  content.appendChild(detail);
   // 转换岗位：后台会在新岗位签到事务中结束上一岗位；不在前端提前签退。
   const openRoles=(window.lastAttendanceLookup?.open_roles||[])
     .filter(role=>!(role==='值班' && item.role==='供台') && !(role==='供台' && item.role==='值班'));
@@ -1360,18 +1381,22 @@ function showSigninModalConfirm(index){
   if(item.role==='值班'){
     const label=document.createElement('label');label.textContent=LIST_LANG_ZH?'义工卡号':'Volunteer card number';label.style.cssText='display:block;font-size:20px;font-weight:700;margin-top:14px';
     cardInput=document.createElement('input');cardInput.className='form-input';cardInput.placeholder=LIST_LANG_ZH?'请输入义工卡号':'Enter card number';cardInput.value=document.getElementById('card_no').value;
+    cardInput.id = label.htmlFor = 'signinModalCardNumber';
     content.appendChild(label);content.appendChild(cardInput);
   }
-  const confirm=document.createElement('button');confirm.type='button';confirm.className='signin-modal-confirm';confirm.textContent=LIST_LANG_ZH?'✅ 确认签到':'✅ Confirm check-in';
-  confirm.addEventListener('click',()=>{
+  const confirm=document.getElementById('signinConfirm');
+  confirm.style.display='block';
+  confirm.onclick=()=>{
     if(verifiedLookupKey!==currentLookupKey()){closeSigninModal();alert(TXT.lookup_required_alert);return;}
-    if(cardInput){if(!cardInput.value.trim()){cardInput.focus();return;}document.getElementById('card_no').value=cardInput.value.trim();}
+    if(cardInput){if(!cardInput.value.trim()){document.getElementById('signinSubmitStatus').textContent=LIST_LANG_ZH?'请先填写义工卡号':'Enter your volunteer card number first';cardInput.focus();return;}document.getElementById('card_no').value=cardInput.value.trim();}
     document.getElementById('role').value=item.role;
     toggleCardNo();refreshRoleAction();
     // 旧函数 toggleCardNo 不会清空卡号；复用原来的 quickSignIn 和 POST。
-    closeSigninModal();
-    const form=document.getElementById('role').closest('form');if(form)form.requestSubmit();
-  });content.appendChild(confirm);
+    const form = document.getElementById('volunteerSigninForm');
+    form.dataset.volConfirmed = 'true';
+    document.getElementById('signinSubmit').click();
+    delete form.dataset.volConfirmed;
+  };
   if(signinModalChoices.length>1){const back=document.createElement('button');back.type='button';back.className='signin-modal-cancel';back.textContent=LIST_LANG_ZH?'← 返回选择岗位':'← Choose another role';back.addEventListener('click',()=>showSigninModal(window.lastAttendanceLookup));content.appendChild(back);}
   document.getElementById('signinModal').style.display='flex';
 }
@@ -1402,10 +1427,8 @@ function renderSigninRoleButtons(data, verified) {
     button.appendChild(action);
     button.addEventListener('click', () => {
       if (verifiedLookupKey !== currentLookupKey()) {alert(TXT.lookup_required_alert);return;}
-      document.getElementById('role').value = item.role;
-      toggleCardNo(); refreshRoleAction();
-      const form = document.getElementById('role').closest('form');
-      if (form) form.requestSubmit();
+      showSigninModal(data);
+      showSigninModalConfirm(signinModalChoices.findIndex(choice => choice.role === item.role));
     });
     holder.appendChild(button);
   });
@@ -1506,6 +1529,7 @@ function toggleAdminBox() {
 }
 
 function quickSignIn() {
+  if (!document.getElementById('volunteerSigninForm').dataset.volConfirmed) return false;
   if (verifiedLookupKey !== currentLookupKey()) {
     alert(TXT.lookup_required_alert);
     return false;
@@ -1601,17 +1625,6 @@ const signinSuccessNotice = document.getElementById('signinSuccessNotice');
 if (signinSuccessNotice) {
   document.getElementById('signinFormCard').style.display = 'none';
   signinSuccessNotice.scrollIntoView({block:'center'});
-  let secondsLeft = 10;
-  const countdown = document.getElementById('signinSuccessCountdown');
-  const countdownTimer = setInterval(() => {
-    secondsLeft -= 1;
-    if (secondsLeft <= 0) {
-      clearInterval(countdownTimer);
-      window.location.replace({{ url_for('index')|tojson }});
-      return;
-    }
-    countdown.textContent = LIST_LANG_ZH ? `${secondsLeft} 秒后自动返回签到首页` : `Returning to the check-in page in ${secondsLeft} seconds`;
-  }, 1000);
 }
 setTimeout(() => {
   document.querySelectorAll('.alert-success').forEach(el => {
@@ -2119,27 +2132,41 @@ def quick_list_signout():
 def do_sign_in():
     auto_signout_unfinished_today()
 
+    home = url_for("index")
+    response = jsonify(next=home) if request.headers.get("X-Volunteer-Submit") == "1" else redirect(home)
     volunteer_id = request.form.get("volunteer_id", "").strip()
     role = request.form.get("role", "").strip()
     if role == "值班" and not request.form.get("card_no", "").strip():
-        flash("请先填写义工卡号。" if request.cookies.get("lang", "zh") != "en" else "Please enter your volunteer card number.", "bad")
-        return redirect(url_for("index"))
+        flash("签到未完成，请先填写义工卡号。" if get_lang() == "zh" else "Check-in incomplete. Enter your volunteer card number.", "signin_failed")
+        return response
     # 三种岗位限制由 attendance_service.sign_in() 统一判断。
     # 不在路由重复检查，以免卫生报名被错误要求正式排班。
+    receipt = {}
     ok, msg = sign_in(
         volunteer_id,
         request.form.get("pin", ""),
         role,
         request.form.get("card_no", ""),
         request.form.get("assignment_id", ""),
+        receipt=receipt,
     )
 
     if ok:
-        flash(f"{msg}\n签到时间：{now_time_str()}", "signin_ok")
+        if get_lang() == "zh":
+            result = f"义工姓名：{receipt['name']}\n岗位：{receipt['role']}\n签到时间：{receipt['time']}"
+            if receipt.get("continuous_duty"):
+                result += "\n同岗位连续换地点无需重新签到。"
+            result += "\n系统将按岗位结束时间自动签退。"
+        else:
+            result = f"Volunteer: {receipt['name']}\nRole: {role_label(receipt['role'])}\nCheck-in time: {receipt['time']}"
+            if receipt.get("continuous_duty"):
+                result += "\nNo need to check in again when moving between locations in the same continuous duty shift."
+            result += "\nThe system will automatically check you out at the end of your shift."
+        flash(result, "signin_ok")
     else:
-        flash(msg, "bad")
+        flash(f"签到未完成。{msg}" if get_lang() == "zh" else "Check-in incomplete. Check your volunteer number, PIN and role, or view today’s attendance if you already checked in.", "signin_failed")
 
-    return redirect(url_for("index"))
+    return response
 
 
 @app.route("/signout", methods=["POST"])
@@ -2699,5 +2726,3 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-
-    

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from flask import Blueprint, abort, redirect, render_template_string, request, session, url_for
 from attendance_service import find_volunteer, verify_pin_for_volunteer
 from db import db_query, get_conn
+from utils import get_lang
 
 hongfa_bp = Blueprint('hongfa', __name__, url_prefix='/hongfa')
 TZ = ZoneInfo('Asia/Kuala_Lumpur')
@@ -52,7 +53,14 @@ def render(content, **kwargs):
         content += '<style>.hf-back{bottom:90px}</style>'
     if back:
         content += '<a class="hf-back" href="'+back[0]+'">'+back[1]+'</a>'
-    return render_template_string(BASE.replace('{% block content %}{% endblock %}', content), **kwargs)
+    template = BASE
+    if request.endpoint in ('hongfa.join', 'hongfa.leader_checkin'):
+        lang = get_lang()
+        kwargs['zh'] = lang == 'zh'
+        template = template.replace('lang="zh"', f'lang="{lang}"', 1)
+        template = template.replace('initial-scale=1"', 'initial-scale=1,viewport-fit=cover"', 1)
+        template = template.replace('</head>', '<link rel="stylesheet" href="/static/css/volunteer-actions.css"><script defer src="/static/js/volunteer-actions.js"></script></head>', 1)
+    return render_template_string(template.replace('{% block content %}{% endblock %}', content), **kwargs)
 
 
 def csrf_token():

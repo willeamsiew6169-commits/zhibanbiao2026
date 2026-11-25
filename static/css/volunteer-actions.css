@@ -1,0 +1,74 @@
+.vol-action-status {
+    color: #713900;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.35;
+    margin: 0 0 6px;
+    overflow-wrap: anywhere;
+}
+.vol-action-status:empty { display: none; }
+.vol-action-status a { display: inline-block; margin-left: 8px; }
+.vol-safe-area body {
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+    padding-left: env(safe-area-inset-left, 0px);
+}
+.vol-action-dock {
+    background: #fff;
+    box-sizing: border-box;
+    padding: 8px 12px;
+    text-align: center;
+}
+.vol-action-dock button, .vol-dialog-actions button {
+    min-height: 48px;
+    font-size: 20px;
+}
+.vol-action-dock button {
+    width: min(100%, 580px);
+    margin: 0 auto;
+    background: #126338;
+    color: white;
+}
+.vol-action-dock button:disabled, .vol-dialog-actions button:disabled {
+    opacity: .68;
+    cursor: default;
+}
+.vol-action-space { height: var(--vol-dock-height, 0px); }
+.vol-dialog-card {
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    max-height: calc(100vh - 36px);
+    overflow: hidden !important;
+}
+.vol-dialog-content { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.vol-dialog-actions { flex: none; }
+.vol-dialog-actions .vol-action-status { grid-column: 1 / -1; }
+[data-vol-result] { scroll-margin-block: 20px; }
+@media (max-width: 700px), (pointer: coarse) {
+    .vol-action-ready .vol-action-dock {
+        position: fixed;
+        left: var(--vol-view-left, 0px);
+        width: var(--vol-view-width, 100%);
+        bottom: calc(var(--vol-view-bottom, 0px) + var(--vol-nav-height, 0px));
+        padding: 8px max(12px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+        border-top: 1px solid #b7ccbf;
+        box-shadow: 0 -3px 12px #0002;
+        z-index: 40;
+    }
+    .vol-action-ready { scroll-padding-bottom: calc(var(--vol-dock-height, 0px) + var(--vol-nav-height, 0px) + var(--vol-view-bottom, 0px)); }
+    .vol-action-space { height: calc(var(--vol-dock-height, 0px) + var(--vol-nav-height, 0px)); }
+    .vol-dialog-overlay {
+        top: var(--vol-view-top, 0px) !important;
+        bottom: auto !important;
+        height: 100vh;
+        height: var(--vol-view-height, 100dvh);
+        box-sizing: border-box;
+        padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)) !important;
+    }
+    .vol-dialog-overlay .vol-dialog-card { max-height: 100%; padding: 16px; }
+    .vol-dialog-overlay .vol-dialog-card h2 { font-size: 23px; margin-bottom: 8px; }
+    .vol-dialog-overlay .vol-dialog-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .vol-dialog-actions button { flex: 1 1 0; width: auto; margin: 0; padding: 8px; }
+    .vol-dialog-actions .vol-action-status { flex-basis: 100%; }
+}

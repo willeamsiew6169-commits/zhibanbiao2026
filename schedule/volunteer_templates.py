@@ -2,10 +2,12 @@
 
 VOLUNTEER_SIGNUP_HTML = """
 <!doctype html>
-<html>
+<html lang="{{ 'zh' if zh else 'en' }}">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="stylesheet" href="/static/css/volunteer-actions.css">
+<script defer src="/static/js/volunteer-actions.js"></script>
 <link rel="manifest"
       href="/volunteer-manifest.json?v=5">
 
@@ -236,26 +238,14 @@ body { background-color: #F0F8F1 !important; }
     .action-sub-text{
         font-size:19px;
     }
-}
-/* Mobile navigation clearance and scrollable confirmation. */
-@media (max-width:700px), (pointer:coarse){
-    .volunteer-wrap{
-        padding-bottom:96px;
-        padding-bottom:calc(96px + env(safe-area-inset-bottom, 0px));
+
+    .confirm-content{
+        font-size:20px;
+        line-height:1.5;
     }
-    .confirm-overlay{
-        box-sizing:border-box;
-        padding-bottom:96px;
-        padding-bottom:calc(96px + env(safe-area-inset-bottom, 0px));
-        max-height:100vh;
-        max-height:100dvh;
-        overflow-y:auto;
-    }
-    .confirm-box{
-        box-sizing:border-box;
-        min-height:0;
-        max-height:100%;
-        overflow-y:auto;
+
+    .confirm-content p{
+        margin:0 0 12px;
     }
 }
 </style>
@@ -280,6 +270,7 @@ body { background-color: #F0F8F1 !important; }
             </p>
         </div>
 
+        <p>{{ '身份已验证，请选择报名方式并提交。' if zh else 'Identity verified. Choose a signup option, then submit.' }}</p>
         <div class="volunteer-actions">
 
             <button
@@ -369,7 +360,9 @@ body { background-color: #F0F8F1 !important; }
         <form
             id="daily_signup_form"
             method="post"
-            action="/volunteer/signup">
+            action="/volunteer/signup" data-vol-submit
+            data-vol-status="#signupSubmitStatus" data-vol-records="/volunteer/my_schedule"
+            onsubmit="return this.dataset.volConfirmed === 'true'">
 
             <div class="form-group"><label class="form-label">当前报名义工</label>
                 <div class="lookup-result" style="color:#176b39;font-weight:bold">{{ login_id }}　{{ login_name }}</div>
@@ -699,38 +692,44 @@ body { background-color: #F0F8F1 !important; }
                 </div>
 
                 <!-- 所有报名项目都需要这个按钮，所以放在 duty_section 外面 -->
-                <div class="notice-card">
+                <div class="vol-action-space"></div>
+                <div class="vol-action-dock">
+                    <p id="signupDraftStatus" class="vol-action-status" role="status">{{ '尚未提交' if zh else 'Not submitted yet' }}</p>
                     <button
                         type="button"
                         class="btn-tool btn-green btn-full"
                         onclick="openSignupConfirm(event)">
-                        🙏 提交报名
+                        {{ '🙏 提交报名' if zh else 'Continue to confirmation' }}
                     </button>
+                    <button type="submit" id="dailySignupSubmit" hidden></button>
                 </div>
 
             </div>
 
         </form>
 
-        <div id="confirm_modal" class="confirm-overlay" style="display:none;">
-            <div class="confirm-box">
-                <h2>📋 确认报名资料</h2>
+        <div id="confirm_modal" class="confirm-overlay vol-dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="signupConfirmTitle" style="display:none;">
+            <div class="confirm-box vol-dialog-card">
+                <h2 id="signupConfirmTitle">{{ '📋 确认报名资料' if zh else 'Review your signup' }}</h2>
 
-                <div id="confirm_content" class="confirm-content"></div>
+                <div id="confirm_content" class="confirm-content vol-dialog-content"></div>
 
-                <div class="confirm-actions">
+                <div class="confirm-actions vol-dialog-actions">
+                    <p id="signupSubmitStatus" class="vol-action-status" role="status"></p>
                     <button
                         type="button"
                         class="btn-tool btn-gray"
+                        data-vol-lock="daily_signup_form"
                         onclick="closeSignupConfirm()">
-                        取消
+                        {{ '取消' if zh else 'Cancel' }}
                     </button>
 
                     <button
                         type="button"
                         class="btn-tool btn-green"
+                        data-vol-lock="daily_signup_form"
                         onclick="submitSignupForm()">
-                        确认报名
+                        {{ '确认报名' if zh else 'Confirm signup' }}
                     </button>
                 </div>
             </div>
@@ -742,8 +741,8 @@ body { background-color: #F0F8F1 !important; }
 
 <script>
 const ALL_TIMES = {{ times | tojson }};
+const SIGNUP_ZH = {{ zh | tojson }};
 
-let signupFormSubmitting = false;
 let currentVolunteerText = "";
 let lookupTimer = null;
 
@@ -1259,7 +1258,7 @@ async function openSignupConfirm(event) {
         event.preventDefault();
     }
 
-    if (signupFormSubmitting) {
+    if (document.getElementById("daily_signup_form").dataset.volBusy) {
         return false;
     }
 
@@ -1286,13 +1285,13 @@ async function openSignupConfirm(event) {
         : "";
 
     if (!keyword) {
-        alert("请输入义工编号、姓名或电话。");
+        alert(SIGNUP_ZH ? "请输入义工编号、姓名或电话。" : "Enter a volunteer number, name or phone number.");
         keywordInput?.focus();
         return false;
     }
 
     if (!signupDate) {
-        alert("请选择报名日期。");
+        alert(SIGNUP_ZH ? "请选择报名日期。" : "Choose a signup date.");
         dateInput?.focus();
         return false;
     }
@@ -1340,18 +1339,18 @@ async function openSignupConfirm(event) {
 
     let confirmHtml = `
         <p>
-            <b>义工：</b><br>
-            ${volunteerText}
+            <b>${SIGNUP_ZH ? "义工" : "Volunteer"}</b><br>
+            ${escapeDateText(volunteerText)}
         </p>
 
         <p>
-            <b>日期：</b><br>
+            <b>${SIGNUP_ZH ? "日期" : "Date"}</b><br>
             ${signupDate}　<span style="color:#b91c1c;font-weight:bold;font-size:0.85em;">${weekday}</span>${lunarHtml}
         </p>
 
         <p>
-            <b>岗位：</b><br>
-            ${role}
+            <b>${SIGNUP_ZH ? "岗位" : "Role"}</b><br>
+            ${escapeDateText(SIGNUP_ZH ? role : ({"值班":"Duty","卫生":"Cleaning","佛台":"Altar","膳食":"Meal Team","素食结缘":"Vegetarian meal"}[role] || role))}
         </p>
     `;
 
@@ -1399,13 +1398,13 @@ async function openSignupConfirm(event) {
             parseTimeToMinutes(endTime) <=
             parseTimeToMinutes(startTime)
         ) {
-            alert("请选择正确的开始时间和结束时间。");
+            alert(SIGNUP_ZH ? "请选择正确的开始时间和结束时间。" : "Choose a valid start and end time.");
             return false;
         }
 
         confirmHtml += `
             <p>
-                <b>时间：</b><br>
+                <b>${SIGNUP_ZH ? "时间" : "Time"}</b><br>
                 ${startTime} ～ ${endTime}
             </p>
         `;
@@ -1440,7 +1439,7 @@ function closeSignupConfirm() {
 
 
 function submitSignupForm() {
-    if (signupFormSubmitting) {
+    if (document.getElementById("daily_signup_form").dataset.volBusy) {
         return;
     }
 
@@ -1452,8 +1451,9 @@ function submitSignupForm() {
         return;
     }
 
-    signupFormSubmitting = true;
-    form.submit();
+    form.dataset.volConfirmed = 'true';
+    document.getElementById("dailySignupSubmit").click();
+    delete form.dataset.volConfirmed;
 }
 
 
@@ -1583,12 +1583,7 @@ function showDailySignup() {
 
     signupBox.style.display = "block";
 
-    setTimeout(function () {
-        signupBox.scrollIntoView({
-            behavior: "smooth",
-            block: "start"
-        });
-    }, 100);
+    signupBox.scrollIntoView({block: "start"});
 }
 
 
@@ -1694,10 +1689,12 @@ document.addEventListener("DOMContentLoaded", function () {
 
 VOLUNTEER_PREBOOK_HTML = """
 <!doctype html>
-<html>
+<html lang="{{ 'zh' if zh else 'en' }}">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="stylesheet" href="/static/css/volunteer-actions.css">
+<script defer src="/static/js/volunteer-actions.js"></script>
 <title>多日报名</title>
 
 <link rel="stylesheet"
@@ -1838,13 +1835,6 @@ VOLUNTEER_PREBOOK_HTML = """
     .day-card{
         font-size:24px;
         padding:14px 0;
-    }
-}
-/* Leave room below the final buttons on mobile. */
-@media (max-width:700px), (pointer:coarse){
-    .prebook-wrap{
-        padding-bottom:96px;
-        padding-bottom:calc(96px + env(safe-area-inset-bottom, 0px));
     }
 }
 </style>
@@ -1999,10 +1989,12 @@ document.addEventListener("DOMContentLoaded", function () {
         可一次报名整个月份，减少每天重复填写。
     </p>
 
-    <form method="post" action="/volunteer/prebook">
+    <form method="post" action="/volunteer/prebook" data-vol-submit
+          data-vol-records="/volunteer/my_schedule">
 
         <div class="form-group"><label class="form-label">当前报名义工</label>
             <p style="font-size:24px;color:#176b39;font-weight:bold">{{ login_id }}　{{ login_name }}</p>
+            <p>{{ '身份已验证，尚未提交报名。' if zh else 'Identity verified. Signup not submitted yet.' }}</p>
             <input type="hidden" name="keyword" id="keyword" value="{{ login_id }}">
             <input type="hidden" name="branch" id="multi_branch" value="CHE">
         </div>
@@ -2123,14 +2115,16 @@ document.addEventListener("DOMContentLoaded", function () {
 
         </div>
 
-        <div class="btn-row">
-
+        <div class="vol-action-dock">
+            <p class="vol-action-status" role="status">{{ '尚未提交' if zh else 'Not submitted yet' }}</p>
             <button
                 class="btn-tool btn-green btn-full"
                 type="submit">
-                ✅ 提交多日报名
+                {{ '✅ 提交多日报名' if zh else 'Submit multi-day signup' }}
             </button>
+        </div>
 
+        <div class="btn-row">
             <button
                 class="btn-tool btn-blue btn-full"
                 type="button"
@@ -2146,6 +2140,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
         </div>
 
+        <div class="vol-action-space"></div>
     </form>
 
 </div>

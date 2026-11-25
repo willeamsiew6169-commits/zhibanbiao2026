@@ -743,7 +743,7 @@ def edit_assigned_place(assignment_id):
                                     for gx, gy in _dry_run_2200_gaps(ext_start, ext_end, occupied):
                                         person = dict(signup_id=signup_id, volunteer_id=assignment_info['volunteer_id'],
                                                       name=assignment_info['name'], start_time=_clock(gx), end_time=_clock(gy))
-                                        planned = plan([person], existing=existing, history=history)
+                                        planned = plan([person], existing=existing, history=history, patch_mode=True)
                                         intervals = [(_minutes(item['start_time']), _minutes(item['end_time'])) for _, item in planned]
                                         if not planned or _dry_run_2200_gaps(gx, gy, intervals):
                                             raise ValueError('新增时段未完整补排，取消保存')

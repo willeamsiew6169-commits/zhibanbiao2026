@@ -1,11 +1,12 @@
 # volunteer_routes.py
 
 import calendar
+import logging
 import os
 import time
 
 from db import get_conn
-from utils import apply_branch_prefix
+from utils import apply_branch_prefix, get_lang
 from schedule.blueprint import schedule_bp
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta, date, timezone
@@ -16,7 +17,7 @@ from schedule.helpers import (
 )
 
 from lunar_rules import get_special_day_info
-from schedule.constants import TIME_OPTIONS
+from schedule.constants import ROLE_TEXT, TIME_OPTIONS
 from schedule.services.quote_service import get_daily_dharma
 from schedule.services.settings_service import is_schedule_setting_on, current_meal_event_date, is_meal_festival_day
 
@@ -401,7 +402,7 @@ def volunteer_signup_login():
             import logging
             logging.exception('Volunteer login security storage unavailable')
             error = '登录验证暂时无法使用，请稍后重试或联系负责人。'
-    return render_template_string('''<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>义工报名身份验证</title><style>body{font-family:Arial,"Microsoft YaHei",sans-serif;background:#f0f8f1;padding:20px}.box{max-width:480px;margin:7vh auto;background:white;padding:28px;border-radius:20px;box-shadow:0 5px 24px #0001}h1{text-align:center;color:#227a4d;font-size:28px}label{display:block;margin:18px 0 8px;font-size:20px}input,button{box-sizing:border-box;font-size:23px;padding:15px;border-radius:12px}input{width:100%;border:1px solid #bbb}.row{display:flex;gap:10px}.row input{flex:1;min-width:0}.branch{background:#28a745;color:white;border:0;min-width:90px}button.submit{width:100%;background:#16834a;color:white;border:0;margin-top:24px;font-weight:bold}.error{color:#bd2636;font-size:18px}</style></head><body><main class="box"><h1>🪷 义工报名身份验证</h1><p style="text-align:center">请输入自己的编号和 PIN，验证一次即可报名。</p>{% if error %}<p class="error">{{error}}</p>{% endif %}<form method="post"><label>义工编号</label><div class="row"><button class="branch" type="button" id="branchBtn" onclick="let b=document.getElementById('branch');b.value=b.value==='CHE'?'STW':'CHE';this.textContent=b.value;this.style.background=b.value==='CHE'?'#28a745':'#dc3545'">CHE</button><input type="hidden" name="branch" id="branch" value="CHE"><input name="number" inputmode="numeric" pattern="[0-9]+" required autofocus placeholder="例如：208"></div><label>个人 PIN</label><input name="pin" type="password" inputmode="numeric" autocomplete="off" required><button class="submit" type="submit">进入义工报名</button></form></main></body></html>''', error=error)
+    return render_template_string('''<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>义工报名身份验证</title><style>body{font-family:Arial,"Microsoft YaHei",sans-serif;background:#f0f8f1;padding:20px}.box{max-width:480px;margin:7vh auto;background:white;padding:28px;border-radius:20px;box-shadow:0 5px 24px #0001}h1{text-align:center;color:#227a4d;font-size:28px}label{display:block;margin:18px 0 8px;font-size:20px}input,button{box-sizing:border-box;font-size:23px;padding:15px;border-radius:12px}input{width:100%;border:1px solid #bbb}.row{display:flex;gap:10px}.row input{flex:1;min-width:0}.branch{background:#28a745;color:white;border:0;min-width:90px}button.submit{width:100%;background:#16834a;color:white;border:0;margin-top:24px;font-weight:bold}.error{color:#bd2636;font-size:18px}</style></head><body><main class="box"><h1>🪷 义工报名身份验证</h1><p style="text-align:center">请输入自己的编号和 PIN，验证后请选择岗位并提交报名。</p>{% if error %}<p class="error" role="alert">{{error}}</p>{% endif %}<form method="post"><label>义工编号</label><div class="row"><button class="branch" type="button" id="branchBtn" onclick="let b=document.getElementById('branch');b.value=b.value==='CHE'?'STW':'CHE';this.textContent=b.value;this.style.background=b.value==='CHE'?'#28a745':'#dc3545'">CHE</button><input type="hidden" name="branch" id="branch" value="CHE"><input name="number" inputmode="numeric" pattern="[0-9]+" autocomplete="off" required placeholder="例如：208"></div><label>个人 PIN</label><input name="pin" type="password" inputmode="numeric" autocomplete="off" required><button class="submit" type="submit">进入义工报名</button></form></main></body></html>''', error=error)
 
 
 @schedule_bp.route('/volunteer/logout', methods=['POST'])
@@ -426,6 +427,18 @@ def _volunteer_form_identity(response):
     import re
     from html import escape
     html = response.get_data(as_text=True)
+    if (request.method == 'POST' and request.endpoint in {
+        'schedule.volunteer_signup', 'schedule.volunteer_prebook', 'schedule.volunteer_cancel_signup'
+    } and response.status_code < 500 and 'data-vol-result' not in html):
+        failure = ('操作未完成。请查看以下原因。' if get_lang() == 'zh'
+                   else 'Operation incomplete. Check your details and try again.')
+        notice = f'<p data-vol-result role="alert" style="color:#942733;font-size:20px;font-weight:bold">{failure}</p>'
+        body = re.search(r'<body\b[^>]*>', html, re.I)
+        if body:
+            html = html[:body.end()] + notice + html[body.end():]
+        else:
+            html = ('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">'
+                    + notice + html)
     token = escape(str(session.get('volunteer_signup_csrf') or ''), quote=True)
     html = re.sub(r'(<form\b[^>]*\bmethod=["\']post["\'][^>]*>)', lambda m: m.group(1) + '<input type="hidden" name="_csrf" value="'+token+'">', html, flags=re.I)
     response.set_data(html)
@@ -520,6 +533,7 @@ def volunteer_home():
     schedule_label=schedule_label,
     times=TIME_OPTIONS,
     signup_date=default_date,
+    zh=get_lang() == 'zh',
     prebook_year=prebook_year,
     prebook_month=prebook_month,
     meal_button_show=meal_button_show,
@@ -905,7 +919,7 @@ h1 { margin:0; color:#9a5a0c; font-size:clamp(25px,5vw,32px); line-height:1.4; }
 <body>
 <main class="card">
   <div class="head"><div class="icon" aria-hidden="true">⚠️</div>
-    <h1>您已经提交报名了！</h1></div>
+    <h1 data-vol-result>您已经提交报名了！</h1></div>
   <div class="content">
     <div class="confirm">✅ 您已成功报名当天的派餐义工，<br>无需重复报名。</div>
     <p class="tip">如需更改，请先进入「我的报名」取消原有报名，再重新报名。</p>
@@ -1039,11 +1053,17 @@ h1 { margin:0; color:#9a5a0c; font-size:clamp(25px,5vw,32px); line-height:1.4; }
     # V2 同步：只走统一函数
     # =========================
 
-    sync_schedule_after_signup_change(
-        signup_id,
-        action="upsert",
-        changed_by="volunteer"
-    )
+    try:
+        sync_schedule_after_signup_change(signup_id, action="upsert", changed_by="volunteer")
+    except Exception:
+        logging.exception("Schedule sync failed for saved signup %s", signup_id)
+        return render_template_string("""
+        <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+        <main data-vol-result style="font:20px/1.6 system-ui;padding:16px">
+          <h1>{{ '报名已保存' if zh else 'Signup saved' }}</h1>
+          <p>{{ '排班同步失败，请稍后查看报名记录。' if zh else 'Schedule sync failed. Check your signup records later.' }}</p>
+          <a href="/volunteer/my_schedule_search">{{ '查看报名记录' if zh else 'View signup records' }}</a>
+        </main>""", zh=get_lang() == 'zh')
     _signup_mark("schedule_sync_done")
 
     # =========================
@@ -1255,7 +1275,7 @@ h1 { margin:0; color:#9a5a0c; font-size:clamp(25px,5vw,32px); line-height:1.4; }
 
         <div class="card">
 
-            <h1>🍱 素食结缘报名成功</h1>
+            <h1 data-vol-result>{{ '🍱 素食结缘报名成功' if zh else '🍱 Vegetarian meal signup saved' }}</h1>
 
             <div class="info">
                 <div><b>日期：</b>{{ signup_date }}　<span style="color:#b91c1c;font-weight:bold;font-size:0.85em;">{{ signup_weekday }}</span>{% if signup_lunar %}<br><span style="font-size:0.85em;color:#8b5a2b;">🌙 {{ signup_lunar }}</span>{% endif %}{% if signup_festivals %}<br><span style="font-size:0.85em;color:#b91c1c;font-weight:bold;">🪷 {{ signup_festivals }}</span>{% endif %}</div>
@@ -1287,6 +1307,7 @@ h1 { margin:0; color:#9a5a0c; font-size:clamp(25px,5vw,32px); line-height:1.4; }
         </html>
         """,
         signup_date=signup_date,
+        zh=get_lang() == 'zh',
         signup_weekday=signup_weekday,
         signup_lunar=signup_lunar,
         signup_festivals=signup_festivals,
@@ -1454,7 +1475,7 @@ h1 { margin:0; color:#9a5a0c; font-size:clamp(25px,5vw,32px); line-height:1.4; }
 
         <div class="success">
 
-            <h1>{{ result_title }}</h1>
+            <h1 data-vol-result>{{ result_title if zh else 'Signup saved' }}</h1>
 
             <div class="info">
 
@@ -1510,6 +1531,7 @@ h1 { margin:0; color:#9a5a0c; font-size:clamp(25px,5vw,32px); line-height:1.4; }
     </html>
     """,
     result_title=result_title,
+    zh=get_lang() == 'zh',
     name=name,
     signup_date=signup_date,
     signup_weekday=signup_weekday,
@@ -1855,6 +1877,7 @@ def add_meal_leader():
 
 @schedule_bp.route("/volunteer/my_schedule")
 def volunteer_my_schedule():
+    zh = get_lang() == 'zh'
     keyword = _volunteer_identity()
 
     if not keyword:
@@ -1909,9 +1932,11 @@ def volunteer_my_schedule():
 
     html = f"""
     <!doctype html>
-    <html>
+    <html lang="{'zh' if zh else 'en'}">
     <head>
     <meta charset="utf-8">
+    <link rel="stylesheet" href="/static/css/volunteer-actions.css">
+    <script defer src="/static/js/volunteer-actions.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
     body {{
@@ -2069,9 +2094,11 @@ def volunteer_my_schedule():
 
                 <form method="post"
                     action="/volunteer/cancel/{r['id']}"
-                    onsubmit="return confirm('确定不参加这次报名了吗？');">
+                    data-vol-submit data-vol-records="/volunteer/my_schedule"
+                    onsubmit="return confirm('{'确定不参加这次报名了吗？' if zh else 'Cancel this signup?'}');">
+                    <p class="vol-action-status" role="status"></p>
                     <button class="big-btn cancel-btn" type="submit">
-                        ❌ 不参加了，取消报名
+                        {'❌ 不参加了，取消报名' if zh else '❌ Cancel this signup'}
                     </button>
                 </form>
                 """
@@ -2687,18 +2714,20 @@ def volunteer_cancel_signup(signup_id):
 
             conn.commit()
 
-    sync_schedule_after_signup_change(
-        signup_id,
-        action="cancel",
-        changed_by="volunteer"
-    )
+    sync_failed = False
+    try:
+        sync_schedule_after_signup_change(signup_id, action="cancel", changed_by="volunteer")
+    except Exception:
+        logging.exception("Schedule sync failed for cancelled signup %s", signup_id)
+        sync_failed = True
 
     return render_template_string("""
     <!DOCTYPE html>
-    <html>
+    <html lang="{{ 'zh' if zh else 'en' }}">
     <head>
         <meta charset="utf-8">
-        <title>已取消报名</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>{{ '已取消报名' if zh else 'Signup cancelled' }}</title>
         <link rel="stylesheet"
               href="{{ url_for('static', filename='css/toolbox.css') }}">
     </head>
@@ -2709,38 +2738,42 @@ def volunteer_cancel_signup(signup_id):
         <div class="card result-card">
 
             <div class="result-icon">✅</div>
-            <div class="result-title">已取消报名</div>
+            <div class="result-title" data-vol-result>{{ '已取消报名' if zh else 'Signup cancelled' }}</div>
 
             <div class="info-box">
 
                 <div class="info-row">
-                    <span class="info-label">姓名</span>
+                    <span class="info-label">{{ '姓名' if zh else 'Name' }}</span>
                     <span class="info-value">{{ row.name }}</span>
                 </div>
 
                 <div class="info-row">
-                    <span class="info-label">日期</span>
+                    <span class="info-label">{{ '日期' if zh else 'Date' }}</span>
                     <span class="info-value">{{ row.signup_date }}</span>
                 </div>
 
                 <div class="info-row">
-                    <span class="info-label">岗位</span>
-                    <span class="info-value">{{ row.role }}</span>
+                    <span class="info-label">{{ '岗位' if zh else 'Role' }}</span>
+                    <span class="info-value">{{ role_name }}</span>
                 </div>
 
                 <div class="info-row">
-                    <span class="info-label">状态</span>
-                    <span class="info-value">已取消</span>
+                    <span class="info-label">{{ '状态' if zh else 'Status' }}</span>
+                    <span class="info-value">{{ '已取消' if zh else 'Cancelled' }}</span>
                 </div>
 
             </div>
 
-            <p>你的报名已经取消，系统会自动同步正式值班表。</p>
+            {% if sync_failed %}
+            <p class="alert alert-warning" role="alert">{{ '取消已保存，但排班同步失败。请稍后查看记录。' if zh else 'Cancellation saved. Schedule sync failed. Check your records later.' }}</p>
+            {% else %}
+            <p>{{ '你的报名已经取消。' if zh else 'Your signup has been cancelled.' }}</p>
+            {% endif %}
 
             <div class="btn-row" style="justify-content:center;">
                 <a class="btn-tool btn-blue"
                 href="/volunteer/my_schedule?keyword={{ row.volunteer_id }}">
-                    返回我的报名
+                    {{ '返回我的报名' if zh else 'Return to my signups' }}
                 </a>
             </div>
 
@@ -2750,7 +2783,8 @@ def volunteer_cancel_signup(signup_id):
 
     </body>
     </html>
-    """, row=row)
+    """, row=row, sync_failed=sync_failed, zh=get_lang() == 'zh',
+        role_name=ROLE_TEXT.get(row["role"], {}).get(get_lang(), row["role"]))
 
 @schedule_bp.route("/volunteer/today_schedule")
 def volunteer_today_schedule():
@@ -3327,6 +3361,7 @@ def volunteer_prebook():
 
         return render_template_string(
             VOLUNTEER_PREBOOK_HTML,
+            zh=get_lang() == 'zh',
             login_id=_volunteer_identity(), login_name=session.get("volunteer_signup_name", ""),
             default_year=year,
             default_month=month,
@@ -3475,6 +3510,7 @@ def volunteer_prebook():
 
             conn.commit()
 
+    sync_failures = 0
     for signup_id, signup_date in new_signup_items:
 
         try:
@@ -3488,19 +3524,30 @@ def volunteer_prebook():
                 f"✅ {signup_date} 同步完成，共新增 {synced} 笔 assignment"
             )
 
-        except Exception as e:
-            print(f"多日报名同步失败：{signup_date}：{e}")
+        except Exception:
+            sync_failures += 1
+            logging.exception("Schedule sync failed for saved multi-day signup %s (%s)", signup_id, signup_date)
 
-    return f"""
-    <h1>✅ 多日报名完成</h1>
-    <p>义工：{name}</p>
-    <p>岗位：{role}</p>
-    <p>新增：{inserted} 笔</p>
-    <p>更新：{updated} 笔</p>
-    <p>跳过无效日期：{skipped} 笔</p>
-    <a href="/volunteer/prebook">继续多日报名</a><br>
-    <a href="/volunteer">返回首页</a>
-    """
+    zh = get_lang() == 'zh'
+    return render_template_string("""
+    <!doctype html><html lang="{{ 'zh' if zh else 'en' }}">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <main data-vol-result style="font:20px/1.6 system-ui;padding:16px">
+      {% if inserted or updated %}
+      <h1>{{ '多日报名已保存' if zh else 'Multi-day signup saved' }}</h1>
+      {% else %}
+      <h1>{{ '未完成报名，没有保存任何日期' if zh else 'Signup incomplete. No dates were saved.' }}</h1>
+      {% endif %}
+      <p>{{ '义工' if zh else 'Volunteer' }} · {{ name }}</p>
+      <p>{{ '岗位' if zh else 'Role' }} · {{ role }}</p>
+      <p>{{ '新增' if zh else 'Added' }} {{ inserted }} · {{ '更新' if zh else 'Updated' }} {{ updated }} · {{ '跳过' if zh else 'Skipped' }} {{ skipped }}</p>
+      {% if sync_failures %}
+      <p role="alert" style="color:#713900;font-weight:bold">{{ '报名资料已保存，排班同步失败笔数' if zh else 'Signup saved. Schedule sync failures' }} · {{ sync_failures }}</p>
+      {% endif %}
+      <p><a href="/volunteer/my_schedule_search">{{ '查看报名记录' if zh else 'View signup records' }}</a></p>
+      <a href="/volunteer/prebook">{{ '返回多日报名' if zh else 'Return to multi-day signup' }}</a>
+    </main></html>""", zh=zh, name=name, role=ROLE_TEXT[role][get_lang()],
+        inserted=inserted, updated=updated, skipped=skipped, sync_failures=sync_failures)
 
 @schedule_bp.route("/volunteer/my_schedule_search")
 def volunteer_my_schedule_search():

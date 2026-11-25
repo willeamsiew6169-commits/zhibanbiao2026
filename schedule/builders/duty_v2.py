@@ -3,6 +3,7 @@ from schedule.builders.time_utils import parse_min, min_to_ampm
 
 PLACES = ("观音堂", "活动中心")
 BOUNDARIES = (600, 840)  # 绿/橙/黄班边界
+FULL_DUTY = (600, 840, 1080)
 
 MEAL_CENTER_IDS = frozenset({"STW-158", "CHE-228", "CHE-116", "CHE-184", "CHE-50"})
 
@@ -21,7 +22,8 @@ def is_meal_center_day(target_date):
 def is_fixed_center(person, meal_center_day=False):
     return (_id(person) == "STW-152"
             or (meal_center_day and _id(person) in MEAL_CENTER_IDS
-                and _start(person) is not None and _start(person) < 780))
+                and _start(person) is not None and _start(person) < 780
+                and not is_full_duty(person)))
 
 
 def shift_of(t):
@@ -36,6 +38,17 @@ def _end(p):
     return parse_min(p.get("end_time") or p.get("结束时间"))
 
 
+def is_full_duty(person):
+    return (_start(person), _end(person)) == (FULL_DUTY[0], FULL_DUTY[2])
+
+
+def _full_duty_options():
+    start, change, end = FULL_DUTY
+    hall, center = PLACES
+    return [[(start, change, hall), (change, end, center)],
+            [(start, change, center), (change, end, hall)]]
+
+
 def _id(p):
     return str(p.get("volunteer_id") or p.get("编号") or "").strip().upper()
 
@@ -45,11 +58,13 @@ def _history_score(p, place, history):
     return counts.get(place, 0)
 
 
-def _options(person, meal_center_day=False):
+def _options(person, meal_center_day=False, patch_mode=False):
     s, e = _start(person), _end(person)
     if s is None or e is None or e <= s:
         return []
     fixed = "活动中心" if is_fixed_center(person, meal_center_day) else None
+    if is_full_duty(person) and not patch_mode and not fixed:
+        return _full_duty_options()
     places = (fixed,) if fixed else PLACES
     opts = [[(s, e, place)] for place in places]
     # 非必要不拆；仅有实际换岗意义的切点。跨班界线在输出时单独切开。
@@ -67,7 +82,7 @@ def _options(person, meal_center_day=False):
     return opts
 
 
-def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_day=False):
+def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_day=False, patch_mode=False):
     all_segments = list(fixed)
     for _, segments in assignments:
         all_segments.extend(segments)
@@ -75,6 +90,7 @@ def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_
     uncovered = 0
     imbalance = 0
     center_priority = 0
+    lunch_shortfall = 0
     # 10:00–16:00 同时有奇数位义工时，活动中心优先多一位。
     # 只对实际同时在岗的人数评分，不按整日报名人数。
     edges = sorted(set(edges) | {600, 960})
@@ -93,7 +109,9 @@ def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_
                 total = sum(counts.values())
                 if total >= 3:
                     desired_center = (total + 1) // 2
-                    center_priority += (e-s) * max(0, desired_center - counts["活动中心"])
+                    shortfall = max(0, desired_center - counts["活动中心"])
+                    center_priority += (e-s) * shortfall
+                    lunch_shortfall += max(0, min(e, 780) - max(s, 660)) * shortfall
     # 方案 C：按班次、编号统计人数。跨地点者按该班服务时间比例分摊，
     # 避免为凑人数而额外拆班或把一人重复算作两人。
     from fractions import Fraction
@@ -152,7 +170,19 @@ def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_
         clean_place = (cleaning or {}).get(identity)
         if clean_place in PLACES:
             clean_penalty += int(min(segs)[2] == clean_place)
-    return (uncovered, imbalance, shift_imbalance, shift_center_penalty, center_priority, clean_penalty, day_penalty,
+    preference = ()
+    if patch_mode:
+        flexible_full = [(person, segs) for person, segs in assignments
+                         if is_full_duty(person) and not is_fixed_center(person, meal_center_day)]
+        if flexible_full:
+            standard = _full_duty_options()
+            preference = (lunch_shortfall, sum(segs not in standard for _, segs in flexible_full))
+    meal_full = [segs for person, segs in assignments
+                 if meal_center_day and _id(person) in MEAL_CENTER_IDS and is_full_duty(person)]
+    if meal_full:
+        # 覆盖相同且符合 4＋4 时，指定义工优先上午活动中心。
+        preference += (sum(segs[0][2] != "活动中心" for segs in meal_full),)
+    return (uncovered, *preference, imbalance, shift_imbalance, shift_center_penalty, center_priority, clean_penalty, day_penalty,
             rotation_penalty, history_penalty, changes, midpoint_penalty)
 
 
@@ -163,7 +193,7 @@ def _split_shift(segments):
             yield s,e,place
 
 
-def plan(people, existing=(), history=None, cleaning=None, target_date=None):
+def plan(people, existing=(), history=None, cleaning=None, target_date=None, *, patch_mode=False, preserved=()):
     """people: 本次允许安排的义工；existing: 已发布、不可修改的地点区间。"""
     history = history or {}
     meal_center_day = is_meal_center_day(target_date)
@@ -174,21 +204,34 @@ def plan(people, existing=(), history=None, cleaning=None, target_date=None):
         place = row.get("assigned_place") or row.get("place")
         if s is not None and e is not None and e > s and place in PLACES:
             fixed.append((s,e,place))
-    people = [p for p in people if _options(p, meal_center_day)]
+    def options_for(person):
+        options = _options(person, meal_center_day, patch_mode)
+        if preserved:
+            # 单笔补排只允许新增缺口，优先选择与本报名已有地点相容的方案。
+            compatible = [segments for segments in options
+                          if all(place == old_place or max(a, x) >= min(b, y)
+                                 for a, b, place in segments for x, y, old_place in preserved)]
+            return compatible or options
+        return options
+
+    def score(assignments):
+        return _score(assignments, fixed, history, existing, cleaning, meal_center_day, patch_mode)
+
+    people = [p for p in people if options_for(p)]
     # 先安排时间覆盖较长的人，确保少人日的基本覆盖。
     people.sort(key=lambda p: (_start(p), -(_end(p)-_start(p)), _id(p), str(p.get("name") or "")))
     chosen = []
     for p in people:
-        options = _options(p, meal_center_day)
-        best = min(options, key=lambda segs: _score(chosen+[(p,segs)], fixed, history, existing, cleaning, meal_center_day))
+        options = options_for(p)
+        best = min(options, key=lambda segs: score(chosen+[(p,segs)]))
         chosen.append((p,best))
     # 未发布完整排班可反复改善，补排时 existing 永远不变。
     for _ in range(5):
         improved = False
         for i,(p,current) in enumerate(chosen):
-            options = _options(p, meal_center_day)
-            best = min(options, key=lambda segs: _score(chosen[:i]+[(p,segs)]+chosen[i+1:], fixed, history, existing, cleaning, meal_center_day))
-            if _score(chosen[:i]+[(p,best)]+chosen[i+1:], fixed, history, existing, cleaning, meal_center_day) < _score(chosen,fixed,history,existing,cleaning,meal_center_day):
+            options = options_for(p)
+            best = min(options, key=lambda segs: score(chosen[:i]+[(p,segs)]+chosen[i+1:]))
+            if score(chosen[:i]+[(p,best)]+chosen[i+1:]) < score(chosen):
                 chosen[i] = (p,best)
                 improved = True
         if not improved:
@@ -201,15 +244,15 @@ def plan(people, existing=(), history=None, cleaning=None, target_date=None):
             for j in range(i+1,len(chosen)):
                 p1,s1 = chosen[i]
                 p2,s2 = chosen[j]
-                current_score = _score(chosen, fixed, history, existing, cleaning, meal_center_day)
+                current_score = score(chosen)
                 best = None
-                for a in _options(p1, meal_center_day):
-                    for b in _options(p2, meal_center_day):
+                for a in options_for(p1):
+                    for b in options_for(p2):
                         candidate = list(chosen)
                         candidate[i],candidate[j] = (p1,a),(p2,b)
-                        score = _score(candidate, fixed, history, existing, cleaning, meal_center_day)
-                        if score < current_score:
-                            current_score,best = score,candidate
+                        candidate_score = score(candidate)
+                        if candidate_score < current_score:
+                            current_score,best = candidate_score,candidate
                 if best is not None:
                     chosen = best
                     improved = True
@@ -219,8 +262,8 @@ def plan(people, existing=(), history=None, cleaning=None, target_date=None):
     if len(chosen) == 2 and not fixed:
         p1, _ = chosen[0]
         p2, _ = chosen[1]
-        best_pair = min(((a,b) for a in _options(p1, meal_center_day) for b in _options(p2, meal_center_day)),
-                        key=lambda pair: _score([(p1,pair[0]),(p2,pair[1])], fixed, history, existing, cleaning, meal_center_day))
+        best_pair = min(((a,b) for a in options_for(p1) for b in options_for(p2)),
+                        key=lambda pair: score([(p1,pair[0]),(p2,pair[1])]))
         chosen = [(p1,best_pair[0]), (p2,best_pair[1])]
     result = []
     for person,segments in chosen:

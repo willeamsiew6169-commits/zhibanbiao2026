@@ -319,7 +319,7 @@ def _close_previous_roles(cur, volunteer_id, new_role):
                               "系统转换岗位自动结束")
 
 
-def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignment_id=None) -> tuple[bool, str]:
+def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignment_id=None, *, receipt=None) -> tuple[bool, str]:
     raw_id = str(volunteer_id or "").strip()
     role = str(role or "").strip()
     card_no = str(card_no or "").strip()
@@ -419,13 +419,14 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 _close_previous_roles(cur, volunteer["编号"], role)
+                saved_time = now_time_str()
                 cur.execute("""
                     insert into attendance
                     (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
                     values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """, (
                     now_date_str(), volunteer["编号"], volunteer["姓名"], 1, 1,
-                    role, now_time_str(), "", None, card_no,
+                    role, saved_time, "", None, card_no,
                     f"按排班签到｜{job_text}｜assignment_ids={','.join(map(str, group_ids))}"
                 ))
                 from psycopg2.extras import execute_values
@@ -440,6 +441,9 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
                     False, "按排班签到（同岗位连续时段）"
                 ) for segment in group])
 
+        if receipt is not None:
+            receipt.update(name=volunteer["姓名"], role=role, time=saved_time,
+                           continuous_duty=role == "值班" and len(group) > 1)
         return True, f"{volunteer['姓名']} 已签到\n\n岗位：{role}\n安排：{job_text}\n\n同岗位连续换地点无需重新签到；系统将按岗位结束时间自动签退。"
 
     if existing and role == "值班":
@@ -460,13 +464,14 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             _close_previous_roles(cur, volunteer["编号"], role)
+            saved_time = now_time_str()
             cur.execute("""
                 insert into attendance
                 (date, volunteer_id, name, signup, signin, role, start_time, end_time, hours, card_no, remark)
                 values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (
                 now_date_str(), volunteer["编号"], volunteer["姓名"], fallback_signup, 1, role,
-                now_time_str(), "", None, card_no, fallback_remark
+                saved_time, "", None, card_no, fallback_remark
             ))
             cur.execute("""
                 insert into volunteer_attendance_logs (
@@ -477,6 +482,8 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
                 volunteer["编号"], volunteer["姓名"], now_date_str(), role, role,
                 fallback_walk_in, fallback_remark
             ))
+    if receipt is not None:
+        receipt.update(name=volunteer["姓名"], role=role, time=saved_time)
     if fixed_altar:
         return True, f"{volunteer['姓名']} 已按固定佛台安排签到\n\n岗位：佛台\n\n系统将按岗位结束时间自动签退。"
     return True, f"{volunteer['姓名']} 已签到\n\n今天没有正式排班记录。\n已登记：{role}\n\n系统将按岗位结束时间自动签退。"
