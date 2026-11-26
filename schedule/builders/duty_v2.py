@@ -79,6 +79,15 @@ def _options(person, meal_center_day=False, patch_mode=False):
             for place in PLACES:
                 other = PLACES[1] if place == PLACES[0] else PLACES[0]
                 opts.append([(s, cut, place), (cut, e, other)])
+    # Keep designated special-day workers' existing short-shift behavior.
+    elif not fixed and not (meal_center_day and _id(person) in MEAL_CENTER_IDS):
+        afternoon_boundary = BOUNDARIES[1]
+        if s + 60 <= afternoon_boundary <= e - 60:
+            hall, center = PLACES
+            opts.extend([
+                [(s, afternoon_boundary, hall), (afternoon_boundary, e, center)],
+                [(s, afternoon_boundary, center), (afternoon_boundary, e, hall)],
+            ])
     return opts
 
 
