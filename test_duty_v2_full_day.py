@@ -97,14 +97,14 @@ class FullDayPlannerTests(unittest.TestCase):
             self.assertEqual(segments(rows)[0][-1], A)
 
     def test_ordinary_day_locations_and_stw_152_fixed_center(self):
-        with patch('lunar_rules.get_special_day_info', return_value={'lunar_day': 2}):
+        with patch('lunar_rules.solar_to_lunar', return_value=SimpleNamespace(day=2, month=10)):
             self.assert_four_four(plan([full('CHE-228')], target_date='2026-11-20'), 'CHE-228')
             for late in (False, True):
                 rows = plan([full('STW-152')], target_date='2026-11-20', patch_mode=late)
                 self.assertEqual(segments(rows), [('STW-152', 600, 840, A), ('STW-152', 840, 1080, A)])
 
     def test_all_special_day_full_duty_ids_prefer_center_then_hall(self):
-        with patch('lunar_rules.get_special_day_info', return_value={'lunar_day': 15}):
+        with patch('lunar_rules.solar_to_lunar', return_value=SimpleNamespace(day=15, month=10)):
             for code in ('STW-158', 'CHE-228', 'CHE-116', 'CHE-184', 'CHE-50'):
                 for late in (False, True):
                     with self.subTest(code=code, patch_mode=late):
@@ -113,7 +113,7 @@ class FullDayPlannerTests(unittest.TestCase):
                         self.assertEqual(segments(rows), [(code, 600, 840, A), (code, 840, 1080, G)])
 
     def test_special_day_non_full_duty_keeps_1300_exception(self):
-        with patch('lunar_rules.get_special_day_info', return_value={'lunar_day': 15}):
+        with patch('lunar_rules.solar_to_lunar', return_value=SimpleNamespace(day=15, month=10)):
             for late in (False, True):
                 history = {'CHE-228': {'counts': {A: 9}}}
                 rows = plan([person('CHE-228')], target_date='2026-11-20', patch_mode=late, history=history)
@@ -123,7 +123,7 @@ class FullDayPlannerTests(unittest.TestCase):
                 self.assertTrue(all(place == G for _, _, _, place in segments(rows)))
 
     def test_special_day_full_duty_preserves_coverage_with_two_designated_workers(self):
-        with patch('lunar_rules.get_special_day_info', return_value={'lunar_day': 15}):
+        with patch('lunar_rules.solar_to_lunar', return_value=SimpleNamespace(day=15, month=10)):
             rows = plan([full('CHE-228'), full('CHE-116')], target_date='2026-11-20')
         for code in ('CHE-228', 'CHE-116'):
             self.assert_four_four(rows, code)
@@ -150,7 +150,7 @@ class FullDayTransactionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         path = Path(__file__).resolve().parent / 'schedule/builders/schedule_builder.py'
-        names = {'_replace_duty_signup_atomic', '_validate_full_duty_before_publish',
+        names = {'_replace_duty_signup_atomic', '_validate_full_duty_before_publish', '_plan_meal_duty_gaps',
                  '_publish_existing_2200_atomic', 'publish_full_schedule_2200_atomic'}
         cls.handlers = dict(ns, RealDictCursor=object, min_to_ampm=min_to_ampm,
                             __name__='offline_2200', logging=logging, os=os,

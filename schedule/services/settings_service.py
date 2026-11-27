@@ -4,7 +4,7 @@ from datetime import datetime, time, timedelta
 from db import get_conn
 from psycopg2.extras import RealDictCursor
 from schedule.builders.time_utils import malaysia_now
-from lunar_rules import solar_to_lunar
+from lunar_rules import is_meal_festival_day
 
 
 DEFAULT_SCHEDULE_SETTINGS = {
@@ -62,14 +62,6 @@ def set_schedule_setting(key, value, updated_by="admin"):
             """, (key, str(value), malaysia_now(), updated_by))
         conn.commit()
     get_schedule_settings.cache_clear()
-
-
-def is_meal_festival_day(day):
-    """仅初一十五、观音三大日、农历十月初六；闰月同样按农历月日判断。"""
-    lunar = solar_to_lunar(day)
-    return lunar.day in (1, 15) or (lunar.month, lunar.day) in {
-        (2, 19), (6, 19), (9, 19), (10, 6)
-    }
 
 
 def current_meal_event_date(now=None):

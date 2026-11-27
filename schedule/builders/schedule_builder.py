@@ -709,7 +709,7 @@ def sync_schedule_after_signup_change(signup_id, action="upsert", changed_by="sy
     
 def _replace_duty_signup_atomic(signup_id, date_str):
     """在同一事务中仅补入本报名尚未覆盖的值班区间。"""
-    from schedule.builders.duty_v2 import PLACES, plan
+    from schedule.builders.duty_v2 import PLACES, plan_for_date
 
     # 历史只读，不能在事务中触发另一条连接写入。
     history = load_place_history_cache(target_date=date_str)
@@ -757,7 +757,7 @@ def _replace_duty_signup_atomic(signup_id, date_str):
                 WHERE assignment_date=%s AND role='卫生'
                   AND COALESCE(status,'assigned') <> 'cancelled'
             """, (date_str,))
-            arranged = plan([person], existing=existing, history=history,
+            arranged = plan_for_date([person], existing=existing, history=history,
                             cleaning=_v2_cleaning_rows(cur.fetchall()), target_date=date_str,
                             patch_mode=True, preserved=covered)
             if not arranged:
@@ -1093,8 +1093,8 @@ def _v2_cleaning_context(result):
             if isinstance(person, dict):
                 identity = str(person.get("volunteer_id") or person.get("编号") or "").strip().upper()
                 if identity:
-                    context[identity] = place
-    return context
+                    context.setdefault(identity, set()).add(place)
+    return {identity: next(iter(places)) for identity, places in context.items() if len(places) == 1}
 
 
 def _v2_cleaning_rows(rows):
@@ -1106,14 +1106,14 @@ def _v2_cleaning_rows(rows):
 
 def auto_assign_new_duty(result, target_date=None):
     """V2：覆盖优先、历史公平、按需换岗；仅处理本次 result 的值班人员。"""
-    from schedule.builders.duty_v2 import plan
+    from schedule.builders.duty_v2 import plan_for_date
     duty_keys = [f"{shift}{place}" for shift in ("绿", "橙", "黄")
                  for place in ("观音堂", "活动中心")]
     pool = [dict(person) for key in duty_keys for person in result.get(key, [])
             if isinstance(person, dict)]
     # 历史仅作次级决策，不改变数据库中的任何历史记录。
     history = load_place_history_cache()
-    rows = plan(pool, history=history, cleaning=_v2_cleaning_context(result), target_date=target_date,
+    rows = plan_for_date(pool, history=history, cleaning=_v2_cleaning_context(result), target_date=target_date,
                 patch_mode=True)
     for key in duty_keys:
         result[key] = []
@@ -2472,14 +2472,14 @@ def assign_jobs(fixed_people, signup_df, special_info, patch_mode=False, cleanin
     
 def auto_assign_duty(result, target_date=None):
     """V2：覆盖优先、历史公平、按需换岗；仅处理本次 result 的值班人员。"""
-    from schedule.builders.duty_v2 import plan
+    from schedule.builders.duty_v2 import plan_for_date
     duty_keys = [f"{shift}{place}" for shift in ("绿", "橙", "黄")
                  for place in ("观音堂", "活动中心")]
     pool = [dict(person) for key in duty_keys for person in result.get(key, [])
             if isinstance(person, dict)]
     # 历史仅作次级决策，不改变数据库中的任何历史记录。
     history = load_place_history_cache()
-    rows = plan(pool, history=history, cleaning=_v2_cleaning_context(result), target_date=target_date)
+    rows = plan_for_date(pool, history=history, cleaning=_v2_cleaning_context(result), target_date=target_date)
     for key in duty_keys:
         result[key] = []
     for key, person in rows:
@@ -2841,6 +2841,32 @@ def _validate_full_duty_before_publish(signups, rows, *, existing=()):
                        for a, b, place, _ in segments)
                    for morning, afternoon in (PLACES, PLACES[::-1]))
 
+    def improves_coverage(sid, segments):
+        ordered = sorted(segments)
+        if sum(left[2] != right[2] for left, right in zip(ordered, ordered[1:])) > 1:
+            return False
+        other = {place: [] for place in PLACES}
+        for row in rows:
+            place = row.get('assigned_place')
+            if row.get('role') != '值班' or row.get('status') == 'cancelled' or place not in other:
+                continue
+            signup_id = row.get('signup_id') or row.get('id')
+            if signup_id is not None and int(signup_id) == sid:
+                continue
+            a = max(start, _wa6_minutes(row['start_time']))
+            b = min(end, _wa6_minutes(row['end_time']))
+            if a < b:
+                other[place].append((a, b))
+
+        def uncovered(candidate):
+            return sum(b - a for place in PLACES
+                       for a, b in _wa6_gaps(start, end, other[place] + [
+                           (a, b) for a, b, location, _ in candidate if location == place]))
+
+        return uncovered(ordered) < min(
+            uncovered([(start, switch, morning, False), (switch, end, afternoon, False)])
+            for morning, afternoon in (PLACES, PLACES[::-1]))
+
     exceptions = []
     for sid, segments in grouped.items():
         covered = [(a, b) for a, b, _, _ in segments]
@@ -2856,9 +2882,11 @@ def _validate_full_duty_before_publish(signups, rows, *, existing=()):
             continue
         manual = [segment for segment in segments if segment[3]]
         automatic = [segment for segment in segments if not segment[3]]
+        if not manual and improves_coverage(sid, automatic):
+            continue
         if fits_four_four(manual) or not fits_four_four(automatic):
-            raise ValueError(f"22:00 全日值班报名 {sid} 与强制 4＋4 冲突；"
-                             "仅能确认来源且已锁定的负责人手工安排可例外，请负责人核对")
+            raise ValueError(f"全日值班报名 {sid} 与强制 4＋4 冲突；"
+                             "未符合两地覆盖或负责人锁定安排的例外条件，请负责人核对")
         exceptions.append(sid)
     return exceptions
 
@@ -3111,6 +3139,35 @@ def publish_full_schedule_2200_atomic(target_date):
     return {'status':'published','date':target,'inserted':len(rows)}
 
 
+def _plan_meal_duty_gaps(target, signups, existing, additions):
+    """Rescore only missing duty against the actual frozen meal-day roster."""
+    from schedule.builders.duty_v2 import meal_activity_window_for_date, plan_for_date
+
+    if not additions or meal_activity_window_for_date(target) is None:
+        return additions
+    duty = [row for row in existing if row['role'] == '值班' and row.get('status') != 'cancelled']
+    cleaning = _v2_cleaning_rows(row for row in existing
+                                 if row['role'] == '卫生' and row.get('status') != 'cancelled')
+    history = load_place_history_cache(target_date=target)
+    missing_ids = {int(row['signup_id']) for row in additions}
+    replanned = []
+    for signup in sorted(signups, key=lambda row: int(row['id'])):
+        sid = int(signup['id'])
+        if sid not in missing_ids:
+            continue
+        own = [row for row in duty if row.get('signup_id') == sid]
+        preserved = [(_wa6_minutes(row['start_time']), _wa6_minutes(row['end_time']), row['assigned_place'])
+                     for row in own]
+        options = plan_for_date([dict(signup, signup_id=sid)], target_date=target, history=history,
+                                cleaning=cleaning, existing=[row for row in duty if row not in own],
+                                patch_mode=True, preserved=preserved)
+        proposed = [dict(row, assigned_place=key[1:], shift_label=key[0]) for key, row in options]
+        pending = plan_2200_safe_duty_merge([signup], own, proposed)
+        replanned.extend(pending)
+        duty.extend(pending)
+    return replanned
+
+
 # Existing, unpublished assignments: append missing signup coverage only.
 # All existing assignments (including manual placements) are immutable.
 def _publish_existing_2200_atomic(target, proposed_rows):
@@ -3131,6 +3188,8 @@ def _publish_existing_2200_atomic(target, proposed_rows):
             if not existing:
                 raise RuntimeError('22:00 排班状态变化，请重试；不自动覆盖')
             additions = plan_2200_safe_duty_merge(signups, existing, proposed_rows)
+            if additions:
+                additions = _plan_meal_duty_gaps(target, signups, existing, additions)
             manual_exceptions = _validate_full_duty_before_publish(
                 signups, existing + additions, existing=existing)
             # 卫生报名：仅当该报名完全没有现有排班时补入理论排班。

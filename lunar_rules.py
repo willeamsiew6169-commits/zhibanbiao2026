@@ -144,6 +144,14 @@ def get_lunar_text(lunar_month, lunar_day):
     return f"农历{month_text}{day_text}"
 
 
+def is_meal_festival_day(day):
+    """仅初一十五、观音三大日、农历十月初六；闰月同样按农历月日判断。"""
+    lunar = solar_to_lunar(day)
+    return lunar.day in (1, 15) or (lunar.month, lunar.day) in {
+        (2, 19), (6, 19), (9, 19), (10, 6)
+    }
+
+
 def get_special_day_info(date_obj):
     lunar = solar_to_lunar(date_obj)
 

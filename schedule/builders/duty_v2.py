@@ -1,4 +1,7 @@
 """V2 值班地点规划：纯计算，无数据库写入。已发布的 rows 仅作为不可变覆盖参考。"""
+from datetime import date
+
+from lunar_rules import is_meal_festival_day
 from schedule.builders.time_utils import parse_min, min_to_ampm
 
 PLACES = ("观音堂", "活动中心")
@@ -6,18 +9,27 @@ BOUNDARIES = (600, 840)  # 绿/橙/黄班边界
 FULL_DUTY = (600, 840, 1080)
 
 MEAL_CENTER_IDS = frozenset({"STW-158", "CHE-228", "CHE-116", "CHE-184", "CHE-50"})
+MEAL_HALL_TARGETS = {8: (3, 3), 13: (4, 4), 14: (4, 4)}
+MEAL_ACTIVITY_WINDOW = (600, 840)
+LUNCH_WINDOW = (660, 780)
 
 def is_meal_center_day(target_date):
     """只在初一、十五、观音三大日及恩师涅槃日生效。"""
     if not target_date:
         return False
-    from datetime import date
-    from lunar_rules import get_special_day_info
-    day = date.fromisoformat(str(target_date)[:10])
-    info = get_special_day_info(day)
-    return (info.get("lunar_day") in (1, 15)
-            or (info.get("lunar_month"), info.get("lunar_day"))
-            in {(2, 19), (6, 19), (9, 19), (10, 6)})
+    return is_meal_festival_day(date.fromisoformat(str(target_date)[:10]))
+
+
+def meal_activity_window_for_date(target_date):
+    if target_date and is_meal_festival_day(date.fromisoformat(str(target_date)[:10])):
+        return MEAL_ACTIVITY_WINDOW
+    return None
+
+
+def plan_for_date(people, *, target_date, **kwargs):
+    return plan(people, target_date=target_date,
+                meal_activity_window=meal_activity_window_for_date(target_date),
+                prefer_single_hall=True, **kwargs)
 
 def is_fixed_center(person, meal_center_day=False):
     return (_id(person) == "STW-152"
@@ -74,7 +86,10 @@ def _options(person, meal_center_day=False, patch_mode=False):
         cuts.update(range(((s + 59) // 60) * 60, e, 60))
         cuts.add(mid)
         for cut in sorted(cuts):
-            if cut - s < 60 or e - cut < 60:
+            if cut == BOUNDARIES[1] and not (meal_center_day and _id(person) in MEAL_CENTER_IDS):
+                if not s < cut < e:
+                    continue
+            elif cut - s < 60 or e - cut < 60:
                 continue
             for place in PLACES:
                 other = PLACES[1] if place == PLACES[0] else PLACES[0]
@@ -82,7 +97,7 @@ def _options(person, meal_center_day=False, patch_mode=False):
     # Keep designated special-day workers' existing short-shift behavior.
     elif not fixed and not (meal_center_day and _id(person) in MEAL_CENTER_IDS):
         afternoon_boundary = BOUNDARIES[1]
-        if s + 60 <= afternoon_boundary <= e - 60:
+        if s < afternoon_boundary < e:
             hall, center = PLACES
             opts.extend([
                 [(s, afternoon_boundary, hall), (afternoon_boundary, e, center)],
@@ -91,7 +106,8 @@ def _options(person, meal_center_day=False, patch_mode=False):
     return opts
 
 
-def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_day=False, patch_mode=False):
+def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_day=False,
+           patch_mode=False, meal_activity_window=None, prefer_single_hall=False):
     all_segments = list(fixed)
     for _, segments in assignments:
         all_segments.extend(segments)
@@ -100,9 +116,13 @@ def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_
     imbalance = 0
     center_priority = 0
     lunch_shortfall = 0
+    meal_staffing_penalty = 0
+    ordinary_lunch_penalty = 0
+    has_lunch_crowd = False
+    single_hall_penalty = 0
     # 10:00–16:00 同时有奇数位义工时，活动中心优先多一位。
     # 只对实际同时在岗的人数评分，不按整日报名人数。
-    edges = sorted(set(edges) | {600, 960})
+    edges = sorted(set(edges) | {600, *LUNCH_WINDOW, 960})
     for s,e in zip(edges, edges[1:]):
         if s >= e:
             continue
@@ -111,11 +131,25 @@ def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_
             if a <= s and b >= e and place in counts:
                 counts[place] += 1
         # 只评估有人报名的时间；无任何人报名时不影响地点决策
-        if sum(counts.values()):
+        total = sum(counts.values())
+        if total:
+            if prefer_single_hall and total == 1 and not counts[PLACES[0]]:
+                single_hall_penalty += e - s
             uncovered += (e-s) * sum(n == 0 for n in counts.values())
-            imbalance += (e-s) * abs(counts[PLACES[0]] - counts[PLACES[1]])
+            ordinary_lunch = not meal_activity_window and total >= 4 and LUNCH_WINDOW[0] <= s < LUNCH_WINDOW[1]
+            if not ordinary_lunch:
+                imbalance += (e-s) * abs(counts[PLACES[0]] - counts[PLACES[1]])
+            if meal_activity_window:
+                meal_start, meal_end = meal_activity_window
+                duration = max(0, min(e, meal_end) - max(s, meal_start))
+                low, high = MEAL_HALL_TARGETS.get(total, (2, 3))
+                hall = counts[PLACES[0]]
+                meal_staffing_penalty += duration * max(0, low - hall, hall - high)
+            if ordinary_lunch:
+                has_lunch_crowd = True
+                target = {4: 3, 6: 4}.get(total, (total + 1) // 2)
+                ordinary_lunch_penalty += (e-s) * abs(target - counts[PLACES[1]])
             if 600 <= s < 960:
-                total = sum(counts.values())
                 if total >= 3:
                     desired_center = (total + 1) // 2
                     shortfall = max(0, desired_center - counts["活动中心"])
@@ -191,7 +225,17 @@ def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_
     if meal_full:
         # 覆盖相同且符合 4＋4 时，指定义工优先上午活动中心。
         preference += (sum(segs[0][2] != "活动中心" for segs in meal_full),)
-    return (uncovered, *preference, imbalance, shift_imbalance, shift_center_penalty, center_priority, clean_penalty, day_penalty,
+    # Compare lunch against the full day's balance, without moving an extra
+    # volunteer within the morning solely to meet the lunch ratio.
+    lunch_moves = sum(
+        600 < segs[0][1] < 840
+        for _, segs in assignments if len(segs) > 1)
+    lunch_cost = ordinary_lunch_penalty
+    if has_lunch_crowd:
+        lunch_cost += (LUNCH_WINDOW[1] - LUNCH_WINDOW[0]) * lunch_moves
+    staffing = imbalance + 2 * lunch_cost
+    return (uncovered, *preference, single_hall_penalty, meal_staffing_penalty, lunch_cost if fixed else 0,
+            staffing, shift_imbalance, shift_center_penalty, center_priority, clean_penalty, day_penalty,
             rotation_penalty, history_penalty, changes, midpoint_penalty)
 
 
@@ -202,8 +246,75 @@ def _split_shift(segments):
             yield s,e,place
 
 
-def plan(people, existing=(), history=None, cleaning=None, target_date=None, *, patch_mode=False, preserved=()):
-    """people: 本次允许安排的义工；existing: 已发布、不可修改的地点区间。"""
+def _improve_full_duty_coverage(chosen, score, meal_center_day):
+    """Keep 14:00 unless changing a full shift reduces actual uncovered time."""
+    start, switch, end = FULL_DUTY
+    standard = _full_duty_options()
+    eligible = [i for i, (person, _) in enumerate(chosen)
+                if is_full_duty(person) and not is_fixed_center(person, meal_center_day)]
+    if not eligible:
+        return chosen
+
+    availability = [(_start(person), _end(person)) for person, _ in chosen]
+    edges = sorted({point for span in availability for point in span})
+    unavoidable = sum(b - a for a, b in zip(edges, edges[1:])
+                      if sum(start <= a < end for start, end in availability) == 1)
+    current_uncovered = score(chosen)[0]
+    if current_uncovered <= unavoidable:
+        return chosen
+
+    def with_segments(index, segments):
+        return chosen[:index] + [(chosen[index][0], segments)] + chosen[index + 1:]
+
+    for _ in eligible:
+        improved = False
+        for index in eligible:
+            best_standard = min(score(with_segments(index, option))[0] for option in standard)
+            limit = min(current_uncovered, best_standard)
+            # A handover only changes coverage at another volunteer's arrival,
+            # departure or assigned handover.
+            cuts = {point for i, (_, segments) in enumerate(chosen) if i != index
+                    for a, b, _ in segments for point in (a, b) if start < point < end and point != switch}
+            options = [[(start, cut, morning), (cut, end, afternoon)]
+                       for cut in sorted(cuts) for morning, afternoon in (PLACES, PLACES[::-1])]
+            options.extend([[(start, end, place)] for place in PLACES])
+            best = None
+            for option in options:
+                candidate = with_segments(index, option)
+                uncovered, *tie_break = score(candidate)
+                if uncovered < limit:
+                    rank = (uncovered, len(option) == 1, abs(option[0][1] - switch), tie_break)
+                    if best is None or rank < best[0]:
+                        best = (rank, candidate)
+            if best is not None:
+                current_uncovered = best[0][0]
+                chosen = best[1]
+                improved = True
+        if not improved or current_uncovered == unavoidable:
+            break
+
+    # A later improvement can make an earlier exception unnecessary.
+    for _ in eligible:
+        restored = False
+        for index in eligible:
+            if chosen[index][1] in standard:
+                continue
+            candidate = min((with_segments(index, option) for option in standard), key=score)
+            uncovered = score(candidate)[0]
+            if uncovered <= current_uncovered:
+                chosen, current_uncovered = candidate, uncovered
+                restored = True
+        if not restored:
+            break
+    return chosen
+
+
+def plan(people, existing=(), history=None, cleaning=None, target_date=None, *,
+         patch_mode=False, preserved=(), meal_activity_window=None, prefer_single_hall=False):
+    """只安排 people，existing 作为不可变覆盖参考。
+
+    meal_activity_window 为已确认膳食活动的起止时间，以午夜后的分钟数表示。
+    """
     history = history or {}
     meal_center_day = is_meal_center_day(target_date)
     existing = list(existing)
@@ -213,8 +324,14 @@ def plan(people, existing=(), history=None, cleaning=None, target_date=None, *, 
         place = row.get("assigned_place") or row.get("place")
         if s is not None and e is not None and e > s and place in PLACES:
             fixed.append((s,e,place))
+    # Existing lunch coverage can require a later handover to satisfy both
+    # locations. Keep the standard candidates for a full plan without that context.
+    lunch_edges = {LUNCH_WINDOW[0]} | {s for s, _, _ in fixed if LUNCH_WINDOW[0] < s < LUNCH_WINDOW[1]}
+    busy_fixed_lunch = not meal_activity_window and any(
+        sum(s <= minute < e for s, e, _ in fixed) >= 3 for minute in lunch_edges)
+
     def options_for(person):
-        options = _options(person, meal_center_day, patch_mode)
+        options = _options(person, meal_center_day, patch_mode or busy_fixed_lunch)
         if preserved:
             # 单笔补排只允许新增缺口，优先选择与本报名已有地点相容的方案。
             compatible = [segments for segments in options
@@ -224,7 +341,8 @@ def plan(people, existing=(), history=None, cleaning=None, target_date=None, *, 
         return options
 
     def score(assignments):
-        return _score(assignments, fixed, history, existing, cleaning, meal_center_day, patch_mode)
+        return _score(assignments, fixed, history, existing, cleaning, meal_center_day,
+                      patch_mode, meal_activity_window, prefer_single_hall)
 
     people = [p for p in people if options_for(p)]
     # 先安排时间覆盖较长的人，确保少人日的基本覆盖。
@@ -274,6 +392,8 @@ def plan(people, existing=(), history=None, cleaning=None, target_date=None, *, 
         best_pair = min(((a,b) for a in options_for(p1) for b in options_for(p2)),
                         key=lambda pair: score([(p1,pair[0]),(p2,pair[1])]))
         chosen = [(p1,best_pair[0]), (p2,best_pair[1])]
+    if not existing and not patch_mode and not preserved:
+        chosen = _improve_full_duty_coverage(chosen, score, meal_center_day)
     result = []
     for person,segments in chosen:
         for s,e,place in _split_shift(segments):

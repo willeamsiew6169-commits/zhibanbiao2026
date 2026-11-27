@@ -728,7 +728,7 @@ def edit_assigned_place(assignment_id):
                                 if x is not None and y is not None:
                                     occupied.append((max(x, s_start), min(y, s_end)))
                             if extensions:
-                                from schedule.builders.duty_v2 import plan
+                                from schedule.builders.duty_v2 import plan_for_date
                                 from schedule.builders.schedule_builder import _dry_run_2200_gaps
                                 from schedule.services.smart_assignment_engine import load_place_history_cache
                                 cur.execute("""
@@ -743,7 +743,8 @@ def edit_assigned_place(assignment_id):
                                     for gx, gy in _dry_run_2200_gaps(ext_start, ext_end, occupied):
                                         person = dict(signup_id=signup_id, volunteer_id=assignment_info['volunteer_id'],
                                                       name=assignment_info['name'], start_time=_clock(gx), end_time=_clock(gy))
-                                        planned = plan([person], existing=existing, history=history, patch_mode=True)
+                                        planned = plan_for_date([person], target_date=assignment_date,
+                                                                existing=existing, history=history, patch_mode=True)
                                         intervals = [(_minutes(item['start_time']), _minutes(item['end_time'])) for _, item in planned]
                                         if not planned or _dry_run_2200_gaps(gx, gy, intervals):
                                             raise ValueError('新增时段未完整补排，取消保存')
@@ -2815,6 +2816,7 @@ def publish_schedule():
         repair_unassigned_duty_for_date,
         rebuild_published_cleaning_assignments,
         _wa6_minutes,
+        _validate_full_duty_before_publish,
     )
 
     target_date = (request.form.get("date") or "").strip()
@@ -2851,17 +2853,23 @@ def publish_schedule():
 
         # 统一按实际 assignments 验证，不相信报名表的 status 字段。
         signups = db_query("""
-            SELECT id, name, role, start_time, end_time
+            SELECT id, volunteer_id, name, role, start_time, end_time
             FROM volunteer_schedule_signups
             WHERE signup_date=%s AND role IN ('值班','卫生')
               AND COALESCE(status,'pending') <> 'cancelled'
         """, (target_date,), fetchall=True) or []
         assignments = db_query("""
-            SELECT signup_id, role, start_time, end_time
+            SELECT signup_id, role, assigned_place, start_time, end_time,
+                   assignment_source, locked_by_admin
             FROM volunteer_schedule_assignments
             WHERE assignment_date=%s
               AND COALESCE(status,'assigned') <> 'cancelled'
         """, (target_date,), fetchall=True) or []
+        if not published:
+            try:
+                _validate_full_duty_before_publish(signups, assignments, existing=assignments)
+            except ValueError as exc:
+                return failure(exc)
         by_signup = {}
         for row in assignments:
             if row.get("signup_id") is not None:
