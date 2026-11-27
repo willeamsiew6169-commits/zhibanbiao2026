@@ -75,7 +75,7 @@ def _options(person, meal_center_day=False, patch_mode=False):
     if s is None or e is None or e <= s:
         return []
     fixed = "活动中心" if is_fixed_center(person, meal_center_day) else None
-    if is_full_duty(person) and not patch_mode and not fixed:
+    if is_full_duty(person) and not fixed:
         return _full_duty_options()
     places = (fixed,) if fixed else PLACES
     opts = [[(s, e, place)] for place in places]
@@ -107,7 +107,8 @@ def _options(person, meal_center_day=False, patch_mode=False):
 
 
 def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_day=False,
-           patch_mode=False, meal_activity_window=None, prefer_single_hall=False):
+           patch_mode=False, meal_activity_window=None, prefer_single_hall=False,
+           prioritize_lunch=False):
     all_segments = list(fixed)
     for _, segments in assignments:
         all_segments.extend(segments)
@@ -184,7 +185,6 @@ def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_
     changes = sum(len(segs)-1 for _,segs in assignments)
     midpoint_penalty = sum(abs(segs[0][1] - (_start(person)+_end(person))//2)
                            for person,segs in assignments if len(segs)>1)
-    # 两位同一完整时段的义工，在不造成空岗时公平交换地点。
     rotation_penalty = 0
     if not fixed and len(assignments) == 2:
         (p1, seg1), (p2, seg2) = assignments
@@ -218,8 +218,7 @@ def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_
         flexible_full = [(person, segs) for person, segs in assignments
                          if is_full_duty(person) and not is_fixed_center(person, meal_center_day)]
         if flexible_full:
-            standard = _full_duty_options()
-            preference = (lunch_shortfall, sum(segs not in standard for _, segs in flexible_full))
+            preference = (lunch_shortfall,)
     meal_full = [segs for person, segs in assignments
                  if meal_center_day and _id(person) in MEAL_CENTER_IDS and is_full_duty(person)]
     if meal_full:
@@ -234,8 +233,9 @@ def _score(assignments, fixed, history, existing=(), cleaning=None, meal_center_
     if has_lunch_crowd:
         lunch_cost += (LUNCH_WINDOW[1] - LUNCH_WINDOW[0]) * lunch_moves
     staffing = imbalance + 2 * lunch_cost
-    return (uncovered, *preference, single_hall_penalty, meal_staffing_penalty, lunch_cost if fixed else 0,
-            staffing, shift_imbalance, shift_center_penalty, center_priority, clean_penalty, day_penalty,
+    return (uncovered, *preference, single_hall_penalty, meal_staffing_penalty,
+            lunch_cost if fixed or prioritize_lunch else 0, staffing, shift_imbalance,
+            shift_center_penalty, center_priority, clean_penalty, day_penalty,
             rotation_penalty, history_penalty, changes, midpoint_penalty)
 
 
@@ -246,65 +246,69 @@ def _split_shift(segments):
             yield s,e,place
 
 
-def _improve_full_duty_coverage(chosen, score, meal_center_day):
-    """Keep 14:00 unless changing a full shift reduces actual uncovered time."""
+def _improve_full_duty_coverage(chosen, score, meal_center_day, fixed=(), preserved=(),
+                                patch_mode=False):
+    """Only relax 14:00 handover for strictly better coverage; never move existing rows."""
     start, switch, end = FULL_DUTY
-    standard = _full_duty_options()
+    standard = _full_duty_options() + [
+        [(start, switch, place), (switch, end, place)] for place in PLACES
+    ]
     eligible = [i for i, (person, _) in enumerate(chosen)
                 if is_full_duty(person) and not is_fixed_center(person, meal_center_day)]
-    if not eligible:
-        return chosen
+    meal_full = any(meal_center_day and _id(person) in MEAL_CENTER_IDS and is_full_duty(person)
+                    for person, _ in chosen)
+    preference_end = 1 + int(bool(patch_mode and eligible)) + int(meal_full)
 
-    availability = [(_start(person), _end(person)) for person, _ in chosen]
-    edges = sorted({point for span in availability for point in span})
-    unavoidable = sum(b - a for a, b in zip(edges, edges[1:])
-                      if sum(start <= a < end for start, end in availability) == 1)
-    current_uncovered = score(chosen)[0]
-    if current_uncovered <= unavoidable:
-        return chosen
+    def compatible(option):
+        return all(place == old_place or max(a, x) >= min(b, y)
+                   for a, b, place in option for x, y, old_place in preserved)
 
-    def with_segments(index, segments):
-        return chosen[:index] + [(chosen[index][0], segments)] + chosen[index + 1:]
+    def replace(index, option):
+        return chosen[:index] + [(chosen[index][0], option)] + chosen[index + 1:]
+
+    def candidates(index):
+        cuts = {point for a, b, _ in fixed for point in (a, b)}
+        cuts.update(point for i, (_, segments) in enumerate(chosen) if i != index
+                    for a, b, _ in segments for point in (a, b))
+        cuts.update(point for a, b, _ in chosen[index][1] for point in (a, b))
+        cuts.update(point for a, b, _ in preserved for point in (a, b))
+        return [[(start, cut, morning), (cut, end, afternoon)]
+                for cut in sorted(cuts) if start < cut < end and cut != switch
+                for morning, afternoon in (PLACES, PLACES[::-1])]
+
+    def standard_rank(index, option):
+        value = score(replace(index, option), prioritize_lunch=True)
+        return (value[:preference_end] + value[preference_end + 1:preference_end + 3],
+                option not in _full_duty_options(),
+                value[preference_end],
+                value[preference_end + 3:])
 
     for _ in eligible:
-        improved = False
+        changed = False
         for index in eligible:
-            best_standard = min(score(with_segments(index, option))[0] for option in standard)
-            limit = min(current_uncovered, best_standard)
-            # A handover only changes coverage at another volunteer's arrival,
-            # departure or assigned handover.
-            cuts = {point for i, (_, segments) in enumerate(chosen) if i != index
-                    for a, b, _ in segments for point in (a, b) if start < point < end and point != switch}
-            options = [[(start, cut, morning), (cut, end, afternoon)]
-                       for cut in sorted(cuts) for morning, afternoon in (PLACES, PLACES[::-1])]
-            options.extend([[(start, end, place)] for place in PLACES])
-            best = None
-            for option in options:
-                candidate = with_segments(index, option)
-                uncovered, *tie_break = score(candidate)
-                if uncovered < limit:
-                    rank = (uncovered, len(option) == 1, abs(option[0][1] - switch), tie_break)
-                    if best is None or rank < best[0]:
-                        best = (rank, candidate)
-            if best is not None:
-                current_uncovered = best[0][0]
-                chosen = best[1]
-                improved = True
-        if not improved or current_uncovered == unavoidable:
-            break
-
-    # A later improvement can make an earlier exception unnecessary.
-    for _ in eligible:
-        restored = False
-        for index in eligible:
-            if chosen[index][1] in standard:
+            standard_options = [option for option in standard if compatible(option)]
+            if not standard_options:
                 continue
-            candidate = min((with_segments(index, option) for option in standard), key=score)
-            uncovered = score(candidate)[0]
-            if uncovered <= current_uncovered:
-                chosen, current_uncovered = candidate, uncovered
-                restored = True
-        if not restored:
+            best_standard = min(standard_options, key=lambda option: standard_rank(index, option))
+            standard_score = score(replace(index, best_standard))
+            better_coverage = [
+                option for option in candidates(index)
+                if compatible(option) and score(replace(index, option))[0] < standard_score[0]
+            ]
+            if better_coverage:
+                best = min(
+                    better_coverage,
+                    key=lambda option: (
+                        score(replace(index, option)),
+                        abs(option[0][1] - switch),
+                    ),
+                )
+            else:
+                best = best_standard
+            if chosen[index][1] != best:
+                chosen = replace(index, best)
+                changed = True
+        if not changed:
             break
     return chosen
 
@@ -324,25 +328,33 @@ def plan(people, existing=(), history=None, cleaning=None, target_date=None, *,
         place = row.get("assigned_place") or row.get("place")
         if s is not None and e is not None and e > s and place in PLACES:
             fixed.append((s,e,place))
-    # Existing lunch coverage can require a later handover to satisfy both
-    # locations. Keep the standard candidates for a full plan without that context.
-    lunch_edges = {LUNCH_WINDOW[0]} | {s for s, _, _ in fixed if LUNCH_WINDOW[0] < s < LUNCH_WINDOW[1]}
-    busy_fixed_lunch = not meal_activity_window and any(
-        sum(s <= minute < e for s, e, _ in fixed) >= 3 for minute in lunch_edges)
-
     def options_for(person):
-        options = _options(person, meal_center_day, patch_mode or busy_fixed_lunch)
+        options = _options(person, meal_center_day, patch_mode)
         if preserved:
             # 单笔补排只允许新增缺口，优先选择与本报名已有地点相容的方案。
             compatible = [segments for segments in options
                           if all(place == old_place or max(a, x) >= min(b, y)
                                  for a, b, place in segments for x, y, old_place in preserved)]
-            return compatible or options
+            if compatible:
+                return compatible
+            if is_full_duty(person) and not is_fixed_center(person, meal_center_day):
+                start, switch, end = FULL_DUTY
+                alternatives = [[(start, end, place)] for place in PLACES]
+                cuts = {point for a, b, _ in preserved for point in (a, b)}
+                alternatives += [[(start, cut, morning), (cut, end, afternoon)]
+                                 for cut in sorted(cuts) if start < cut < end and cut != switch
+                                 for morning, afternoon in (PLACES, PLACES[::-1])]
+                compatible = [segments for segments in alternatives
+                              if all(place == old_place or max(a, x) >= min(b, y)
+                                     for a, b, place in segments for x, y, old_place in preserved)]
+                if compatible:
+                    return compatible
+            return options
         return options
 
-    def score(assignments):
+    def score(assignments, prioritize_lunch=False):
         return _score(assignments, fixed, history, existing, cleaning, meal_center_day,
-                      patch_mode, meal_activity_window, prefer_single_hall)
+                      patch_mode, meal_activity_window, prefer_single_hall, prioritize_lunch)
 
     people = [p for p in people if options_for(p)]
     # 先安排时间覆盖较长的人，确保少人日的基本覆盖。
@@ -392,8 +404,8 @@ def plan(people, existing=(), history=None, cleaning=None, target_date=None, *,
         best_pair = min(((a,b) for a in options_for(p1) for b in options_for(p2)),
                         key=lambda pair: score([(p1,pair[0]),(p2,pair[1])]))
         chosen = [(p1,best_pair[0]), (p2,best_pair[1])]
-    if not existing and not patch_mode and not preserved:
-        chosen = _improve_full_duty_coverage(chosen, score, meal_center_day)
+    chosen = _improve_full_duty_coverage(chosen, score, meal_center_day, fixed, preserved,
+                                         patch_mode)
     result = []
     for person,segments in chosen:
         for s,e,place in _split_shift(segments):

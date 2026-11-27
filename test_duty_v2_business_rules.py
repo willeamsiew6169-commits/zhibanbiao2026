@@ -266,6 +266,16 @@ class BusinessPlannerTests(unittest.TestCase):
             self.assertEqual((locations.count(G), locations.count(A)), (hall, center),
                              f'{min_to_ampm(minute)}: {locations}')
 
+    def uncovered_by_place(self, rows):
+        return {
+            place: sum(
+                not any(start <= minute < end and assigned == place
+                        for start, end, assigned in rows)
+                for minute in range(600, 1080)
+            )
+            for place in (G, A)
+        }
+
     def assert_four_four(self, result):
         rows = segments(result)
         self.assertEqual([(start, end) for start, end, _ in rows],
@@ -349,11 +359,30 @@ class BusinessPlannerTests(unittest.TestCase):
                 self.assertEqual(segments(plan([signup], history=history, existing=frozen)),
                                  [(600, 720, frequent)])
 
-    def test_full_day_has_only_1400_switch_before_publish(self):
+    def test_full_day_uses_1500_handover_to_remove_60_minute_gap(self):
+        """A nonstandard switch is justified only by strictly better coverage."""
         signup = member('CHE-1', '10:00', '18:00')
         frozen = [existing('CHE-2', '10:00', '15:00', A),
                   existing('CHE-3', '15:00', '18:00', G)]
-        self.assert_four_four(plan([signup], existing=frozen))
+        frozen_segments = [
+            (parse_min(row['start_time']), parse_min(row['end_time']), row['assigned_place'])
+            for row in frozen
+        ]
+        standard_options = [
+            [(600, 840, G), (840, 1080, A)],
+            [(600, 840, A), (840, 1080, G)],
+            [(600, 840, G), (840, 1080, G)],
+            [(600, 840, A), (840, 1080, A)],
+        ]
+        best_standard_gaps = min(
+            (self.uncovered_by_place(option + frozen_segments) for option in standard_options),
+            key=lambda gaps: sum(gaps.values()),
+        )
+        self.assertEqual(best_standard_gaps, {G: 60, A: 0})
+
+        result = segments(plan([signup], existing=frozen))
+        self.assertEqual(result, [(600, 840, G), (840, 900, G), (900, 1080, A)])
+        self.assertEqual(self.uncovered_by_place(result + frozen_segments), {G: 0, A: 0})
 
     def test_full_day_patch_prefers_four_four_when_coverage_allows(self):
         signup = member('CHE-1', '10:00', '18:00')

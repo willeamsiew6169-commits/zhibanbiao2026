@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from schedule.builders.duty_v2 import plan
-from schedule.builders.time_utils import min_to_ampm
+from schedule.builders.time_utils import min_to_ampm, parse_min
 from test_duty_v2 import A, G, person, segments, assert_exact_signup
 from test_duty_v2_integration import ns
 from test_duty_v2_safety import FakeDB
@@ -46,6 +46,16 @@ def load_functions(path, names, namespace):
 
 
 class FullDayPlannerTests(unittest.TestCase):
+    def uncovered_by_place(self, rows):
+        return {
+            place: sum(
+                not any(start <= minute < end and assigned == place
+                        for start, end, assigned in rows)
+                for minute in range(600, 1080)
+            )
+            for place in (G, A)
+        }
+
     def assert_four_four(self, rows, code='CHE-101'):
         own = [(a, b, place) for who, a, b, place in segments(rows) if who == code]
         self.assertEqual([(a, b) for a, b, _ in own], [(600, 840), (840, 1080)])
@@ -66,8 +76,32 @@ class FullDayPlannerTests(unittest.TestCase):
         self.assert_four_four(rows)
         assert_exact_signup(self, people, rows)
 
-    def test_five_three_example_before_publish_still_four_four(self):
-        self.assert_four_four(plan([full()], existing=five_three_coverage()))
+    def test_five_three_example_uses_1500_handover_to_remove_60_minute_gap(self):
+        """Keep exact 14:00 behavior unless the later switch removes a real gap."""
+        frozen = five_three_coverage()
+        frozen_segments = [
+            (parse_min(row['start_time']), parse_min(row['end_time']), row['assigned_place'])
+            for row in frozen
+        ]
+        standard_options = [
+            [(600, 840, G), (840, 1080, A)],
+            [(600, 840, A), (840, 1080, G)],
+            [(600, 840, G), (840, 1080, G)],
+            [(600, 840, A), (840, 1080, A)],
+        ]
+        best_standard_gaps = min(
+            (self.uncovered_by_place(option + frozen_segments) for option in standard_options),
+            key=lambda gaps: sum(gaps.values()),
+        )
+        self.assertEqual(best_standard_gaps, {G: 60, A: 0})
+
+        result = [
+            (start, end, place)
+            for who, start, end, place in segments(plan([full()], existing=frozen))
+            if who == 'CHE-101'
+        ]
+        self.assertEqual(result, [(600, 840, G), (840, 900, G), (900, 1080, A)])
+        self.assertEqual(self.uncovered_by_place(result + frozen_segments), {G: 0, A: 0})
 
     def test_five_three_example_late_fills_empty_hall(self):
         base = five_three_coverage()
