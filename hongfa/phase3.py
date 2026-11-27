@@ -372,8 +372,10 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
                         balance=int(cur.fetchone()['balance'])
                         delta=qty if typ in ('receipt','adjust_in') else -qty
                         if balance+delta<0: raise ValueError(f'库存不足，目前只有 {balance} 本。')
+                        db_type = {'receipt': 'received', 'distribution': 'distributed',
+                                   'adjust_in': 'adjustment', 'adjust_out': 'adjustment'}[typ]
                         cur.execute('''INSERT INTO hongfa_stock_movements(team_id,item_id,event_id,quantity,movement_type,created_by,request_key)
-                          VALUES (%s,%s,%s,%s,%s,%s,%s)''',(team_id,item_id,ev_id,delta,typ,who['id'],reqkey))
+                          VALUES (%s,%s,%s,%s,%s,%s,%s)''',(team_id,item_id,ev_id,delta,db_type,who['id'],reqkey))
                 return redirect(url_for('hongfa.stock'))
             except (ValueError,TypeError) as ex: error=str(ex)
         teams=db_query('SELECT id,name FROM hongfa_teams WHERE active=true ORDER BY id',fetchall=True) or []
@@ -443,7 +445,7 @@ def register_phase3(bp, actor, render, csrf_token, valid_csrf):
         dist=db_query('''SELECT m.team_id,t.name AS team_name,i.title,COALESCE(SUM(-m.quantity),0) AS distributed
           FROM hongfa_stock_movements m JOIN hongfa_events e ON e.id=m.event_id
           JOIN hongfa_teams t ON t.id=m.team_id JOIN hongfa_items i ON i.id=m.item_id
-          WHERE m.movement_type='distribution' AND e.event_date >= %s AND e.event_date < %s
+          WHERE m.movement_type IN ('distributed','distribution') AND e.event_date >= %s AND e.event_date < %s
           GROUP BY m.team_id,t.name,i.title ORDER BY t.name,i.title''',(first,last),fetchall=True) or []
         dist=[r for r in dist if who['secretary'] or r['team_id'] in who['team_ids']]
         locations=[]

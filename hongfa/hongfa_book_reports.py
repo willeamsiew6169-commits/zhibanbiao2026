@@ -45,7 +45,7 @@ def register_book_reports(bp, actor, render):
             JOIN hongfa_teams t ON t.id=m.team_id
             LEFT JOIN hongfa_locations l ON l.id=e.location_id
             JOIN hongfa_items i ON i.id=m.item_id
-            WHERE m.movement_type='distribution' AND m.team_id=ANY(%s)
+            WHERE m.movement_type IN ('distributed','distribution') AND m.team_id=ANY(%s)
               AND e.team_id=m.team_id AND e.event_date >= %s AND e.event_date < %s
             ORDER BY e.event_date,e.id,i.title,m.id''', (ids,start,end),fetchall=True) or []
         # 库存流水按登记时间归属月份/年份；点货调整不冒充补货。
@@ -55,7 +55,7 @@ def register_book_reports(bp, actor, render):
             JOIN hongfa_teams t ON t.id=m.team_id
             JOIN hongfa_items i ON i.id=m.item_id
             WHERE m.team_id=ANY(%s) AND m.created_at < %s
-            ORDER BY m.created_at,m.id''', (ids,end),fetchall=True) or []
+            ORDER BY m.created_at,m.id''', (ids,datetime.combine(end, datetime.min.time(), TZ)),fetchall=True) or []
         return details, movements
 
     def summary(data, movements):
@@ -65,11 +65,12 @@ def register_book_reports(bp, actor, render):
             if key not in result:
                 result[key]=dict(team=m['team_name'],title=m['title'],opening=0,receipt=0,distribution=0,adjustment=0,closing=0)
             r=result[key]; qty=int(m['quantity']); typ=m['movement_type']
-            if m['created_at'].date() < data['start']:
+            registered = m['created_at']
+            if registered.astimezone(TZ).date() < data['start']:
                 r['opening']+=qty
             else:
-                if typ=='receipt': r['receipt']+=qty
-                elif typ=='distribution': r['distribution']+=-qty
+                if typ in ('received','receipt'): r['receipt']+=qty
+                elif typ in ('distributed','distribution'): r['distribution']+=-qty
                 else: r['adjustment']+=qty
             r['closing']+=qty
         return sorted(result.values(),key=lambda r:(r['team'],r['title']))

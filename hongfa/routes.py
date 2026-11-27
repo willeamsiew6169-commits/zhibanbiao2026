@@ -212,6 +212,7 @@ def dashboard():
         <a class="hf-tile hf-blue" href="/hongfa/week"><span>📋</span>每周时间表</a>
         <a class="hf-tile hf-purple" href="/hongfa/attendance"><span>👥</span>出席记录</a>
         <a class="hf-tile hf-brown" href="{{url_for('hongfa.book_menu')}}"><span>📚</span>书籍管理</a>
+        <a class="hf-tile hf-brown" href="{{url_for('hongfa.library_books')}}"><span>📚</span>藏经阁</a>
         <a class="hf-tile hf-navy" href="/hongfa/report"><span>📊</span>弘法报表</a>
         <a class="hf-tile hf-gray" href="{{url_for('hongfa.settings_menu')}}"><span>⚙️</span>系统设置</a></div></div>
         <div class="card"><h2>📅 近期弘法安排</h2>
@@ -252,6 +253,9 @@ register_phase3(hongfa_bp, actor, render, csrf_token, valid_csrf)
 # 经书快速登记独立模块：保留原库存及报表逻辑。
 from .hongfa_books import register_books
 register_books(hongfa_bp, actor, render, csrf_token, valid_csrf)
+
+from .library_bridge import register_hongfa_library
+register_hongfa_library(hongfa_bp, actor, render, csrf_token, valid_csrf)
 
 
 @hongfa_bp.route('/team-admins', methods=['GET','POST'])

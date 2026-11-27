@@ -167,12 +167,18 @@ def register_books(bp, actor, render, csrf_token, valid_csrf):
                             delta = -qty
                             if balance < qty:
                                 raise ValueError('库存不足，请刷新后重试。')
-                            typ = 'distribution'
+                            typ = 'distributed'
                         else:
                             delta = qty - balance
-                            typ = 'adjust_in' if delta >= 0 else 'adjust_out'
+                            typ = 'adjustment'
                         if delta == 0 and (mode != 'stock' or row['entries']):
                             continue
+                        if delta == 0:
+                            cur.execute("""SELECT 1 FROM pg_constraint
+                                WHERE conrelid='public.hongfa_stock_movements'::regclass
+                                  AND conname='hongfa_stock_quantity_policy'""")
+                            if not cur.fetchone():
+                                raise ValueError('登记首次零库存前，请先安装零点货兼容迁移。')
                         cur.execute('''INSERT INTO hongfa_stock_movements
                             (team_id,item_id,event_id,quantity,movement_type,created_by,request_key)
                             VALUES (%s,%s,%s,%s,%s,%s,%s)''',

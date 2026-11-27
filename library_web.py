@@ -2,6 +2,8 @@
 
 import re
 import os
+import math
+import unicodedata
 import openpyxl
 
 from db import get_conn
@@ -12,7 +14,7 @@ from psycopg2.extras import RealDictCursor, Json
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 from schedule.builders.time_utils import malaysia_now
-from flask import Blueprint, flash, request, redirect, url_for, session, render_template_string
+from flask import Blueprint, abort, flash, request, redirect, url_for, session, render_template_string
 
 
 library_bp = Blueprint(
@@ -43,6 +45,217 @@ LIBRARY_PERMISSION_FIELDS = [
     "can_view_audit_log",
     "can_manage_permissions",
 ]
+
+EXCEL_UPLOAD_AUDIT = "INVENTORY_EXCEL_UPLOAD"
+RETIRED_STOCK_ENDPOINTS = frozenset({
+    "library_out", "library_out_search", "library_out_add", "library_out_logout",
+    "library_out_cart_update", "library_out_cart_delete", "library_out_confirm",
+    "library_out_success", "library_quick_out", "library_in", "library_in_item",
+    "library_batch_in", "library_stocktake", "library_cancel_record",
+})
+
+
+def legacy_stock_enabled():
+    return os.getenv("LIBRARY_LEGACY_STOCK_ENABLED") == "1"
+
+
+@library_bp.before_request
+def inventory_read_only_routes():
+    endpoint = (request.endpoint or "").split(".")[-1]
+    if endpoint in RETIRED_STOCK_ENDPOINTS and not legacy_stock_enabled():
+        return render_template_string(
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<p>此库存操作已停用。库存以最近一次 Excel 更新为准。</p>'
+            '<a href="{{ url_for(\'library.library_home\') }}">返回库存查询</a>'
+        ), 410
+    if endpoint in ("library_home", "library_search"):
+        return inventory_catalog(admin_mode=request.args.get("admin") == "1")
+    if endpoint == "library_item_detail":
+        return inventory_detail(request.view_args["item_code"])
+    if endpoint == "library_scan":
+        return redirect(url_for("library.library_item_detail", item_code=request.view_args["item_code"]))
+    if endpoint == "library_scan_camera":
+        return redirect(url_for("library.library_home"))
+    if endpoint == "library_low_stock":
+        return redirect(url_for("library.library_home", admin=1, low=1))
+    if endpoint == "library_admin_home":
+        return inventory_admin_home()
+
+
+def _last_inventory_upload(cur):
+    cur.execute("""SELECT to_char(MAX(created_at) AT TIME ZONE 'Asia/Kuala_Lumpur',
+                                 'YYYY-MM-DD HH24:MI:SS') AS updated
+                   FROM library_audit_logs WHERE action=%s""", (EXCEL_UPLOAD_AUDIT,))
+    return cur.fetchone()["updated"]
+
+
+INVENTORY_LAYOUT = """
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>蕉赖观音堂｜藏经阁</title><link rel="stylesheet" href="/static/css/toolbox.css">
+<link rel="stylesheet" href="/static/css/library-inventory.css">
+</head><body class="library-inventory"><main class="inv">
+{% macro inventory_icon(book) -%}
+<span class="inv-photo" aria-hidden="true">{{ '📖' if '书' in (book.category or '') or '经' in (book.category or '') else '📦' }}</span>
+{%- endmacro %}
+{% macro inventory_stock(book) -%}
+{% set balance = book.balance or 0 %}
+{% if balance <= 0 %}{% set tone, status = 'red', '零库存' %}
+{% elif balance <= (book.min_balance|default(0, true)) %}{% set tone, status = 'orange', '库存不足' %}
+{% else %}{% set tone, status = 'green', '库存充足' %}{% endif %}
+<span class="inv-stock badge-{{ tone }}"><span class="inv-stock-label">{{ status }}</span>
+<strong>{{ balance }}</strong> {{ book.unit or '—' }}</span>
+{%- endmacro %}
+"""
+
+
+def inventory_catalog(*, admin_mode=False):
+    if admin_mode and not is_library_admin():
+        return redirect(url_for("library.library_admin"))
+    keyword = request.args.get("q", "").strip()[:150]
+    category = request.args.get("category", "").strip()[:100]
+    low = admin_mode and request.args.get("low") == "1"
+    page = min(100000, max(1, request.args.get("page", 1, type=int)))
+    per_page = 24
+    like = f"%{keyword}%"
+    compact = f"%{keyword.replace(' ', '')}%"
+    with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""SELECT DISTINCT category FROM library_items
+                       WHERE is_active=true AND COALESCE(category,'')<>'' ORDER BY category""")
+        categories = [row["category"] for row in cur.fetchall()]
+        cur.execute("""SELECT item_code,name,category,balance,unit,location,min_balance
+                       FROM library_items WHERE is_active=true
+                         AND (%s='' OR name ILIKE %s OR REPLACE(name,' ','') ILIKE %s
+                              OR COALESCE(keywords,'') ILIKE %s OR category ILIKE %s)
+                         AND (%s='' OR category=%s)
+                         AND (NOT %s OR balance<=min_balance)
+                       ORDER BY name,item_code LIMIT %s OFFSET %s""",
+                    (keyword, like, compact, like, like, category, category, low,
+                     per_page+1, (page-1)*per_page))
+        books = cur.fetchall()
+        updated = _last_inventory_upload(cur)
+    return render_template_string(INVENTORY_LAYOUT + """
+      <header class="inv-head"><h1>蕉赖观音堂｜藏经阁</h1>
+      <a class="inv-admin" href="{{ url_for('library.library_admin_home' if admin_mode else 'library.library_admin') }}">{{ '返回负责人首页' if admin_mode else '负责人入口' }}</a></header>
+      <p class="inv-note"><strong>最近一次成功上传：{{ updated or '暂无更新记录' }}{% if updated %}（马来西亚时间）{% endif %}</strong>
+      <span>库存以最近一次 Excel 更新为准。</span></p>
+      <form class="inv-controls inv-filter" action="{{ url_for('library.library_home') }}">
+      {% if admin_mode %}<input type="hidden" name="admin" value="1">{% endif %}
+      <label class="inv-keyword">书名或关键词<input name="q" type="search" value="{{ keyword }}"></label>
+      <label>分类<select name="category"><option value="">全部分类</option>
+      {% for name in categories %}<option value="{{ name }}" {% if name==category %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+      <button class="btn-tool btn-green">查询</button>
+      <div class="inv-filter-links">
+      {% if admin_mode %}<label><span><input type="checkbox" name="low" value="1" {% if low %}checked{% endif %}>只看库存不足</span></label>{% endif %}
+      <a href="{{ url_for('library.library_home', admin=1 if admin_mode else none) }}">全部库存</a>
+      {% if records %}<a href="{{ url_for('library.library_records') }}">进出记录</a>{% endif %}</div></form>
+      <div class="inv-books">{% for book in books %}<a class="inv-card" href="{{ url_for('library.library_item_detail', item_code=book.item_code) }}">
+      <div class="inv-book-head">{{ inventory_icon(book) }}<span><strong class="inv-book-name">{{ book.name }}</strong>
+      <span class="inv-category">{{ book.category or '未分类' }}</span></span></div>
+      {{ inventory_stock(book) }}<span class="inv-location">位置：{{ book.location or '—' }}</span></a>
+      {% else %}<p>未找到法物。</p>{% endfor %}</div>
+      <nav class="inv-pages" aria-label="分页"><span>第 {{ page }} 页</span>
+      {% if page>1 %}<a href="{{ url_for('library.library_home',q=keyword,category=category,admin=1 if admin_mode else none,low=1 if low else none,page=page-1) }}">上一页</a>{% endif %}
+      {% if more %}<a href="{{ url_for('library.library_home',q=keyword,category=category,admin=1 if admin_mode else none,low=1 if low else none,page=page+1) }}">下一页</a>{% endif %}</nav>
+      </main></body></html>
+      """, admin_mode=admin_mode, records=admin_mode and library_admin_can("can_view_records"),
+        updated=updated, keyword=keyword, category=category, categories=categories, low=low,
+        books=books[:per_page], more=len(books)>per_page, page=page)
+
+
+def inventory_detail(item_code):
+    with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""SELECT name,category,balance,unit,location,description,min_balance
+                       FROM library_items WHERE item_code=%s AND is_active=true""", (item_code.strip().upper(),))
+        book = cur.fetchone()
+    if not book:
+        abort(404)
+    return render_template_string(INVENTORY_LAYOUT + """
+      <header class="inv-head"><h1>蕉赖观音堂｜藏经阁</h1></header>
+      <article class="inv-card inv-detail"><div class="inv-book-head">{{ inventory_icon(book) }}
+      <div><strong class="inv-book-name">{{ book.name }}</strong><span class="inv-category">{{ book.category or '未分类' }}</span></div></div>
+      {{ inventory_stock(book) }}<span class="inv-location">位置：{{ book.location or '—' }}</span>
+      <p class="inv-description">{{ book.description or '暂无说明' }}</p>
+      <p class="inv-note">库存以最近一次 Excel 更新为准。</p></article>
+      <a class="inv-back" href="{{ url_for('library.library_home') }}">↩ 返回库存查询</a></main></body></html>
+      """, book=book)
+
+
+def _system_inventory_links():
+    return [
+        ("⚙️ 法物管理", "library.library_items", "can_manage_items"),
+        ("🧾 操作日志", "library.library_admin_audit", "can_view_audit_log"),
+        ("👥 负责人权限", "library.library_admin_users", "can_manage_permissions"),
+    ]
+
+
+def inventory_admin_home():
+    admin = get_library_admin()
+    if not admin:
+        return redirect(url_for("library.library_admin"))
+    from hongfa.library_bridge import pending_count
+
+    can_confirm = library_admin_can("can_batch_out")
+    can_history = can_confirm or library_admin_can("can_view_records")
+    count = pending_count() if can_history else None
+    with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""SELECT COUNT(*) AS variety, COALESCE(SUM(balance),0) AS total
+                       FROM library_items WHERE is_active=true""")
+        stock = cur.fetchone()
+        updated = _last_inventory_upload(cur)
+    buttons = [
+        ("🟣 上传库存 Excel", "#6d28a5", url_for("library.library_upload")
+         if library_admin_can("can_manage_items") else None),
+        ("🟠 弘法领取管理", "#9a410d", url_for(
+            "library.hongfa_transfers" if can_confirm else "library.hongfa_transfer_history")
+         if can_history and count is not None else None),
+        ("🔵 库存查询", "#154eaa", url_for("library.library_home", admin=1)),
+        ("⚙️ 系统管理", "#374151", url_for("library.inventory_system")
+         if any(library_admin_can(permission) for _, _, permission in _system_inventory_links()) else None),
+    ]
+    return render_template_string(INVENTORY_LAYOUT + """
+      <header class="inv-head"><h1>藏经阁负责人</h1></header>
+      <p>{{ admin.volunteer_name or admin.volunteer_id }} · {{ role }}</p>
+      <div class="inv-grid">
+      <div class="inv-stat">库存品种<br><strong>{{ stock.variety }}</strong></div>
+      <div class="inv-stat">库存总量<br><strong>{{ stock.total }}</strong></div>
+      <div class="inv-stat">弘法待确认<br><strong {% if count %}class="inv-badge"{% endif %}>{{ count if count is not none else '—' }}</strong></div>
+      <div class="inv-stat">最后一次 Excel 上传<br><strong>{{ updated or '暂无更新记录' }}</strong></div>
+      </div><h2>库存管理</h2><div class="inv-grid">
+      {% for label, color, link in buttons %}
+      {% if link %}<a class="inv-tile" style="--tile-color:{{ color }}" href="{{ link }}">{{ label }}{% if loop.index==2 and count %}<span class="inv-badge">{{ count }} 待确认</span>{% endif %}</a>
+      {% else %}<span class="inv-tile inv-disabled" aria-disabled="true">{{ label }}</span>{% endif %}
+      {% endfor %}</div>
+      <p><a href="{{ url_for('library.library_admin_logout') }}">退出负责人专区</a></p>
+      <a class="inv-back" href="{{ url_for('library.library_home') }}">↩ 返回</a></main></body></html>
+      """, buttons=buttons, admin=admin, role=library_role_label(admin), count=count, stock=stock, updated=updated)
+
+
+@library_bp.route("/admin/system")
+def inventory_system():
+    if not is_library_admin():
+        return redirect(url_for("library.library_admin"))
+    links = [(label, url_for(endpoint)) for label, endpoint, permission in _system_inventory_links()
+             if library_admin_can(permission)]
+    if not links:
+        abort(403)
+    return render_template_string(INVENTORY_LAYOUT + """
+      <header class="inv-head"><h1>系统管理</h1></header>
+      <div class="inv-grid">{% for label, link in links %}
+      <a class="inv-tile" href="{{ link }}">{{ label }}</a>{% endfor %}</div>
+      <a class="inv-back" href="{{ url_for('library.library_admin_home') }}">↩ 返回</a></main></body></html>
+      """, links=links)
+
+
+def _lock_inventory_upload(cur):
+    # Shared with live transfer registration and confirmation. Check pending
+    # only after taking the lock so a receipt cannot race the Excel overwrite.
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext('hongfa_library_catalog'))")
+    cur.execute("SELECT to_regclass('public.hongfa_library_transfers') IS NOT NULL AS installed")
+    if cur.fetchone()["installed"]:
+        cur.execute("SELECT 1 FROM public.hongfa_library_transfers WHERE status='pending' LIMIT 1")
+        if cur.fetchone():
+            raise ValueError("有弘法待确认领取，上传可能覆盖库存或重复扣书。请先对账，再上传 Excel。")
 
 def get_library_admin():
     admin_id = session.get("library_admin_id")
@@ -319,39 +532,266 @@ def make_keywords(name):
 def normalize_header(value):
     if value is None:
         return ""
-    return str(value).strip().lower().replace(" ", "")
+    return re.sub(r"[\s_-]+", "", str(value).strip().casefold())
 
 
 def find_inventory_columns(ws):
-    name_col = None
-    balance_col = None
-    header_row = None
+    name_headers = {"项目名称", "itemname", "name"}
+    balance_headers = {"closingbalance", "期末余额", "balance"}
+    identifier_headers = {
+        "itemcode", "bookcode", "itemid", "bookid", "书籍编号", "书号",
+        "法物编号", "稳定编号", "编号",
+    }
 
-    for row in ws.iter_rows(min_row=1, max_row=10):
+    for row in ws.iter_rows(min_row=1, max_row=min(10, ws.max_row)):
+        name_col = None
+        balance_col = None
+        identifier_col = None
         for cell in row:
             text = normalize_header(cell.value)
-
             if not text:
                 continue
-
-            if "项目名称" in text or "itemname" in text or "name" == text:
+            if text in name_headers or "项目名称" in text or "itemname" in text:
                 name_col = cell.column
-
-            if (
-                "closingbalance" in text
-                or "期末余额" in text
-                or "balance" in text
-            ):
+            elif text in balance_headers or "closingbalance" in text or "期末余额" in text:
                 balance_col = cell.column
-
+            elif text in identifier_headers:
+                identifier_col = cell.column
         if name_col and balance_col:
-            header_row = row[0].row
-            break
-
-    if not name_col or not balance_col:
+            return row[0].row, identifier_col, name_col, balance_col
+    else:
         raise ValueError("找不到『项目名称』或『Closing Balance』栏位")
 
-    return header_row, name_col, balance_col
+
+def _normalize_inventory_name(value):
+    return " ".join(unicodedata.normalize("NFKC", str(value)).split()).casefold()
+
+
+def _inventory_cell_present(value):
+    return value is not None and (not isinstance(value, str) or bool(value.strip()))
+
+
+def _parse_inventory_balance(value):
+    if isinstance(value, bool):
+        raise ValueError("余额必须是非负整数（0 可用）")
+    if value is None:
+        raise ValueError("余额不能为空")
+    if isinstance(value, int):
+        balance = value
+    elif isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        balance = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError("余额不能为空")
+        if re.fullmatch(r"-\d+", text):
+            raise ValueError("余额不能为负数")
+        if not re.fullmatch(r"\d+", text):
+            raise ValueError("余额必须是非负整数（0 可用）")
+        balance = int(text)
+    else:
+        raise ValueError("余额必须是非负整数（0 可用）")
+    if balance < 0:
+        raise ValueError("余额不能为负数")
+    return balance
+
+
+def _parse_inventory_rows(ws):
+    header_row, identifier_col, name_col, balance_col = find_inventory_columns(ws)
+    rows = []
+    errors = []
+    titles = {}
+    identifiers = {}
+
+    for row_idx in range(header_row + 1, ws.max_row + 1):
+        raw_name = ws.cell(row=row_idx, column=name_col).value
+        raw_balance = ws.cell(row=row_idx, column=balance_col).value
+        raw_identifier = ws.cell(row=row_idx, column=identifier_col).value if identifier_col else None
+        if not any(_inventory_cell_present(value) for value in (raw_name, raw_balance, raw_identifier)):
+            continue
+
+        name = str(raw_name).strip() if _inventory_cell_present(raw_name) else ""
+        row_label = f"Excel 第{row_idx}行《{name or '名称为空'}》"
+        row_errors = []
+        if not name:
+            row_errors.append("书名不能为空")
+        else:
+            titles.setdefault(_normalize_inventory_name(name), []).append((row_idx, name))
+
+        identifier = None
+        if identifier_col:
+            if not _inventory_cell_present(raw_identifier):
+                row_errors.append("书籍编号不能为空")
+            else:
+                if isinstance(raw_identifier, bool):
+                    identifier = ""
+                elif isinstance(raw_identifier, int):
+                    identifier = str(raw_identifier)
+                elif isinstance(raw_identifier, float) and math.isfinite(raw_identifier) and raw_identifier.is_integer():
+                    identifier = str(int(raw_identifier))
+                else:
+                    identifier = str(raw_identifier).strip()
+                if not re.fullmatch(r"[\w.-]{1,64}", identifier, flags=re.UNICODE):
+                    row_errors.append("书籍编号格式无效")
+                else:
+                    identifier = identifier.upper()
+                    identifiers.setdefault(identifier.casefold(), []).append((row_idx, name))
+
+        try:
+            balance = _parse_inventory_balance(raw_balance)
+        except ValueError as exc:
+            row_errors.append(str(exc))
+
+        if row_errors:
+            errors.extend(f"{row_label}：{reason}。" for reason in row_errors)
+            continue
+
+        category = guess_category(name)
+        rows.append({
+            "excel_row": row_idx,
+            "identifier": identifier,
+            "name": name,
+            "name_key": _normalize_inventory_name(name),
+            "balance": balance,
+            "category": category,
+            "unit": guess_unit(name, category),
+            "keywords": make_keywords(name),
+        })
+
+    for occurrences in titles.values():
+        if len(occurrences) > 1:
+            details = "、".join(f"第{row_idx}行《{name}》" for row_idx, name in occurrences)
+            errors.append(f"Excel {details}：书名重复，无法唯一匹配。")
+    for occurrences in identifiers.values():
+        if len(occurrences) > 1:
+            details = "、".join(f"第{row_idx}行《{name}》" for row_idx, name in occurrences)
+            errors.append(f"Excel {details}：书籍编号重复。")
+
+    if errors:
+        raise ValueError("Excel 数据校验失败：\n" + "\n".join(errors))
+    if not rows:
+        raise ValueError("Excel 数据校验失败：没有可上传的书籍记录。")
+    return rows
+
+
+def _load_inventory_upload_state(cur):
+    cur.execute("""SELECT id,item_code,name,category,keywords,unit,balance,min_balance,is_active
+                   FROM library_items FOR UPDATE""")
+    existing_rows = cur.fetchall()
+    cur.execute("SELECT to_regclass('public.hongfa_library_book_map') IS NOT NULL AS installed")
+    mapped_rows = []
+    if cur.fetchone()["installed"]:
+        cur.execute("""SELECT library_item_id,item_code,book_name,category
+                       FROM public.hongfa_library_book_map""")
+        mapped_rows = cur.fetchall()
+    return existing_rows, {row["library_item_id"]: row for row in mapped_rows}
+
+
+def _plan_inventory_upload(rows, existing_rows, mapped_by_id):
+    existing_by_code = {}
+    existing_by_name = {}
+    errors = []
+    for existing in existing_rows:
+        code_key = str(existing["item_code"]).strip().casefold()
+        existing_by_code.setdefault(code_key, []).append(existing)
+        existing_by_name.setdefault(_normalize_inventory_name(existing["name"]), []).append(existing)
+
+    planned = []
+    used_codes = {str(row["item_code"]).strip().casefold() for row in existing_rows}
+    for item in rows:
+        name_matches = existing_by_name.get(item["name_key"], [])
+        if len(name_matches) > 1:
+            errors.append(
+                f"Excel 第{item['excel_row']}行《{item['name']}》：系统中有多本同名书籍，无法唯一匹配。"
+            )
+            continue
+
+        existing = None
+        if item["identifier"]:
+            code_matches = existing_by_code.get(item["identifier"].casefold(), [])
+            if len(code_matches) > 1:
+                errors.append(
+                    f"Excel 第{item['excel_row']}行《{item['name']}》：编号 {item['identifier']} "
+                    "在系统中对应多条记录，已拒绝匹配。"
+                )
+                continue
+            existing = code_matches[0] if code_matches else None
+            if existing and _normalize_inventory_name(existing["name"]) != item["name_key"]:
+                errors.append(
+                    f"Excel 第{item['excel_row']}行《{item['name']}》：编号 {item['identifier']} "
+                    f"在系统中对应《{existing['name']}》，已拒绝覆盖。"
+                )
+                continue
+            if not existing and name_matches:
+                errors.append(
+                    f"Excel 第{item['excel_row']}行《{item['name']}》：书名已对应系统书号 "
+                    f"{name_matches[0]['item_code']}，但上传编号为 {item['identifier']}，已拒绝匹配冲突。"
+                )
+                continue
+        elif name_matches:
+            existing = name_matches[0]
+
+        item_code = existing["item_code"] if existing else item["identifier"]
+        if existing:
+            mapped = mapped_by_id.get(existing["id"])
+            if mapped and (
+                item_code != mapped["item_code"]
+                or item["name"] != mapped["book_name"]
+                or item["category"] != mapped["category"]
+            ):
+                errors.append(
+                    f"Excel 第{item['excel_row']}行《{item['name']}》：此书已关联弘法领取，"
+                    "书号、书名或分类与对接资料不一致，请先核对。"
+                )
+                continue
+        elif item_code:
+            code_key = item_code.casefold()
+            if code_key in used_codes:
+                errors.append(
+                    f"Excel 第{item['excel_row']}行《{item['name']}》：编号 {item_code} "
+                    "已被系统其他书籍使用。"
+                )
+                continue
+            used_codes.add(code_key)
+
+        planned.append({"item": item, "existing": existing, "item_code": item_code})
+
+    if errors:
+        raise ValueError("书籍匹配校验失败：\n" + "\n".join(errors))
+
+    new_items = [entry for entry in planned if entry["existing"] is None and not entry["item_code"]]
+    for category in sorted({entry["item"]["category"] for entry in new_items}):
+        category_items = sorted(
+            (entry for entry in new_items if entry["item"]["category"] == category),
+            key=lambda entry: entry["item"]["name_key"],
+        )
+        index = 1
+        for entry in category_items:
+            item_code = make_item_code(index, category)
+            while item_code.casefold() in used_codes:
+                index += 1
+                item_code = make_item_code(index, category)
+            entry["item_code"] = item_code
+            used_codes.add(item_code.casefold())
+            index += 1
+
+    matched_codes = {entry["item_code"].casefold() for entry in planned}
+    missing = [
+        row for row in existing_rows
+        if row["is_active"] and str(row["item_code"]).strip().casefold() not in matched_codes
+    ]
+    return planned, missing
+
+
+def _inventory_item_changed(item, existing):
+    return any((
+        existing["name"] != item["name"],
+        existing["category"] != item["category"],
+        existing["keywords"] != item["keywords"],
+        existing["unit"] != item["unit"],
+        existing["balance"] != item["balance"],
+        not existing["is_active"],
+    ))
 
 
 def guess_category(name):
@@ -491,7 +931,8 @@ def make_item_code(index, category):
 @library_bp.route("/upload", methods=["GET", "POST"])
 def library_upload():
 
-    if not is_library_admin():
+    admin = get_library_admin()
+    if not admin:
         return redirect(url_for("library.library_admin"))
     if not library_admin_can("can_manage_items"):
         return library_permission_denied()
@@ -510,47 +951,28 @@ def library_upload():
             try:
                 wb = openpyxl.load_workbook(file, data_only=True)
                 ws = wb.active
-
-                header_row, name_col, balance_col = find_inventory_columns(ws)
-
-                rows = []
-
-                for row_idx in range(header_row + 1, ws.max_row + 1):
-
-                    name = ws.cell(row=row_idx, column=name_col).value
-                    balance = ws.cell(row=row_idx, column=balance_col).value
-
-                    if not name:
-                        continue
-
-                    name = str(name).strip()
-
-                    if not name or name == "项目名称":
-                        continue
-
-                    try:
-                        balance = int(balance or 0)
-                    except:
-                        balance = 0
-
-                    category = guess_category(name)
-                    unit = guess_unit(name, category)
-
-                    rows.append({
-                        "name": name,
-                        "balance": balance,
-                        "category": category,
-                        "unit": unit,
-                        "keywords": make_keywords(name),
-                    })
+                rows = _parse_inventory_rows(ws)
 
                 with get_conn() as conn:
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        _lock_inventory_upload(cur)
+                        existing_rows, mapped_by_id = _load_inventory_upload_state(cur)
+                        planned, missing = _plan_inventory_upload(rows, existing_rows, mapped_by_id)
+                        added = 0
+                        updated = 0
+                        unchanged = 0
 
-                        for index, item in enumerate(rows, start=1):
-
-                            item_code = make_item_code(index, item["category"])
-
+                        for entry in planned:
+                            item = entry["item"]
+                            existing = entry["existing"]
+                            item_code = entry["item_code"]
+                            if existing is None:
+                                added += 1
+                            elif _inventory_item_changed(item, existing):
+                                updated += 1
+                            else:
+                                unchanged += 1
+                                continue
                             cur.execute("""
                                 insert into library_items (
                                     item_code,
@@ -581,9 +1003,30 @@ def library_upload():
                                 0,
                             ))
 
+                        if rows:
+                            write_library_audit(
+                                cur,
+                                EXCEL_UPLOAD_AUDIT,
+                                detail=f"库存 Excel 上传：新增 {added}，更新 {updated}，未变更 {unchanged}",
+                                metadata={
+                                    "item_count": len(rows),
+                                    "added": added,
+                                    "updated": updated,
+                                    "unchanged": unchanged,
+                                    "missing": len(missing),
+                                },
+                                admin=admin,
+                            )
                         conn.commit()
 
-                message = f"上传完成：共导入 {len(rows)} 项法物"
+                message = f"上传完成：新增 {added} 项，更新 {updated} 项，未变更 {unchanged} 项。"
+                if missing:
+                    missing_names = "、".join(row["name"] for row in missing[:5])
+                    more = "等" if len(missing) > 5 else ""
+                    message += (
+                        f"另有 {len(missing)} 项现有书籍未出现在 Excel 中，库存已保留且未停用："
+                        f"{missing_names}{more}。"
+                    )
 
             except Exception as e:
                 error = f"上传失败：{e}"
@@ -620,13 +1063,15 @@ body { padding-bottom: 90px !important; }
         <div class="card">
             <h1 class="page-title">📤 上传藏经阁库存</h1>
             <p class="page-subtitle">上传 library_inventory.xlsx 更新库存资料</p>
+            <p>有书籍编号时按编号匹配；没有编号时按唯一书名匹配。Excel 未列出的书籍会保留原库存。</p>
+            <p>如有弘法待确认领取，请先对账。系统会阻止可能覆盖待确认库存的上传。</p>
 
             {% if message %}
                 <div class="alert alert-success">{{ message }}</div>
             {% endif %}
 
             {% if error %}
-                <div class="alert alert-danger">{{ error }}</div>
+                <div class="alert alert-danger" style="white-space: pre-line">{{ error }}</div>
             {% endif %}
 
             <form method="post" enctype="multipart/form-data">
@@ -1518,6 +1963,10 @@ def library_admin_home():
     if not admin:
         return redirect(url_for("library.library_admin"))
 
+    from hongfa.library_bridge import pending_count
+    can_confirm_hongfa = library_admin_can("can_batch_out")
+    can_view_hongfa = can_confirm_hongfa or library_admin_can("can_view_records")
+    hongfa_pending = pending_count() if can_view_hongfa else None
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""select count(*) as total_items, coalesce(sum(balance),0) as total_balance
@@ -1586,6 +2035,10 @@ body { padding-bottom: 90px !important; }
 <div class="btn-row">
 {% if can_batch_in %}<a class="btn-tool btn-success" href="/library/batch-in">📦 批量入库</a><a class="btn-tool btn-success" href="/library/in">📥 单项入库</a>{% endif %}
 {% if can_view_records %}<a class="btn-tool btn-primary" href="/library/records">📋 进出记录</a>{% endif %}
+{% if hongfa_pending is not none %}
+{% if can_confirm_hongfa %}<a class="btn-tool btn-primary" href="{{ url_for('library.hongfa_transfers') }}">📋 弘法领取确认（{{ hongfa_pending }}）</a>{% endif %}
+<a class="btn-tool btn-secondary" href="{{ url_for('library.hongfa_transfer_history') }}">📜 弘法领取历史</a>
+{% endif %}
 <a class="btn-tool btn-warning" href="/library/low-stock">📊 库存不足</a>
 {% if can_stocktake or can_adjust_stock %}<a class="btn-tool btn-purple" href="{{ url_for('library.library_stocktake') }}">📤 上传盘点 Excel</a>{% endif %}
 {% if can_manage_items %}<a class="btn-tool btn-primary" href="/library/items">⚙️ 法物管理</a>{% endif %}
@@ -1602,6 +2055,8 @@ body { padding-bottom: 90px !important; }
         role_label=library_role_label(admin),
         can_batch_in=library_admin_can("can_batch_in"),
         can_view_records=library_admin_can("can_view_records"),
+        can_confirm_hongfa=can_confirm_hongfa,
+        hongfa_pending=hongfa_pending,
         can_stocktake=library_admin_can("can_stocktake"),
         can_adjust_stock=library_admin_can("can_adjust_stock"),
         can_manage_items=library_admin_can("can_manage_items"),
@@ -2394,7 +2849,7 @@ style="color:#999;text-decoration:line-through;background:#f8f8f8;"
 
     <td>
 
-    {% if r.status=="active" %}
+    {% if legacy_stock and can_cancel and r.status=="active" %}
 
     <form
     method="post"
@@ -2444,7 +2899,8 @@ style="color:#999;text-decoration:line-through;background:#f8f8f8;"
 </body>
 </html>
 """,
-records=records
+records=records, legacy_stock=legacy_stock_enabled(),
+can_cancel=legacy_stock_enabled() and library_admin_can("can_cancel_transaction")
 )
 
 @library_bp.route("/low-stock")
@@ -4314,6 +4770,7 @@ def library_quick_out(item_code):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
+            lock_sql = " for update" if request.method == "POST" else ""
             cur.execute("""
                 select
                     item_code,
@@ -4326,7 +4783,7 @@ def library_quick_out(item_code):
                 where item_code = %s
                   and is_active = true
                 limit 1
-            """, (item_code,))
+            """ + lock_sql, (item_code,))
 
             item = cur.fetchone()
 
@@ -5458,3 +5915,8 @@ def library_api_item(item_code):
             "category": item["category"],
         }
     }
+
+
+from hongfa.library_bridge import register_library_confirmation
+register_library_confirmation(library_bp, get_library_admin, library_admin_can,
+                              library_admin_label, write_library_audit)
