@@ -18,7 +18,8 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright, Error as PlaywrightError
+from playwright.sync_api import (sync_playwright, Error as PlaywrightError,
+                                 TimeoutError as PlaywrightTimeoutError)
 
 BASE = Path(__file__).resolve().parent
 load_dotenv(BASE / '.env.agent')
@@ -44,6 +45,66 @@ def post(path, data):
     return response.json()
 
 
+# 仅关闭明确识别的 WhatsApp 通知提示，不开启通知、不点击未知弹窗。
+NOTIFICATION_DIALOG_LABELS = {
+    '接收 whatsapp 通知', '接收 whatsapp 通知消息', '接收 whatsapp 通知訊息',
+    'get whatsapp notifications', 'receive whatsapp notifications',
+    'turn on whatsapp notifications', 'terima pemberitahuan whatsapp',
+}
+NOTIFICATION_DISMISS_BUTTON = re.compile(
+    r'^(?:暂不|暂不接收|暫不|暫不接收|稍后|稍後|稍后再说|稍後再說|'
+    r'以后再说|以後再說|暂时不要|暫時不要|暂不启用|暫不啟用|暂不允许|暫不允許|'
+    r'不接收|不用了|不用謝|不用谢|不，谢谢|不，謝謝|'
+    r'Not now|Maybe later|Later|No thanks|No, thanks|Bukan sekarang|Nanti)$', re.I)
+NOTIFICATION_CLOSE_BUTTON = re.compile(r'^(?:关闭|關閉|取消|Close|Cancel|Tutup|Batal)$', re.I)
+
+
+def visible_modal_dialogs(page):
+    dialogs = page.locator('[role="dialog"][aria-modal="true"]')
+    return [dialogs.nth(i) for i in range(dialogs.count()) if dialogs.nth(i).is_visible()]
+
+
+def dismiss_notification_popup(page):
+    """只在发送前使用。未知弹窗/按钮、多个弹窗或关闭失败时停止操作。"""
+    dialogs = visible_modal_dialogs(page)
+    if not dialogs:
+        return False
+    labels = [d.get_attribute('aria-label') or '' for d in dialogs]
+    if (len(dialogs) != 1 or
+            ' '.join(labels[0].split()).casefold() not in NOTIFICATION_DIALOG_LABELS):
+        raise RuntimeError(f'检测到未知或多个 WhatsApp 弹窗，暂停操作，请人工检查：{labels}')
+    dialog = dialogs[0]
+    # 优先选择明确的‘暂不’，只有没有此类按钮才考虑关闭/取消。
+    safe = []
+    for pattern in (NOTIFICATION_DISMISS_BUTTON, NOTIFICATION_CLOSE_BUTTON):
+        buttons = dialog.get_by_role('button', name=pattern)
+        safe = [buttons.nth(i) for i in range(buttons.count())
+                if buttons.nth(i).is_visible() and buttons.nth(i).is_enabled()]
+        if safe:
+            break
+    if len(safe) != 1:
+        raise RuntimeError(f'检测到 WhatsApp 通知弹窗，但安全关闭按钮数量={len(safe)}；请人工关闭')
+    LOG.info('检测到 WhatsApp 通知弹窗，尝试关闭（不启用通知）')
+    safe[0].click(timeout=3000)
+    dialog.wait_for(state='hidden', timeout=3000)
+    if visible_modal_dialogs(page):
+        raise RuntimeError('关闭通知提示后仍存在弹窗，请人工检查')
+    LOG.info('WhatsApp 通知弹窗已关闭，继续原有流程')
+    return True
+
+
+def pre_send_ui_action(page, action):
+    """仅供搜索/打开群组使用；超时后确实关闭通知弹窗才允许重试一次。"""
+    dismiss_notification_popup(page)
+    try:
+        action()
+    except PlaywrightTimeoutError:
+        if not dismiss_notification_popup(page):
+            raise
+        LOG.info('通知弹窗导致操作超时，安全重试一次发送前操作')
+        action()
+
+
 def ready_page(context):
     pages = [p for p in context.pages if not p.is_closed()
              and p.url.startswith('https://web.whatsapp.com/')]
@@ -55,6 +116,7 @@ def ready_page(context):
     side = page.locator('#side')
     if side.count() != 1 or not side.is_visible():
         raise RuntimeError('WhatsApp Web 未登录或聊天列表未就绪')
+    dismiss_notification_popup(page)  # 领取任务前先处理弹窗
     return page
 
 
@@ -93,17 +155,23 @@ def open_test_chat(page):
             break
     if search is None:
         raise RuntimeError('找不到 WhatsApp 搜索框')
-    search.fill(GROUP)
+    pre_send_ui_action(page, lambda: search.fill(GROUP))
     page.wait_for_timeout(2000)
-    matches = page.locator('#side span[title]').filter(has_text=GROUP)
-    exact = [matches.nth(i) for i in range(matches.count())
-             if matches.nth(i).get_attribute('title') == GROUP
-             and matches.nth(i).is_visible()]
-    LOG.info('测试群标题匹配数量=%s', len(exact))
-    if len(exact) != 1:
-        raise RuntimeError(f'测试群标题匹配数量={len(exact)}，停止发送')
-    exact[0].click()
+
+    def click_exact_group():
+        # 若弹窗导致重试，重新检查群组唯一性，不能沿用旧匹配。
+        matches = page.locator('#side span[title]').filter(has_text=GROUP)
+        exact = [matches.nth(i) for i in range(matches.count())
+                 if matches.nth(i).get_attribute('title') == GROUP
+                 and matches.nth(i).is_visible()]
+        LOG.info('测试群标题匹配数量=%s', len(exact))
+        if len(exact) != 1:
+            raise RuntimeError(f'测试群标题匹配数量={len(exact)}，停止发送')
+        exact[0].click()
+
+    pre_send_ui_action(page, click_exact_group)
     page.wait_for_timeout(1000)
+    dismiss_notification_popup(page)
     check_header(page)
 
 
@@ -245,6 +313,8 @@ def send_test(page, message):
         LOG.info('发送前：聊天区本人消息=%s，完全匹配=%s，匹配ID=%s',
                  before['total'], len(before['matched']),
                  [x['id'] for x in before['matched']][-3:])
+    dismiss_notification_popup(page)
+    check_header(page)
     editor.fill(message)
     if AUTO:
         LOG.info('发送前历史聊天样本（非本次发送内容）=%s', before['samples'][-3:])
@@ -258,9 +328,10 @@ def send_test(page, message):
                 LOG.warning('无法清空草稿，请人工检查')
             return 'failed', '操作员取消；未执行发送'
     try:
+        dismiss_notification_popup(page)
         check_header(page)
     except Exception as exc:
-        return 'failed', f'发送前群组校验失败：{exc}'
+        return 'failed', f'发送前群组或弹窗校验失败：{exc}'
 
     # 此处起可能已发出：任何异常均不可重试。
     try:
@@ -456,6 +527,8 @@ def main():
                     LOG.info('WhatsApp Web 已就绪，开始检查测试消息队列')
                     break
                 except (PlaywrightError, RuntimeError) as exc:
+                    if '弹窗' in str(exc):
+                        LOG.warning('启动时 WhatsApp 弹窗未解除：%s', exc)
                     if time.monotonic() >= login_deadline:
                         raise RuntimeError('等待 WhatsApp Web 就绪超时；请检查登录状态') from exc
                     time.sleep(3)
