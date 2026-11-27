@@ -595,6 +595,7 @@ PAGE = """
     .signin-modal-choice .shift-details{display:block;font-size:17px;font-weight:600;margin-top:5px}
     .signin-modal-confirm{display:block;width:100%;background:#138447;color:#fff;border:0;border-radius:16px;padding:18px;font-size:24px;font-weight:900;cursor:pointer;margin-top:15px}
     .signin-modal-cancel{display:block;width:100%;background:#f1f3f5;color:#495057;border:0;border-radius:14px;padding:13px;font-size:18px;cursor:pointer;margin-top:12px}
+    .vol-dialog-actions .signin-modal-cancel{background:#0756a8;color:#fff;font-weight:700}
     .signin-modal-card .form-input{width:100%;box-sizing:border-box;font-size:21px;min-height:54px}
     @media(max-width:700px){.signin-modal-card{padding:20px}.signin-modal-card h2{font-size:24px}}
   </style>
@@ -624,7 +625,7 @@ PAGE = """
         <form method="post" action="{{ url_for('admin.admin_report') }}">
 
           <div class="form-group">
-            <label class="form-label">{{ t.admin_pin }}</label>
+            <label class="form-label" for="admin_pin">{{ t.admin_pin }}</label>
             <input
               class="form-input"
               id="admin_pin"
@@ -771,7 +772,7 @@ PAGE = """
       <div class="login-row">
 
         <div class="form-group">
-          <label class="form-label">{{ t.enter_id }}</label>
+          <label class="form-label" for="volunteer_id">{{ t.enter_id }}</label>
 
           <div class="branch-row">
             <button
@@ -797,7 +798,7 @@ PAGE = """
         </div>
 
         <div class="form-group">
-          <label class="form-label">{{ t.pin }}</label>
+          <label class="form-label" for="pin">{{ t.pin }}</label>
           <input
             class="form-input"
             id="pin"
@@ -1085,6 +1086,8 @@ const TXT = {
 let verifiedLookupKey = null;
 let lookupRequestSerial = 0;
 let autoLookupTimer = null;
+// 只有义工 PIN 输入框中的实际输入才触发自动验证。
+let enteredVolunteerPin = '';
 function currentLookupKey() {
   return JSON.stringify([
     document.getElementById('branch').value,
@@ -1133,7 +1136,7 @@ async function lookupVolunteer() {
     return;
   }
 
-  const pin = document.getElementById('pin').value.trim();
+  const pin = enteredVolunteerPin === pinInput.value.trim() ? enteredVolunteerPin : '';
 
   const formData = new FormData();
   formData.append('pin', pin);
@@ -1176,8 +1179,6 @@ async function lookupVolunteer() {
       if (paidUntil && paidUntil !== "-") {
         html += `<br>${TXT.paid_until}：${paidUntil}`;
       }
-    } else if (pin) {
-      html += `<br><span style="color:#842029;">${TXT.pin_wrong}</span>`;
     }
 
     if (data.today_assignments && data.today_assignments.length > 0) {
@@ -1647,16 +1648,18 @@ if (volunteerIdInput && pinInput) {
 }
 
 window.addEventListener("load", function() {
-  const adminPin = document.getElementById("admin_pin");
-
-  if (pinInput) pinInput.value = "";
+  pinInput.value = "";
+  document.getElementById("admin_pin").value = "";
   ['volunteer_id', 'pin'].forEach(id => {
-    document.getElementById(id).addEventListener('input', function() {
+    document.getElementById(id).addEventListener('input', function(event) {
+      if (this === pinInput && event.isTrusted && document.activeElement === pinInput) {
+        enteredVolunteerPin = pinInput.value.trim();
+      }
       clearTimeout(autoLookupTimer);
       invalidateLookup();
       const number = document.getElementById('volunteer_id').value.trim();
-      const pin = document.getElementById('pin').value.trim();
-      if (number && pin) {
+      const pin = pinInput.value.trim();
+      if (number && pin && pin === enteredVolunteerPin) {
         autoLookupTimer = setTimeout(() => {
           if (document.getElementById('volunteer_id').value.trim() === number &&
               document.getElementById('pin').value.trim() === pin) lookupVolunteer();
@@ -1664,12 +1667,20 @@ window.addEventListener("load", function() {
       }
     });
   });
-  if (adminPin) adminPin.value = "";
 
   toggleCardNo();
   document.getElementById('card_no').addEventListener('input', function() {
     if (this.value.trim()) document.getElementById('cardNoWarning').style.display = 'none';
   });
+});
+window.addEventListener('pageshow', event => {
+  if (!event.persisted) return;
+  clearTimeout(autoLookupTimer);
+  ++lookupRequestSerial;
+  enteredVolunteerPin = pinInput.value = '';
+  document.getElementById('admin_pin').value = '';
+  document.getElementById('adminBox').style.display = 'none';
+  invalidateLookup();
 });
 </script>
 
@@ -2164,7 +2175,13 @@ def do_sign_in():
             result += "\nThe system will automatically check you out at the end of your shift."
         flash(result, "signin_ok")
     else:
-        flash(f"签到未完成。{msg}" if get_lang() == "zh" else "Check-in incomplete. Check your volunteer number, PIN and role, or view today’s attendance if you already checked in.", "signin_failed")
+        if get_lang() == "zh":
+            error = f"签到未完成。{msg}"
+        elif msg == "PIN 不正确。":
+            error = "Check-in incomplete. Incorrect volunteer PIN."
+        else:
+            error = "Check-in incomplete. Check your volunteer number, PIN and role, or view today’s attendance if you already checked in."
+        flash(error, "signin_failed")
 
     return response
 

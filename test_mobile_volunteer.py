@@ -7,7 +7,7 @@ modules that connect to a database or send notifications are imported.
 """
 import ast
 import calendar
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from http import HTTPStatus
@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 from types import ModuleType
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from flask import Blueprint, Flask, abort, flash, jsonify, redirect, render_template_string, request, session, url_for
@@ -167,6 +167,8 @@ def build_app(db):
     app.extensions['offline_handlers'] = dependencies
     dependencies['ROLE_TEXT'] = ROLE_TEXT
     load_parts('app.py', {'PAGE', 'index', 'do_sign_in'}, dependencies)
+    load_parts('admin_web.py', {'ADMIN_HOME_HTML', 'admin_home', 'admin_report'}, dependencies)
+    dependencies.update(ADMIN_PIN='9753', get_signin_policies=lambda: {'duty': False})
     load_parts('schedule/volunteer_templates.py', {'VOLUNTEER_PREBOOK_HTML'}, dependencies)
     load_parts('schedule/routes/volunteer_routes.py',
                {'volunteer_signup', 'volunteer_cancel_signup', 'volunteer_my_schedule',
@@ -206,10 +208,13 @@ def build_app(db):
                                 start_time='09:00', end_time='11:00'),
                            dict(id=2, role='值班', state='pending', assigned_place='活动中心',
                                 start_time='11:00', end_time='12:00'),
+                           dict(id=3, role='值班', state='completed', assigned_place='已完成地点'),
+                           dict(id=4, role='值班', state='completed', auto_signed_out=True,
+                                assigned_place='自动签退地点'),
                        ],
                        eligible_duty_assignment_ids=[1, 2], open_roles=['佛台'],
                        eligible_roles=[{'role': role, 'label': dependencies['role_label'](role)}
-                                       for role in ('卫生', '值班')])
+                                       for role in (() if db.mode == 'no-roles' else ('卫生', '值班'))])
 
     def delayed(handler):
         def wrapped(**kwargs):
@@ -235,10 +240,14 @@ def build_app(db):
         app.add_url_rule(path, endpoint, delayed(dependencies[name]), methods=methods)
 
     for endpoint, path in [
-        ('set_lang', '/language/<lang>'), ('change_pin_page', '/pin'), ('admin.admin_report', '/admin/report'),
+        ('set_lang', '/language/<lang>'), ('change_pin_page', '/pin'),
+        ('admin.admin_today_open', '/admin/today-open'), ('admin.manage_history', '/admin/history'),
+        ('admin.update_signin_policy', '/admin/signin-policy'),
         ('today_attendance_list', '/api/today-attendance-list'), ('today_attendance_stats', '/api/today-attendance-stats'),
     ]:
         app.add_url_rule(path, endpoint, lambda **kwargs: jsonify(rows=[], date=TODAY.isoformat()))
+    app.add_url_rule('/admin-home', 'admin.admin_home', dependencies['admin_home'])
+    app.add_url_rule('/admin_report', 'admin.admin_report', dependencies['admin_report'], methods=['GET', 'POST'])
     app.after_request(dependencies['_volunteer_form_identity'])
     return app
 
@@ -260,12 +269,145 @@ def run_browser(app, db):
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(executable_path=os.environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE'))
+            desktop = browser.new_context(viewport={'width': 1280, 'height': 800})
+            desktop.route('**/*', lambda route: route.continue_() if route.request.url.startswith(origin + '/') else route.abort())
+            page = desktop.new_page()
+            page.set_default_timeout(6000)
+            for lang in ('zh', 'en'):
+                admin_panel_cases(page, origin, lang)
+                print(f'PASS | Desktop, {lang}: admin PIN panel and round trip')
+            desktop.close()
+            for device in ('iPhone SE', 'Pixel 7'):
+                signin_entry_cases(browser, origin, db, device, playwright.devices[device])
             browser_cases(browser, origin, db)
             browser.close()
     finally:
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def admin_panel_cases(page, origin, lang):
+    page.context.add_cookies([{'name': 'lang', 'value': lang, 'url': origin}])
+    toggle = page.locator('[onclick="toggleAdminBox()"]')
+    panel = page.locator('#adminBox')
+    pin = page.locator('#admin_pin')
+    submit = panel.locator('button[type="submit"]')
+    error = '管理员 PIN 不正确' if lang == 'zh' else 'Admin PIN is incorrect'
+
+    for path in ('/', '/?admin_login=1#adminBox'):
+        page.goto(origin + path)
+        expect(panel).to_be_hidden()
+        expect(page.locator('.alert-danger:visible')).to_have_count(0)
+
+    page.goto(origin + '/admin-home')
+    page.locator('a[href^="/admin_report"]').first.click()
+    expect(page).to_have_url(origin + '/')
+    expect(panel).to_be_hidden()
+    expect(pin).to_have_value('')
+    expect(page.locator('.alert-danger:visible')).to_have_count(0)
+
+    toggle.click()
+    expect(panel).to_be_visible()
+    toggle.click()
+    expect(panel).to_be_hidden()
+    toggle.click()
+    expect(panel).to_be_visible()
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}))")
+    expect(panel).to_be_hidden()
+
+    toggle.click()
+    pin.click()
+    pin.fill('9999')
+    submit.click()
+    expect(page.locator('.alert-danger:visible')).to_have_text(error)
+    expect(panel).to_be_hidden()
+
+    toggle.click()
+    pin.click()
+    pin.fill('9753')
+    submit.click()
+    page.locator('.admin-home-float').click()
+    expect(page).to_have_url(origin + '/')
+    expect(panel).to_be_hidden()
+    expect(page.locator('.alert-danger:visible')).to_have_count(0)
+
+
+def signin_entry_cases(browser, origin, db, device, settings):
+    context = browser.new_context(**settings)
+    context.route('**/*', lambda route: route.continue_() if route.request.url.startswith(origin + '/') else route.abort())
+    page = context.new_page()
+    page.set_default_timeout(6000)
+    lookups = []
+    page.on('request', lambda request: lookups.append(request) if '/api/volunteer/' in request.url else None)
+    for lang in ('zh', 'en'):
+        db.reset()
+        admin_panel_cases(page, origin, lang)
+        expect(page.locator('#pin')).to_have_value('')
+        page.locator('[onclick="toggleAdminBox()"]').click()
+        page.locator('#admin_pin').click()
+        page.locator('#admin_pin').fill('9753')
+        pin = page.locator('#pin')
+        pin.evaluate("field => { field.value = '9753'; field.dispatchEvent(new Event('input')); }")
+        page.locator('#volunteer_id').fill('208')
+        previous = len(lookups)
+        page.wait_for_timeout(1100)
+        assert len(lookups) == previous
+        expect(page.locator('#personBox')).to_be_hidden()
+
+        db.mode = 'lookup-invalid'
+        pin.click()
+        pin.fill('9999')
+        error = 'PIN 不正确' if lang == 'zh' else 'PIN incorrect'
+        expect(page.locator('#personBox')).to_contain_text(error)
+        assert (page.locator('#personBox').inner_text()).count(error) == 1
+        expect(pin).to_be_focused()
+        assert len(lookups) == previous + 1
+
+        db.mode = 'no-roles'
+        pin.fill('1234')
+        modal = page.locator('#signinModal')
+        expect(modal).to_contain_text('当前没有可签到岗位' if lang == 'zh' else 'No eligible roles')
+        cancel = modal.get_by_role('button', name='暂不签到' if lang == 'zh' else 'Not now')
+        expect(cancel).to_have_css('background-color', 'rgb(7, 86, 168)')
+        expect(cancel).to_have_css('color', 'rgb(255, 255, 255)')
+        expect(cancel).to_have_css('font-weight', '700')
+        assert cancel.bounding_box()['height'] >= 48
+        in_view(page, cancel)
+        cancel.click()
+        expect(modal).to_be_hidden()
+        expect(page.locator('#personBox')).to_contain_text('已完成' if lang == 'zh' else 'Completed')
+        expect(page.locator('#personBox')).to_contain_text('自动签退' if lang == 'zh' else 'Auto checked out')
+        assert not db.saved
+
+        db.mode = ''
+        pin.click()
+        pin.fill('0123')
+        pin.fill('1234')
+        expect(modal.locator('.signin-modal-choice')).to_have_count(2)
+        modal.locator('.signin-modal-choice').filter(has_text=re.compile('值班|Duty')).click()
+        expect(modal.locator('#signinModalContent')).to_contain_text('观音堂')
+        expect(modal.locator('#signinModalContent')).to_contain_text('活动中心')
+        expect(modal.locator('#signinModalContent')).not_to_contain_text('已完成地点')
+        expect(modal.locator('#signinModalContent')).to_contain_text('自动结束' if lang == 'zh' else 'automatically check out')
+        modal.locator('#signinModalCardNumber').focus()
+        page.evaluate("""() => {
+            Object.defineProperty(visualViewport, 'height', {configurable: true, value: 290});
+            visualViewport.dispatchEvent(new Event('resize'));
+        }""")
+        in_view(page, modal.locator('#signinConfirm'))
+        in_view(page, cancel)
+        modal.locator('#signinModalContent .signin-modal-cancel').click()
+        modal.locator('.signin-modal-choice').filter(has_text=re.compile('卫生|Cleaning')).click()
+        modal.locator('#signinConfirm').click()
+        receipt = page.locator('#signinSuccessNotice')
+        expect(receipt).to_contain_text('自动签退' if lang == 'zh' else 'automatically check you out')
+        assert db.close_calls == [('CHE-208', '卫生')]
+        receipt.get_by_role('link').click()
+        expect(receipt).to_have_count(0)
+        expect(page.locator('#pin')).to_have_value('')
+        print(f'PASS | {device}, {lang}: admin entry, stale PIN, wrong PIN, completed duties, blue dismiss, role switching and receipt')
+    context.close()
 
 
 def browser_cases(browser, origin, db):
@@ -453,6 +595,7 @@ def browser_cases(browser, origin, db):
             page.screenshot(path=OUTPUT / 'signin-unknown-390.png')
         else:
             expect(page.locator('[data-vol-result]')).to_contain_text('Check-in incomplete')
+            expect(page.locator('[data-vol-result]')).to_contain_text('Incorrect volunteer PIN')
             assert not db.saved
     print('PASS | Check-in selection, review, one POST, saved time, persistent success, failure, unknown result')
 
@@ -506,6 +649,13 @@ def browser_cases(browser, origin, db):
 def route_cases(app, db):
     client = app.test_client()
     client.set_cookie('lang', 'en')
+    for lang, error in [('en', 'Admin PIN is incorrect'), ('zh', '管理员 PIN 不正确')]:
+        client.set_cookie('lang', lang)
+        response = client.post('/admin_report', data={'admin_pin': '9999'}, follow_redirects=True)
+        assert error in response.get_data(as_text=True)
+        response = client.post('/admin_report', data={'admin_pin': '9753'})
+        assert response.status_code == 200 and 'admin-page' in response.get_data(as_text=True)
+    client.set_cookie('lang', 'en')
     form = {'year': 2026, 'month': 12, 'days': '99', 'role': '值班',
             'start_time': '09:00', 'end_time': '11:00'}
     db.reset()
@@ -558,6 +708,57 @@ def route_cases(app, db):
     assert [segment[0] for segment in db.saved[1][1]] == [1, 2]
     assert db.close_calls == [('CHE-208', '值班')]
     print('PASS | Continuous duty writes both matching segments with the saved receipt time')
+    response = client.post('/signin', data={'volunteer_id': '208', 'pin': '1234', 'role': '卫生'},
+                           follow_redirects=True)
+    assert 'Check-in successful!' in response.get_data(as_text=True)
+    assert [args[5] for sql, args in db.saved if sql.startswith('insert into attendance')] == ['值班', '卫生']
+    assert db.close_calls == [('CHE-208', '值班'), ('CHE-208', '卫生')]
+    print('PASS | The same volunteer can submit two roles with the role-change checkout hook')
+
+
+def signup_lock_cases(app, db):
+    handlers = app.extensions['offline_handlers']
+    limits = {}
+    cursor = Mock()
+    cursor.fetchone.side_effect = lambda: cursor.row
+    cursor.fetchall.side_effect = lambda: cursor.rows
+
+    def execute(sql, args):
+        sql = ' '.join(sql.split())
+        if sql.startswith('INSERT INTO volunteer_login_limits'):
+            scope, subject, now = args
+            limits.setdefault((scope, subject), dict(failures=0, window_start=now, locked_until=None))
+        elif sql.startswith('SELECT failures'):
+            cursor.row = limits[args]
+        elif sql.startswith('SELECT locked_until'):
+            cursor.rows = [limits[key] for key in zip(('account', 'ip'), args) if key in limits]
+        else:
+            assert sql.startswith('UPDATE volunteer_login_limits SET failures=%s'), sql
+            failures, start, until, scope, subject = args
+            limits[(scope, subject)] = dict(failures=failures, window_start=start, locked_until=until)
+
+    cursor.execute.side_effect = execute
+
+    @contextmanager
+    def limit_connection():
+        conn = Mock()
+        conn.cursor.return_value = nullcontext(cursor)
+        yield conn
+
+    namespace = {**handlers, '_login_timezone': timezone, 'get_conn': limit_connection}
+    load_parts('schedule/routes/volunteer_routes.py', {'_login_locked', '_login_gate'}, namespace)
+    db.reset()
+    client = app.test_client()
+    form = {'number': '208', 'branch': 'CHE', 'pin': '9999'}
+    with patch.dict(handlers, {name: namespace[name] for name in ('_login_locked', '_login_gate')}):
+        for _ in range(5):
+            bad = client.post('/volunteer/login', data=form)
+            assert 'PIN 不正确' in bad.get_data(as_text=True)
+        locked = client.post('/volunteer/login', data={**form, 'pin': '1234'})
+        assert '登录暂时受限' in locked.get_data(as_text=True)
+        assert sorted(record['failures'] for record in limits.values()) == [5, 5]
+    assert not db.saved
+    print('PASS | Existing signup login locks after five failed account attempts, even with the correct PIN')
 
 
 def main():
@@ -566,6 +767,7 @@ def main():
     db = FakeDatabase()
     app = build_app(db)
     route_cases(app, db)
+    signup_lock_cases(app, db)
     run_browser(app, db)
     for file in ('test_duty_v2.py', 'test_duty_v2_integration.py', 'test_duty_v2_safety.py'):
         subprocess.run([sys.executable, str(ROOT / file)], cwd=ROOT, check=True)

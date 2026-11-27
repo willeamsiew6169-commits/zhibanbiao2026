@@ -665,6 +665,9 @@ def admin_report():
 
     t = get_text()
 
+    if request.method == "GET" and not pin:
+        return redirect(url_for("index"))
+
     if pin != ADMIN_PIN:
         flash(t["admin_pin_wrong"], "bad")
         return redirect(url_for("index"))
