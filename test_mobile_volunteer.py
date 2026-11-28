@@ -212,7 +212,7 @@ def build_app(db):
                            dict(id=4, role='值班', state='completed', auto_signed_out=True,
                                 assigned_place='自动签退地点'),
                        ],
-                       eligible_duty_assignment_ids=[1, 2], open_roles=['佛台'],
+                       eligible_duty_assignment_ids=[1, 2], open_roles=['佛台'], altar_cutoff_minutes=600,
                        eligible_roles=[{'role': role, 'label': dependencies['role_label'](role)}
                                        for role in (() if db.mode == 'no-roles' else ('卫生', '值班'))])
 
@@ -393,21 +393,45 @@ def signin_entry_cases(browser, origin, db, device, settings):
             '点击下方绿色按钮即可完成签到' if lang == 'zh' else 'Tap a green button below to complete check-in.')
         expect(page.locator('#signinSubmitStatus')).to_be_empty()
         expect(modal.locator('.signin-modal-hint')).to_be_visible()
+        reminder = page.evaluate("""() => {
+            const original=signinModalNowMinutes;
+            signinModalNowMinutes=()=>630;
+            try {
+                const holder=document.createElement('div');
+                appendMissedSigninNotice(holder,{altar_cutoff_minutes:600,open_roles:['卫生'],today_assignments:[
+                    {role:'佛台',state:'pending',end_time:'完成佛台工作'},
+                    {role:'卫生',state:'pending',end_time:'10:00am'},
+                    {role:'供果',state:'completed',end_time:'10:00am'},
+                    {role:'值班',state:'pending',end_time:'12:00pm'}]});
+                return holder.textContent;
+            } finally {signinModalNowMinutes=original;}
+        }""")
+        assert page.evaluate("() => ROLE_LABELS['佛台'] || '佛台'") in reminder, reminder
+        assert '卫生' not in reminder and '供果' not in reminder and '值班' not in reminder
+
         expect(page.locator('#signinConfirm')).to_have_count(0)
         expect(modal).not_to_contain_text('身份已验证' if lang == 'zh' else 'Identity verified')
         expect(modal.locator('.signin-modal-choice').filter(has_text=re.compile('卫生|Cleaning'))).to_contain_text(
             '自动结束' if lang == 'zh' else 'automatically check out')
-        modal.locator('.signin-modal-choice').filter(has_text=re.compile('值班|Duty')).click()
-        expect(modal).to_be_hidden()
-        expect(page.locator('#cardNoWarning')).to_be_visible()
-        expect(page.locator('#card_no')).to_be_focused()
+        duty = modal.locator('.signin-modal-choice').filter(has_text=re.compile('值班|Duty'))
+        expect(duty).to_contain_text('观音堂')
+        expect(duty).to_contain_text('活动中心')
+        expect(duty).not_to_contain_text('已完成地点')
+        card = modal.locator('#signinModalCardNumber')
+        expect(card).to_be_visible()
+        duty.click()
+        expect(modal).to_be_visible()
+        expect(modal.locator('#signinModalCardWarning')).to_be_visible()
+        expect(card).to_be_focused()
         assert not db.saved
+        card.fill('CARD-TEST')
+        expect(page.locator('#card_no')).to_have_value('CARD-TEST')
+        expect(modal.locator('#signinModalCardWarning')).to_be_hidden()
+        assert not db.saved
+        cancel.click()
+        expect(modal).to_be_hidden()
         cleaning_card = page.locator('.signin-role-button').filter(has_text=re.compile('卫生|Cleaning'))
         expect(cleaning_card).to_contain_text('点击签到' if lang == 'zh' else 'Tap to check in')
-        # The missing duty card number intentionally focuses its input. WebKit
-        # may scroll that input into view and leave other roles below the fold.
-        # Verify the focused input, then simulate scrolling to another role.
-        expect(page.locator('#card_no')).to_be_in_viewport(ratio=1)
         cleaning_card.scroll_into_view_if_needed()
         expect(cleaning_card).to_be_in_viewport(ratio=1)
         in_view(page, cleaning_card)

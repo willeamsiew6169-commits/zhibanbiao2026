@@ -592,6 +592,8 @@ PAGE = """
     .signin-modal-mask{position:fixed;inset:0;background:rgba(15,23,42,.64);z-index:10000;display:none;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
     .signin-modal-card{width:min(100%,520px);max-height:90vh;overflow-y:auto;background:white;border-radius:22px;padding:24px;box-sizing:border-box;box-shadow:0 20px 60px rgba(0,0,0,.3);color:#172033}
     .signin-modal-card h2{font-size:27px;margin:0 0 18px;text-align:center}
+    .signin-card-label{display:block;font-size:19px;font-weight:800;margin-top:12px}
+    .signin-missed-note{background:#fff4df;border:1px solid #e8bd72;border-radius:12px;padding:10px;color:#804500;font-size:16px;line-height:1.5}
     .signin-modal-hint{margin:0 0 12px;color:#245b3a;font-size:18px;font-weight:700;line-height:1.5;text-align:center}
     .signin-modal-choice{display:block;width:100%;border:2px solid #16834a;background:#e5f8ed;color:#115d35;border-radius:16px;text-align:left;padding:17px;margin:12px 0;font-size:21px;font-weight:800;cursor:pointer}
     .signin-modal-choice .shift-details{display:block;font-size:17px;font-weight:600;margin-top:5px}
@@ -764,7 +766,6 @@ PAGE = """
 
   <div class="card" id="signinFormCard">
     <h2 class="section-title">✅ {{ t.check_in }}</h2>
-    <p id="signinInlineHint" class="signin-action-hint" hidden>{{ '点击下方绿色按钮即可完成签到' if t.html_lang.startswith('zh') else 'Tap a green button below to complete check-in.' }}</p>
 
     <form method="post" id="volunteerSigninForm" data-vol-submit
           data-vol-status="#signinSubmitStatus" data-vol-records="{{ url_for('index', attendance=1) }}#todayAttendanceList"
@@ -863,6 +864,8 @@ PAGE = """
                 {{ t.role }}
             </label>
 
+    <p id="signinInlineHint" class="signin-action-hint" hidden>{{ '点击下方绿色按钮即可完成签到' if t.html_lang.startswith('zh') else 'Tap a green button below to complete check-in.' }}</p>
+            <div id="signinInlineReminder"></div>
             <div id="signinRoleButtons" class="signin-role-list" aria-live="polite"></div>
             <div id="signinInlineStatus"></div>
             <select
@@ -1114,6 +1117,7 @@ function invalidateLookup() {
   roleSelect.add(new Option(TXT.lookup_placeholder, ''));
   document.getElementById('signinRoleButtons').replaceChildren();
   document.getElementById('signinInlineHint').hidden=true;
+  document.getElementById('signinInlineReminder').replaceChildren();
   document.getElementById('card_no').value = '';
   toggleCardNo();
 }
@@ -1322,6 +1326,28 @@ function signinModalNowMinutes(){
   const parts = new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Kuala_Lumpur',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date());
   return Number(parts.find(p=>p.type==='hour').value)*60+Number(parts.find(p=>p.type==='minute').value);
 }
+function appendMissedSigninNotice(holder,data){
+  const rows=data.today_assignments||[];
+  const now=signinModalNowMinutes();
+  const missed=[...new Set(rows.filter(a=>{
+    if(a.state!=='pending')return false;
+    if(rows.some(b=>b.role===a.role && b.state!=='pending'))return false;
+    if((data.open_roles||[]).includes(a.role))return false;
+    const end=a.role==='佛台'||a.role==='整理佛台' ? data.altar_cutoff_minutes : roleSortMinutes(a.end_time);
+    return Number.isFinite(end)&&end<1440&&now>=end;
+  }).map(a=>a.role))];
+  if(!missed.length)return;
+  const note=document.createElement('p');note.className='signin-missed-note';
+  note.textContent=LIST_LANG_ZH?'⚠️ 今日尚未签到：'+missed.join('、')+'。如已完成服务但忘记签到，请通知负责人协助补录。':'⚠️ No check-in recorded today: '+missed.map(r=>ROLE_LABELS[r]||r).join(', ')+'. If you served, please inform the person in charge.';
+  holder.appendChild(note);
+}
+function appendSigninShifts(button,item,cls){
+  (item.shifts||[]).forEach(shift=>{
+    const detail=document.createElement('span');detail.className=cls;
+    detail.textContent=[shift.assigned_place,[shift.start_time,shift.end_time].filter(Boolean).join(' ～ ')].filter(Boolean).join(' · ');
+    button.appendChild(detail);
+  });
+}
 function showSigninModal(data){
   if (!data || verifiedLookupKey !== currentLookupKey() || !data.volunteer.pin_ok || document.getElementById('volunteerSigninForm').dataset.volBusy) return;
   const title=document.getElementById('signinModalTitle');
@@ -1342,6 +1368,7 @@ function showSigninModal(data){
     const current=now>=start && now<end;
     return {...item,shift,shifts,index,start,current,distance:current?0:Math.abs(now-start)};
   }).sort((a,b)=>Number(b.current)-Number(a.current)||a.distance-b.distance||a.index-b.index);
+  appendMissedSigninNotice(content,data);
   if (!choices.length){
     title.textContent=LIST_LANG_ZH?'⚠️ 当前没有可签到岗位':'⚠️ No eligible roles';
     modal.style.display='flex';return;
@@ -1358,7 +1385,7 @@ function showSigninModal(data){
     const label=document.createElement('span');
     label.textContent=(icons[item.role]||'✅')+' '+item.label;
     btn.appendChild(label);
-    if(item.shift){const details=document.createElement('span');details.className='shift-details';details.textContent=[item.shift.assigned_place,[item.shift.start_time,item.shift.end_time].filter(Boolean).join(' ～ ')].filter(Boolean).join(' · ');btn.appendChild(details);}
+    appendSigninShifts(btn,item,'shift-details');
     const rolesToClose=openRoles.filter(role=>!(role==='值班'&&item.role==='供台')&&!(role==='供台'&&item.role==='值班'));
     if(rolesToClose.length){
       const notice=document.createElement('span');
@@ -1372,6 +1399,16 @@ function showSigninModal(data){
     action.className='role-action';
     action.textContent=LIST_LANG_ZH?'✅ 点击签到':'✅ Tap to check in';
     btn.appendChild(action);
+    if(item.role==='值班'){
+      const label=document.createElement('label');label.htmlFor='signinModalCardNumber';label.className='signin-card-label';
+      label.textContent=LIST_LANG_ZH?'义工卡号':'Volunteer card number';content.appendChild(label);
+      const input=document.createElement('input');input.id=label.htmlFor;input.type='text';input.className='form-input';
+      input.placeholder=document.getElementById('card_no').placeholder;input.value=document.getElementById('card_no').value;
+      input.autocomplete='off';content.appendChild(input);
+      const warning=document.createElement('p');warning.id='signinModalCardWarning';warning.className='signin-missed-note';warning.hidden=true;warning.setAttribute('role','alert');
+      warning.textContent=LIST_LANG_ZH?'请先填写义工卡号':'Please enter your volunteer card number.';content.appendChild(warning);
+      input.addEventListener('input',()=>{document.getElementById('card_no').value=input.value;warning.hidden=true;});
+    }
     btn.addEventListener('click',()=>submitSigninRole(item));
     content.appendChild(btn);
   });
@@ -1387,6 +1424,8 @@ function submitSigninRole(item){
   refreshRoleAction();
   const card=document.getElementById('card_no');
   if(item.role==='值班'&&!card.value.trim()){
+    const modalCard=document.getElementById('signinModalCardNumber');
+    if(document.getElementById('signinModal').style.display==='flex'&&modalCard){document.getElementById('signinModalCardWarning').hidden=false;modalCard.focus();return;}
     closeSigninModal();
     document.getElementById('cardNoWarning').style.display='block';
     card.focus();
@@ -1404,24 +1443,22 @@ function submitSigninRole(item){
 function renderSigninRoleButtons(data, verified) {
   const holder = document.getElementById('signinRoleButtons');
   holder.replaceChildren();
+  const reminder=document.getElementById('signinInlineReminder');reminder.replaceChildren();
   if (!verified) return;
+  appendMissedSigninNotice(reminder,data);
   const roles = (data.eligible_roles || []).map((item, index) => {
     const shifts = (data.today_assignments || []).filter(a => a.role === item.role && a.state === 'pending' && (item.role !== '值班' || (data.eligible_duty_assignment_ids || []).includes(Number(a.id))));
     const shift = shifts.sort((a,b) => roleSortMinutes(a.start_time) - roleSortMinutes(b.start_time))[0];
     const defaultStarts = {'卫生':'08:00','佛台':'08:00','供花':'08:00','供果':'08:00','供台':'06:00','膳食':'08:00','佛学班':'10:00'};
-    return {...item, index, shift, sortTime:shift ? roleSortMinutes(shift.start_time) : roleSortMinutes(defaultStarts[item.role])};
+    return {...item, index, shift, shifts, sortTime:shift ? roleSortMinutes(shift.start_time) : roleSortMinutes(defaultStarts[item.role])};
   }).sort((a,b) => a.sortTime - b.sortTime || a.index - b.index);
   roles.forEach(item => {
     const button = document.createElement('button');
-    button.type = 'button'; button.className = 'signin-role-button';
+    button.type = 'button'; button.className = 'signin-role-button'; button.dataset.volLock='volunteerSigninForm';
     const title = document.createElement('span');
     title.textContent = ({'卫生':'🧹 ','佛台':'🙏 ','值班':'🏠 ','供台':'🌸 ','供花':'💐 ','供果':'🍎 ','膳食':'🍽️ ','佛学班':'📖 '}[item.role] || '✅ ') + item.label;
     button.appendChild(title);
-    if (item.shift) {
-      const time = document.createElement('span'); time.className='role-time';
-      time.textContent = [item.shift.assigned_place, [item.shift.start_time,item.shift.end_time].filter(Boolean).join(' ～ ')].filter(Boolean).join(' · ');
-      button.appendChild(time);
-    }
+    appendSigninShifts(button,item,'role-time');
     const action = document.createElement('span'); action.className='role-action';
     action.textContent = LIST_LANG_ZH ? '✅ 点击签到' : '✅ Tap to check in';
     button.appendChild(action);
@@ -2653,10 +2690,12 @@ def api_volunteer(volunteer_id):
         if REQUIRE_ASSIGNMENT_FOR_SIGNIN and not valid_duty_ids:
             eligible_roles = [item for item in eligible_roles if item["role"] != "值班"]
         # 佛台超过截止时间不再提供新签到；其他岗位及签退不变。
-        if eligible_roles:
+        altar_cutoff = None
+        if pin_ok:
             from attendance_service import _altar_cutoff_minutes
             now_my = datetime.now(ZoneInfo("Asia/Kuala_Lumpur"))
-            if now_my.hour * 60 + now_my.minute >= _altar_cutoff_minutes(now_my.date()):
+            altar_cutoff = _altar_cutoff_minutes(now_my.date())
+            if now_my.hour * 60 + now_my.minute >= altar_cutoff:
                 eligible_roles = [item for item in eligible_roles if item["role"] != "佛台"]
 
         return jsonify({
@@ -2664,6 +2703,7 @@ def api_volunteer(volunteer_id):
             "volunteer": safe_v,
             "eligible_duty_assignment_ids": valid_duty_ids,
             "eligible_roles": eligible_roles,
+            "altar_cutoff_minutes": altar_cutoff,
             "today_assignments": today_assignments,
             "attendance_action": attendance_action,
             "current_assignment_id": current_assignment_id,
