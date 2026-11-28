@@ -442,7 +442,13 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
                 ) for segment in group])
 
         if receipt is not None:
+            places = []
+            for segment in group:
+                place = str(segment.get("assigned_place") or "").strip()
+                if place and place not in places:
+                    places.append(place)
             receipt.update(name=volunteer["姓名"], role=role, time=saved_time,
+                           place="、".join(places) or role,
                            continuous_duty=role == "值班" and len(group) > 1)
         return True, f"{volunteer['姓名']} 已签到\n\n岗位：{role}\n安排：{job_text}\n\n同岗位连续换地点无需重新签到；系统将按岗位结束时间自动签退。"
 
@@ -483,7 +489,7 @@ def sign_in(volunteer_id: str, pin: str, role: str, card_no: str = "", assignmen
                 fallback_walk_in, fallback_remark
             ))
     if receipt is not None:
-        receipt.update(name=volunteer["姓名"], role=role, time=saved_time)
+        receipt.update(name=volunteer["姓名"], role=role, place=role, time=saved_time)
     if fixed_altar:
         return True, f"{volunteer['姓名']} 已按固定佛台安排签到\n\n岗位：佛台\n\n系统将按岗位结束时间自动签退。"
     return True, f"{volunteer['姓名']} 已签到\n\n今天没有正式排班记录。\n已登记：{role}\n\n系统将按岗位结束时间自动签退。"

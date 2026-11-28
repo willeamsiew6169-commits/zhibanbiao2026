@@ -383,6 +383,7 @@ PAGE = """
     .signin-role-button .role-time{display:block;font-size:17px;font-weight:700;color:#345}
     .signin-role-button .role-action{display:block;font-size:19px;color:#087b3e}
     @media(max-width:700px){.signin-role-button{min-height:104px;font-size:26px;padding:19px 17px}}
+    .signin-action-hint{margin:0 0 12px;color:#245b3a;font-size:17px;font-weight:700;line-height:1.5}
     .center { text-align:center; }
     .small-note { font-size:16px; color:#666; margin-top:10px; text-align:center; }
     .two-card-grid {
@@ -587,15 +588,18 @@ PAGE = """
 
   }
 
-    /* 验证 PIN 后的签到确认弹窗；仅前端展示，不改变后台签到规则。 */
+    /* 验证 PIN 后的岗位选择弹窗；仅前端展示，不改变后台签到规则。 */
     .signin-modal-mask{position:fixed;inset:0;background:rgba(15,23,42,.64);z-index:10000;display:none;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
     .signin-modal-card{width:min(100%,520px);max-height:90vh;overflow-y:auto;background:white;border-radius:22px;padding:24px;box-sizing:border-box;box-shadow:0 20px 60px rgba(0,0,0,.3);color:#172033}
     .signin-modal-card h2{font-size:27px;margin:0 0 18px;text-align:center}
+    .signin-modal-hint{margin:0 0 12px;color:#245b3a;font-size:18px;font-weight:700;line-height:1.5;text-align:center}
     .signin-modal-choice{display:block;width:100%;border:2px solid #16834a;background:#e5f8ed;color:#115d35;border-radius:16px;text-align:left;padding:17px;margin:12px 0;font-size:21px;font-weight:800;cursor:pointer}
     .signin-modal-choice .shift-details{display:block;font-size:17px;font-weight:600;margin-top:5px}
-    .signin-modal-confirm{display:block;width:100%;background:#138447;color:#fff;border:0;border-radius:16px;padding:18px;font-size:24px;font-weight:900;cursor:pointer;margin-top:15px}
-    .signin-modal-cancel{display:block;width:100%;background:#f1f3f5;color:#495057;border:0;border-radius:14px;padding:13px;font-size:18px;cursor:pointer;margin-top:12px}
-    .vol-dialog-actions .signin-modal-cancel{background:#0756a8;color:#fff;font-weight:700}
+    .signin-modal-choice .role-action{display:block;margin-top:8px;color:#087b3e;font-size:19px;font-weight:900}
+    .signin-modal-cancel{display:block;width:100%;min-height:48px;background:#fff;color:#495057;border:1px solid #8b949e;border-radius:14px;padding:11px 13px;font-size:18px;font-weight:600;cursor:pointer;margin-top:12px}
+    .signin-modal-cancel:hover{background:#f3f5f6}
+    .signin-modal-cancel:focus-visible{outline:3px solid #68737d;outline-offset:2px}
+    .vol-dialog-actions .signin-modal-cancel{background:#fff;color:#495057;border:1px solid #8b949e;font-weight:600}
     .signin-modal-card .form-input{width:100%;box-sizing:border-box;font-size:21px;min-height:54px}
     @media(max-width:700px){.signin-modal-card{padding:20px}.signin-modal-card h2{font-size:24px}}
   </style>
@@ -760,6 +764,7 @@ PAGE = """
 
   <div class="card" id="signinFormCard">
     <h2 class="section-title">✅ {{ t.check_in }}</h2>
+    <p id="signinInlineHint" class="signin-action-hint" hidden>{{ '点击下方绿色按钮即可完成签到' if t.html_lang.startswith('zh') else 'Tap a green button below to complete check-in.' }}</p>
 
     <form method="post" id="volunteerSigninForm" data-vol-submit
           data-vol-status="#signinSubmitStatus" data-vol-records="{{ url_for('index', attendance=1) }}#todayAttendanceList"
@@ -859,6 +864,7 @@ PAGE = """
             </label>
 
             <div id="signinRoleButtons" class="signin-role-list" aria-live="polite"></div>
+            <div id="signinInlineStatus"></div>
             <select
                 class="form-input"
                 style="display:none"
@@ -930,9 +936,8 @@ PAGE = """
   <div class="signin-modal-card vol-dialog-card">
     <h2 id="signinModalTitle"></h2>
     <div id="signinModalContent" class="vol-dialog-content"></div>
-    <div class="vol-dialog-actions">
+    <div class="vol-dialog-actions" id="signinModalActions">
       <p id="signinSubmitStatus" class="vol-action-status" role="status"></p>
-      <button id="signinConfirm" type="button" class="signin-modal-confirm" data-vol-lock="volunteerSigninForm" style="display:none">{{ '✅ 确认签到' if t.html_lang.startswith('zh') else '✅ Confirm check-in' }}</button>
       <button type="button" class="signin-modal-cancel" data-vol-lock="volunteerSigninForm" onclick="closeSigninModal()">{{ '暂不签到' if t.html_lang.startswith('zh') else 'Not now' }}</button>
     </div>
   </div>
@@ -1108,6 +1113,7 @@ function invalidateLookup() {
   roleSelect.innerHTML = '';
   roleSelect.add(new Option(TXT.lookup_placeholder, ''));
   document.getElementById('signinRoleButtons').replaceChildren();
+  document.getElementById('signinInlineHint').hidden=true;
   document.getElementById('card_no').value = '';
   toggleCardNo();
 }
@@ -1310,8 +1316,7 @@ function roleSortMinutes(value) {
   return hour * 60 + Number(match[2]);
 }
 
-// 智能排序仅影响弹窗显示；最终签到仍由原有表单和后台校验。
-let signinModalChoices = [];
+// 智能排序仅影响岗位显示；最终签到仍由原有表单和后台校验。
 function closeSigninModal(){document.getElementById('signinModal').style.display='none';}
 function signinModalNowMinutes(){
   const parts = new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Kuala_Lumpur',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date());
@@ -1322,13 +1327,13 @@ function showSigninModal(data){
   const title=document.getElementById('signinModalTitle');
   const content=document.getElementById('signinModalContent');
   content.replaceChildren();
-  document.getElementById('signinConfirm').style.display = 'none';
-  document.getElementById('signinSubmitStatus').textContent = LIST_LANG_ZH
-    ? '身份已验证，尚未签到。' : 'Identity verified. Check-in not submitted yet.';
+  const status=document.getElementById('signinSubmitStatus');
+  document.getElementById('signinModalActions').prepend(status);
+  status.textContent = '';
   const modal=document.getElementById('signinModal');
   const now=signinModalNowMinutes();
   const defaults={'卫生':'08:00','佛台':'08:00','供花':'08:00','供果':'08:00','供台':'06:00','膳食':'08:00','佛学班':'10:00'};
-  signinModalChoices=(data.eligible_roles||[]).map((item,index)=>{
+  const choices=(data.eligible_roles||[]).map((item,index)=>{
     const shifts=(data.today_assignments||[]).filter(a=>a.role===item.role && a.state==='pending' && (item.role!=='值班'||(data.eligible_duty_assignment_ids||[]).includes(Number(a.id))));
     shifts.sort((a,b)=>roleSortMinutes(a.start_time)-roleSortMinutes(b.start_time));
     const shift=shifts[0];
@@ -1337,69 +1342,63 @@ function showSigninModal(data){
     const current=now>=start && now<end;
     return {...item,shift,shifts,index,start,current,distance:current?0:Math.abs(now-start)};
   }).sort((a,b)=>Number(b.current)-Number(a.current)||a.distance-b.distance||a.index-b.index);
-  if (!signinModalChoices.length){
+  if (!choices.length){
     title.textContent=LIST_LANG_ZH?'⚠️ 当前没有可签到岗位':'⚠️ No eligible roles';
     modal.style.display='flex';return;
   }
   title.textContent=LIST_LANG_ZH?'请选择签到岗位':'Choose a role';
-  signinModalChoices.forEach((item,i)=>{
-    const btn=document.createElement('button');btn.type='button';btn.className='signin-modal-choice';
+  const hint=document.createElement('p');
+  hint.className='signin-modal-hint';
+  hint.textContent=LIST_LANG_ZH?'点击下方绿色按钮即可完成签到':'Tap a green button below to complete check-in.';
+  content.appendChild(hint);
+  const openRoles=(data.open_roles||[]);
+  choices.forEach(item=>{
+    const btn=document.createElement('button');btn.type='button';btn.className='signin-modal-choice';btn.dataset.volLock='volunteerSigninForm';
     const icons={'卫生':'🧹','佛台':'🙏','值班':'🏠','供台':'🌸','供花':'💐','供果':'🍎','膳食':'🍽️','佛学班':'📖'};
-    btn.textContent=(icons[item.role]||'✅')+' '+item.label;
+    const label=document.createElement('span');
+    label.textContent=(icons[item.role]||'✅')+' '+item.label;
+    btn.appendChild(label);
     if(item.shift){const details=document.createElement('span');details.className='shift-details';details.textContent=[item.shift.assigned_place,[item.shift.start_time,item.shift.end_time].filter(Boolean).join(' ～ ')].filter(Boolean).join(' · ');btn.appendChild(details);}
-    btn.addEventListener('click',()=>showSigninModalConfirm(i));content.appendChild(btn);
+    const rolesToClose=openRoles.filter(role=>!(role==='值班'&&item.role==='供台')&&!(role==='供台'&&item.role==='值班'));
+    if(rolesToClose.length){
+      const notice=document.createElement('span');
+      notice.className='shift-details';
+      notice.textContent=LIST_LANG_ZH
+        ? '选择后将自动结束「'+rolesToClose.map(r=>ROLE_LABELS[r]||r).join('、')+'」签到。'
+        : 'Choosing this role will automatically check out of '+rolesToClose.map(r=>ROLE_LABELS[r]||r).join(', ')+'.';
+      btn.appendChild(notice);
+    }
+    const action=document.createElement('span');
+    action.className='role-action';
+    action.textContent=LIST_LANG_ZH?'✅ 点击签到':'✅ Tap to check in';
+    btn.appendChild(action);
+    btn.addEventListener('click',()=>submitSigninRole(item));
+    content.appendChild(btn);
   });
   modal.style.display='flex';
 }
-function showSigninModalConfirm(index){
-  const item=signinModalChoices[index];if(!item)return;
-  const content=document.getElementById('signinModalContent');content.replaceChildren();
-  document.getElementById('signinSubmitStatus').textContent = LIST_LANG_ZH ? '尚未提交签到' : 'Check-in not submitted yet';
-  document.getElementById('signinModalTitle').textContent=LIST_LANG_ZH?'🟢 当前可签到':'🟢 Ready to check in';
-  const volunteerName=window.lastAttendanceLookup?.volunteer?.姓名 || '';
-  if(volunteerName){const name=document.createElement('div');name.style.cssText='text-align:center;font-size:24px;font-weight:900;margin:0 0 12px;color:#145b37';name.textContent=(LIST_LANG_ZH?'👤 义工姓名：':'👤 Volunteer: ')+volunteerName;content.appendChild(name);}
-  const info=document.createElement('div');info.style.cssText='text-align:center;font-size:22px;font-weight:800;line-height:1.7';
-  info.textContent=item.label;
-  content.appendChild(info);
-  const detail=document.createElement('div');detail.style.cssText='text-align:center;font-size:19px;margin:8px 0 20px;white-space:pre-line';
-  const shifts = item.role === '值班' ? item.shifts : item.shifts.slice(0, 1);
-  detail.textContent = shifts.length
-    ? shifts.map(shift => [shift.assigned_place, [shift.start_time, shift.end_time].filter(Boolean).join(' ～ ')].filter(Boolean).join(' · ')).join('\\n')
-    : (LIST_LANG_ZH ? '暂无正式排班时段' : 'No scheduled shift time');
-  content.appendChild(detail);
-  // 转换岗位：后台会在新岗位签到事务中结束上一岗位；不在前端提前签退。
-  const openRoles=(window.lastAttendanceLookup?.open_roles||[])
-    .filter(role=>!(role==='值班' && item.role==='供台') && !(role==='供台' && item.role==='值班'));
-  if(openRoles.length){
-    const note=document.createElement('div');
-    note.style.cssText='margin:14px 0;padding:13px;background:#fff8e6;border:1px solid #f1d99b;border-radius:12px;font-size:18px;line-height:1.6;text-align:center';
-    note.textContent=LIST_LANG_ZH
-      ? '确认后将自动结束「'+openRoles.map(r=>ROLE_LABELS[r]||r).join('、')+'」，并开始「'+item.label+'」签到。'
-      : 'Confirm to automatically check out of '+openRoles.map(r=>ROLE_LABELS[r]||r).join(', ')+' and check in to '+item.label+'.';
-    content.appendChild(note);
+function submitSigninRole(item){
+  if(!item)return;
+  if(verifiedLookupKey!==currentLookupKey()){closeSigninModal();alert(TXT.lookup_required_alert);return;}
+  const form=document.getElementById('volunteerSigninForm');
+  if(form.dataset.volBusy)return;
+  document.getElementById('role').value=item.role;
+  toggleCardNo();
+  refreshRoleAction();
+  const card=document.getElementById('card_no');
+  if(item.role==='值班'&&!card.value.trim()){
+    closeSigninModal();
+    document.getElementById('cardNoWarning').style.display='block';
+    card.focus();
+    return;
   }
-  let cardInput=null;
-  if(item.role==='值班'){
-    const label=document.createElement('label');label.textContent=LIST_LANG_ZH?'义工卡号':'Volunteer card number';label.style.cssText='display:block;font-size:20px;font-weight:700;margin-top:14px';
-    cardInput=document.createElement('input');cardInput.className='form-input';cardInput.placeholder=LIST_LANG_ZH?'请输入义工卡号':'Enter card number';cardInput.value=document.getElementById('card_no').value;
-    cardInput.id = label.htmlFor = 'signinModalCardNumber';
-    content.appendChild(label);content.appendChild(cardInput);
+  const status=document.getElementById('signinSubmitStatus');
+  if(document.getElementById('signinModal').style.display==='none'){
+    document.getElementById('signinInlineStatus').appendChild(status);
   }
-  const confirm=document.getElementById('signinConfirm');
-  confirm.style.display='block';
-  confirm.onclick=()=>{
-    if(verifiedLookupKey!==currentLookupKey()){closeSigninModal();alert(TXT.lookup_required_alert);return;}
-    if(cardInput){if(!cardInput.value.trim()){document.getElementById('signinSubmitStatus').textContent=LIST_LANG_ZH?'请先填写义工卡号':'Enter your volunteer card number first';cardInput.focus();return;}document.getElementById('card_no').value=cardInput.value.trim();}
-    document.getElementById('role').value=item.role;
-    toggleCardNo();refreshRoleAction();
-    // 旧函数 toggleCardNo 不会清空卡号；复用原来的 quickSignIn 和 POST。
-    const form = document.getElementById('volunteerSigninForm');
-    form.dataset.volConfirmed = 'true';
-    document.getElementById('signinSubmit').click();
-    delete form.dataset.volConfirmed;
-  };
-  if(signinModalChoices.length>1){const back=document.createElement('button');back.type='button';back.className='signin-modal-cancel';back.textContent=LIST_LANG_ZH?'← 返回选择岗位':'← Choose another role';back.addEventListener('click',()=>showSigninModal(window.lastAttendanceLookup));content.appendChild(back);}
-  document.getElementById('signinModal').style.display='flex';
+  form.dataset.volConfirmed='true';
+  try{document.getElementById('signinSubmit').click();}
+  finally{delete form.dataset.volConfirmed;}
 }
 
 function renderSigninRoleButtons(data, verified) {
@@ -1424,15 +1423,15 @@ function renderSigninRoleButtons(data, verified) {
       button.appendChild(time);
     }
     const action = document.createElement('span'); action.className='role-action';
-    action.textContent = LIST_LANG_ZH ? '👆 点击此岗位签到' : '👆 Tap to check in';
+    action.textContent = LIST_LANG_ZH ? '✅ 点击签到' : '✅ Tap to check in';
     button.appendChild(action);
     button.addEventListener('click', () => {
       if (verifiedLookupKey !== currentLookupKey()) {alert(TXT.lookup_required_alert);return;}
-      showSigninModal(data);
-      showSigninModalConfirm(signinModalChoices.findIndex(choice => choice.role === item.role));
+      submitSigninRole(item);
     });
     holder.appendChild(button);
   });
+  document.getElementById('signinInlineHint').hidden = !roles.length;
   if (!roles.length) holder.textContent = TXT.no_eligible_role;
 }
 
@@ -2164,12 +2163,12 @@ def do_sign_in():
 
     if ok:
         if get_lang() == "zh":
-            result = f"义工姓名：{receipt['name']}\n岗位：{receipt['role']}\n签到时间：{receipt['time']}"
+            result = f"义工姓名：{receipt['name']}\n岗位：{receipt['role']}\n地点：{receipt['place']}\n签到时间：{receipt['time']}"
             if receipt.get("continuous_duty"):
                 result += "\n同岗位连续换地点无需重新签到。"
             result += "\n系统将按岗位结束时间自动签退。"
         else:
-            result = f"Volunteer: {receipt['name']}\nRole: {role_label(receipt['role'])}\nCheck-in time: {receipt['time']}"
+            result = f"Volunteer: {receipt['name']}\nRole: {role_label(receipt['role'])}\nLocation: {receipt['place']}\nCheck-in time: {receipt['time']}"
             if receipt.get("continuous_duty"):
                 result += "\nNo need to check in again when moving between locations in the same continuous duty shift."
             result += "\nThe system will automatically check you out at the end of your shift."

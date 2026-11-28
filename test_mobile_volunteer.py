@@ -1,6 +1,6 @@
 """Offline browser and route checks. Run: python test_mobile_volunteer.py.
 
-Requires Flask, Playwright, Chromium (playwright install chromium), and tzdata
+Requires Flask, Playwright, Chromium, WebKit (playwright install chromium webkit), and tzdata
 on hosts without IANA time zones. Optionally set PLAYWRIGHT_CHROMIUM_EXECUTABLE.
 The app is assembled from real templates and selected functions. No production
 modules that connect to a database or send notifications are imported.
@@ -281,6 +281,9 @@ def run_browser(app, db):
                 signin_entry_cases(browser, origin, db, device, playwright.devices[device])
             browser_cases(browser, origin, db)
             browser.close()
+            safari = playwright.webkit.launch()
+            signin_entry_cases(safari, origin, db, 'iPhone Safari (WebKit)', playwright.devices['iPhone SE'])
+            safari.close()
     finally:
         server.shutdown()
         server.server_close()
@@ -369,9 +372,10 @@ def signin_entry_cases(browser, origin, db, device, settings):
         modal = page.locator('#signinModal')
         expect(modal).to_contain_text('当前没有可签到岗位' if lang == 'zh' else 'No eligible roles')
         cancel = modal.get_by_role('button', name='暂不签到' if lang == 'zh' else 'Not now')
-        expect(cancel).to_have_css('background-color', 'rgb(7, 86, 168)')
-        expect(cancel).to_have_css('color', 'rgb(255, 255, 255)')
-        expect(cancel).to_have_css('font-weight', '700')
+        expect(cancel).to_have_css('background-color', 'rgb(255, 255, 255)')
+        expect(cancel).to_have_css('color', 'rgb(73, 80, 87)')
+        expect(cancel).to_have_css('border-color', 'rgb(139, 148, 158)')
+        expect(cancel).to_have_css('font-weight', '600')
         assert cancel.bounding_box()['height'] >= 48
         in_view(page, cancel)
         cancel.click()
@@ -385,28 +389,48 @@ def signin_entry_cases(browser, origin, db, device, settings):
         pin.fill('0123')
         pin.fill('1234')
         expect(modal.locator('.signin-modal-choice')).to_have_count(2)
+        expect(page.locator('.signin-action-hint')).to_have_text(
+            '点击下方绿色按钮即可完成签到' if lang == 'zh' else 'Tap a green button below to complete check-in.')
+        expect(page.locator('#signinSubmitStatus')).to_be_empty()
+        expect(modal.locator('.signin-modal-hint')).to_be_visible()
+        expect(page.locator('#signinConfirm')).to_have_count(0)
+        expect(modal).not_to_contain_text('身份已验证' if lang == 'zh' else 'Identity verified')
+        expect(modal.locator('.signin-modal-choice').filter(has_text=re.compile('卫生|Cleaning'))).to_contain_text(
+            '自动结束' if lang == 'zh' else 'automatically check out')
         modal.locator('.signin-modal-choice').filter(has_text=re.compile('值班|Duty')).click()
-        expect(modal.locator('#signinModalContent')).to_contain_text('观音堂')
-        expect(modal.locator('#signinModalContent')).to_contain_text('活动中心')
-        expect(modal.locator('#signinModalContent')).not_to_contain_text('已完成地点')
-        expect(modal.locator('#signinModalContent')).to_contain_text('自动结束' if lang == 'zh' else 'automatically check out')
-        modal.locator('#signinModalCardNumber').focus()
-        page.evaluate("""() => {
-            Object.defineProperty(visualViewport, 'height', {configurable: true, value: 290});
-            visualViewport.dispatchEvent(new Event('resize'));
-        }""")
-        in_view(page, modal.locator('#signinConfirm'))
-        in_view(page, cancel)
-        modal.locator('#signinModalContent .signin-modal-cancel').click()
-        modal.locator('.signin-modal-choice').filter(has_text=re.compile('卫生|Cleaning')).click()
-        modal.locator('#signinConfirm').click()
+        expect(modal).to_be_hidden()
+        expect(page.locator('#cardNoWarning')).to_be_visible()
+        expect(page.locator('#card_no')).to_be_focused()
+        assert not db.saved
+        cleaning_card = page.locator('.signin-role-button').filter(has_text=re.compile('卫生|Cleaning'))
+        expect(cleaning_card).to_contain_text('点击签到' if lang == 'zh' else 'Tap to check in')
+        # The missing duty card number intentionally focuses its input. WebKit
+        # may scroll that input into view and leave other roles below the fold.
+        # Verify the focused input, then simulate scrolling to another role.
+        expect(page.locator('#card_no')).to_be_in_viewport(ratio=1)
+        cleaning_card.scroll_into_view_if_needed()
+        expect(cleaning_card).to_be_in_viewport(ratio=1)
+        in_view(page, cleaning_card)
+        db.mode = 'delay'
+        cleaning_card.click(position={'x': 12, 'y': 12})
+        expect(page.locator('#signinInlineStatus #signinSubmitStatus')).to_be_visible()
+        expect(cleaning_card).to_be_disabled()
+        expect(modal).to_be_hidden()
         receipt = page.locator('#signinSuccessNotice')
+        expect(receipt).to_contain_text(VOLUNTEER['姓名'])
+        expect(receipt).to_contain_text('岗位：卫生' if lang == 'zh' else 'Role: Cleaning')
+        expect(receipt).to_contain_text('地点：卫生' if lang == 'zh' else 'Location: 卫生')
+        expect(receipt).to_contain_text('签到时间：11:42am' if lang == 'zh' else 'Check-in time: 11:42am')
         expect(receipt).to_contain_text('自动签退' if lang == 'zh' else 'automatically check you out')
         assert db.close_calls == [('CHE-208', '卫生')]
+        assert len([args for sql, args in db.saved if sql.startswith('insert into attendance')]) == 1
+        if lang == 'zh':
+            page.wait_for_timeout(10200)
+            expect(receipt).to_be_visible()
         receipt.get_by_role('link').click()
         expect(receipt).to_have_count(0)
         expect(page.locator('#pin')).to_have_value('')
-        print(f'PASS | {device}, {lang}: admin entry, stale PIN, wrong PIN, completed duties, blue dismiss, role switching and receipt')
+        print(f'PASS | {device}, {lang}: PIN checks, direct role check-in, required duty card, secondary cancel and persistent receipt')
     context.close()
 
 
@@ -557,27 +581,21 @@ def browser_cases(browser, origin, db):
         expect(page.locator('.signin-modal-choice').first).to_be_visible()
         expect(page.locator('#pin')).to_have_attribute('autocomplete', 'off')
         expect(page.locator('#pin')).not_to_be_focused()
-        expect(page.locator('#signinSubmitStatus')).to_contain_text(re.compile('身份已验证|Identity verified'))
+        expect(page.locator('#signinSubmitStatus')).to_be_empty()
+        expect(page.locator('.signin-action-hint')).to_be_visible()
+        expect(page.locator('#signinConfirm')).to_have_count(0)
         assert not db.saved
-        if mode == 'delay':
-            page.locator('.signin-modal-choice').filter(has_text='值班').click()
-            expect(page.locator('#signinModalContent')).to_contain_text('观音堂')
-            expect(page.locator('#signinModalContent')).to_contain_text('活动中心')
-            page.locator('#signinConfirm').click()
-            expect(page.locator('#signinSubmitStatus')).to_contain_text('请先填写义工卡号')
-            assert not db.saved
-            page.get_by_role('button', name='返回选择岗位').click()
-        page.locator('.signin-modal-choice').filter(has_text=re.compile('卫生|Cleaning')).click()
-        expect(page.locator('#signinModalContent')).to_contain_text(VOLUNTEER['姓名'])
-        expect(page.locator('#signinSubmitStatus')).to_contain_text(re.compile('尚未提交|not submitted'))
-        in_view(page, page.locator('#signinConfirm'))
-        in_view(page, page.locator('.vol-dialog-actions .signin-modal-cancel'))
+        role_card = page.locator('.signin-modal-choice').filter(has_text=re.compile('卫生|Cleaning'))
+        role_card.evaluate('(button) => { button.click(); button.click(); }')
         if language == 'zh':
-            page.screenshot(path=OUTPUT / 'signin-confirm-390.png')
-        page.locator('#signinConfirm').evaluate('(button) => { button.click(); button.click(); }')
+            page.screenshot(path=OUTPUT / 'signin-direct-390.png')
         if mode == 'delay':
+            expect(page.locator('#signinModal')).to_be_visible()
+            expect(page.locator('#signinSubmitStatus')).to_be_visible()
             expect(page.locator('#signinSubmitStatus')).to_contain_text('正在处理')
             expect(page.locator('#signinSuccessNotice')).to_contain_text('11:42am')
+            expect(page.locator('#signinSuccessNotice')).to_contain_text(VOLUNTEER['姓名'])
+            expect(page.locator('#signinSuccessNotice')).to_contain_text('地点：卫生')
             expect(page.locator('#signinSuccessNotice')).to_contain_text('自动签退')
             expect(page.locator('#signinSuccessNotice')).not_to_contain_text('连续换地点')
             attendance_rows = [args for sql, args in db.saved if sql.startswith('insert into attendance')]
@@ -588,16 +606,18 @@ def browser_cases(browser, origin, db):
             expect(page.locator('#signinSuccessNotice')).to_be_visible()
             page.screenshot(path=OUTPUT / 'signin-success-390.png')
         elif mode == 'unknown':
+            expect(page.locator('#signinModal')).to_be_visible()
             expect(page.locator('#signinSubmitStatus')).to_contain_text('result is unknown')
             expect(page.get_by_role('link', name='Check records')).to_be_visible()
-            expect(page.locator('#signinConfirm')).to_be_disabled()
+            expect(page.locator('.vol-dialog-actions .signin-modal-cancel')).to_be_disabled()
             assert db.saved
             page.screenshot(path=OUTPUT / 'signin-unknown-390.png')
         else:
+            expect(page.locator('#signinModal')).to_be_hidden()
             expect(page.locator('[data-vol-result]')).to_contain_text('Check-in incomplete')
             expect(page.locator('[data-vol-result]')).to_contain_text('Incorrect volunteer PIN')
             assert not db.saved
-    print('PASS | Check-in selection, review, one POST, saved time, persistent success, failure, unknown result')
+    print('PASS | Direct check-in, one POST, saved time, persistent success, failure and unknown result')
 
     db.reset()
     db.sync_failed = True
@@ -702,6 +722,7 @@ def route_cases(app, db):
             response = client.post('/signin', data={'volunteer_id': '208', 'pin': '1234', 'role': '值班',
                                                     'card_no': 'CARD-TEST', 'assignment_id': '1'}, follow_redirects=True)
     assert '11:42am' in response.get_data(as_text=True)
+    assert 'Location: 观音堂、活动中心' in response.get_data(as_text=True)
     assert 'moving between locations' in response.get_data(as_text=True)
     assert 'automatically check you out' in response.get_data(as_text=True)
     assert db.saved[0][1][6] == '11:42am' and 'assignment_ids=1,2' in db.saved[0][1][-1]
